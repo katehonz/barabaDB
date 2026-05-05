@@ -22,6 +22,11 @@ import barabadb/query/ir as qir
 import barabadb/query/codegen
 import barabadb/query/udf
 import barabadb/vector/simd
+import barabadb/core/crossmodal
+import barabadb/core/gossip
+import barabadb/client/client
+import barabadb/client/fileops
+import barabadb/fts/multilang as mlang
 import barabadb/vector/engine as vengine
 import barabadb/vector/quant as vquant
 import barabadb/graph/engine as gengine
@@ -1254,3 +1259,226 @@ suite "Vector SIMD":
     let results = batchDistance(queries, corpus, "cosine")
     check results.len == 2
     check results[0].len == 3
+
+suite "Cross-Modal Engine":
+  test "Create engine":
+    let engine = newCrossModalEngine("/tmp/baradb_test_crossmodal")
+    check engine != nil
+
+  test "Document operations":
+    let engine = newCrossModalEngine("/tmp/baradb_test_crossmodal2")
+    engine.put("key1", cast[seq[byte]]("value1"))
+    let (found, val) = engine.get("key1")
+    check found
+    check cast[string](val) == "value1"
+
+  test "Vector operations":
+    let engine = newCrossModalEngine("/tmp/baradb_test_crossmodal3")
+    engine.insertVector(1, @[1.0'f32, 0.0'f32, 0.0'f32], {"cat": "A"}.toTable)
+    engine.insertVector(2, @[0.0'f32, 1.0'f32, 0.0'f32], {"cat": "B"}.toTable)
+    let results = engine.searchVector(@[1.0'f32, 0.1'f32, 0.0'f32], 2)
+    check results.len == 2
+
+  test "Graph operations":
+    let engine = newCrossModalEngine("/tmp/baradb_test_crossmodal4")
+    let n1 = engine.addNode("Person")
+    let n2 = engine.addNode("Person")
+    discard engine.addEdge(n1, n2, "knows")
+    let traversal = engine.traverseGraph(n1, "bfs")
+    check traversal.len >= 1
+
+  test "FTS operations":
+    let engine = newCrossModalEngine("/tmp/baradb_test_crossmodal5")
+    engine.indexText(1, "Nim programming language")
+    engine.indexText(2, "Python data science")
+    let results = engine.searchText("programming")
+    check results.len >= 1
+
+  test "2PC transaction":
+    var txn = newTPCTransaction(1)
+    txn.addParticipant("storage")
+    txn.addParticipant("vector")
+    txn.addParticipant("graph")
+    check txn.participantCount == 3
+    check txn.prepare()
+    check txn.isPrepared
+    check txn.commit()
+    check txn.isCommitted
+
+  test "2PC rollback":
+    var txn = newTPCTransaction(2)
+    txn.addParticipant("storage")
+    txn.addParticipant("vector")
+    check txn.prepare()
+    check txn.rollback()
+    check txn.isAborted
+
+  test "Hybrid query":
+    let engine = newCrossModalEngine("/tmp/baradb_test_crossmodal6")
+    engine.insertVector(1, @[1.0'f32, 0.0'f32], {"cat": "A"}.toTable)
+    engine.indexText(1, "fast database")
+    var query = newCrossModalQuery(qmHybrid)
+    query.vector = @[1.0'f32, 0.0'f32]
+    query.vectorK = 5
+    query.searchQuery = "fast"
+    query.vecWeight = 1.0
+    query.ftsWeight = 1.0
+    let result = engine.hybridSearch(query)
+    check result.totalResults >= 0
+
+suite "Gossip Protocol":
+  test "Create gossip node":
+    var gp = newGossipProtocol("node1", "10.0.0.1", 7946)
+    check gp.self.id == "node1"
+    check gp.memberCount == 0
+
+  test "Add members":
+    var gp = newGossipProtocol("node1", "10.0.0.1", 7946)
+    let node2 = newGossipNode("node2", "10.0.0.2", 7946)
+    let node3 = newGossipNode("node3", "10.0.0.3", 7946)
+    gp.addMember(node2)
+    gp.addMember(node3)
+    check gp.memberCount == 2
+    check gp.aliveCount == 2
+
+  test "Suspect and declare dead":
+    var gp = newGossipProtocol("node1", "10.0.0.1", 7946)
+    let node2 = newGossipNode("node2", "10.0.0.2", 7946)
+    gp.addMember(node2)
+    gp.suspect("node2")
+    check gp.getMember("node2").state == nsSuspect
+    gp.declareDead("node2")
+    check gp.memberCount == 1
+
+  test "Gossip message":
+    var gp = newGossipProtocol("node1", "10.0.0.1", 7946)
+    let node2 = newGossipNode("node2", "10.0.0.2", 7946)
+    gp.addMember(node2)
+    let msg = gp.createGossipMessage()
+    check msg.senderId == "node1"
+    check msg.nodes.len == 1
+
+  test "Select gossip targets":
+    var gp = newGossipProtocol("node1", "10.0.0.1", 7946, fanout = 2)
+    for i in 2..5:
+      gp.addMember(newGossipNode("node" & $i, "10.0.0." & $i, 7946))
+    let targets = gp.selectGossipTargets()
+    check targets.len <= 2
+
+  test "Member IDs":
+    var gp = newGossipProtocol("node1", "10.0.0.1", 7946)
+    gp.addMember(newGossipNode("node2", "10.0.0.2", 7946))
+    check gp.isMember("node2")
+    check not gp.isMember("node99")
+
+suite "Client Library":
+  test "Connection string parser":
+    let config = parseConnectionString("host=localhost port=5432 dbname=test user=admin")
+    check config.host == "localhost"
+    check config.port == 5432
+    check config.database == "test"
+    check config.username == "admin"
+
+  test "Client config defaults":
+    let config = defaultClientConfig()
+    check config.host == "127.0.0.1"
+    check config.port == 5432
+
+  test "Query builder":
+    let client = newBaraClient()
+    let qb = newQueryBuilder(client)
+    let sql = qb.select("name", "age").from("users")
+      .where("age > 18").orderBy("name", "ASC").limit(10).build()
+    check sql == "SELECT name, age FROM users WHERE age > 18 ORDER BY name ASC LIMIT 10"
+
+  test "Query builder with JOIN":
+    let client = newBaraClient()
+    let qb = newQueryBuilder(client)
+    let sql = qb.select("u.name", "o.total")
+      .from("users u").join("orders o", "u.id = o.user_id")
+      .where("o.total > 100").build()
+    check "JOIN" in sql
+    check "WHERE" in sql
+
+  test "Query builder with GROUP BY":
+    let client = newBaraClient()
+    let qb = newQueryBuilder(client)
+    let sql = qb.select("dept", "count(*)").from("employees")
+      .groupBy("dept").having("count(*) > 5").build()
+    check "GROUP BY" in sql
+    check "HAVING" in sql
+
+suite "Import/Export":
+  test "JSON export":
+    let columns = @["name", "age"]
+    let rows = @[@["Alice", "30"], @["Bob", "25"]]
+    let json = fileops.toJson(columns, rows)
+    check json.startsWith("[")
+    check "Alice" in json
+
+  test "CSV export":
+    let columns = @["name", "age"]
+    let rows = @[@["Alice", "30"], @["Bob", "25"]]
+    let csv = fileops.toCsv(columns, rows)
+    check csv.startsWith("name,age")
+    check "Alice" in csv
+
+  test "JSON import":
+    let json = """[{"name": "Alice", "age": "30"}, {"name": "Bob", "age": "25"}]"""
+    let (columns, rows) = fileops.parseJsonTable(json)
+    check columns.len == 2
+    check rows.len == 2
+
+  test "CSV import":
+    let csv = "name,age\nAlice,30\nBob,25"
+    let (columns, rows) = fileops.parseCsvTable(csv)
+    check columns.len == 2
+    check rows.len == 2
+    check rows[0][0] == "Alice"
+
+  test "NDJSON export/import":
+    let columns = @["name", "age"]
+    let rows = @[@["Alice", "30"]]
+    let ndjson = fileops.toNdjson(columns, rows)
+    check "Alice" in ndjson
+
+  test "CSV with quoted fields":
+    let csv = "name,bio\nAlice,\"Software engineer, Nim\"\nBob,Data scientist"
+    let (columns, rows) = fileops.parseCsvTable(csv)
+    check rows.len == 2
+
+suite "Multi-Language FTS":
+  test "English tokenizer":
+    let config = mlang.getLanguageConfig(mlang.langEnglish)
+    let tokens = mlang.tokenize("The quick brown fox jumps over the lazy dog", config)
+    check tokens.len > 0
+    check "the" notin tokens  # stop word
+
+  test "Bulgarian tokenizer":
+    let config = mlang.getLanguageConfig(mlang.langBulgarian)
+    let tokens = mlang.tokenize("Бързата кафява лисица прескача мързеливото куче", config)
+    check tokens.len > 0
+
+  test "German tokenizer":
+    let config = mlang.getLanguageConfig(mlang.langGerman)
+    let tokens = mlang.tokenize("Der schnelle braune Fuchs springt über den faulen Hund", config)
+    check tokens.len > 0
+    check "der" notin tokens
+
+  test "Russian tokenizer":
+    let config = mlang.getLanguageConfig(mlang.langRussian)
+    let tokens = mlang.tokenize("Быстрая браун лиса прыгает через ленивую собаку", config)
+    check tokens.len > 0
+
+  test "Language detection":
+    check mlang.detectLanguage("Hello world how are you") == mlang.langEnglish
+    # Bulgarian text is also Cyrillic — detected as Russian by default
+    check mlang.detectLanguage("Здравей свят как си") == mlang.langRussian
+
+  test "English stemming":
+    check mlang.stemEnglish("running") == "runn"
+    check mlang.stemEnglish("cats") == "cat"
+    check mlang.stemEnglish("programming") == "programm"
+
+  test "Bulgarian stemming":
+    check mlang.stemBulgarian("красота") == "красот"  # -та suffix
