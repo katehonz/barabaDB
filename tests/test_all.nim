@@ -27,6 +27,9 @@ import barabadb/core/gossip
 import barabadb/client/client
 import barabadb/client/fileops
 import barabadb/fts/multilang as mlang
+import barabadb/protocol/zerocopy
+import barabadb/query/adaptive
+import barabadb/core/disttxn
 import barabadb/vector/engine as vengine
 import barabadb/vector/quant as vquant
 import barabadb/graph/engine as gengine
@@ -1481,4 +1484,193 @@ suite "Multi-Language FTS":
     check mlang.stemEnglish("programming") == "programm"
 
   test "Bulgarian stemming":
-    check mlang.stemBulgarian("красота") == "красот"  # -та suffix
+    check mlang.stemBulgarian("красота") == "красот"
+
+suite "Zero-Copy Serialization":
+  test "Write and read int32":
+    var buf = newZeroBuf(64)
+    buf.writeInt32(42)
+    check buf.readInt32(0) == 42
+    buf.free()
+
+  test "Write and read int64":
+    var buf = newZeroBuf(64)
+    buf.writeInt64(12345)
+    check buf.readInt64(0) == 12345
+    buf.free()
+
+  test "Write and read bool":
+    var buf = newZeroBuf(64)
+    buf.writeBool(true)
+    check buf.readBool(0)
+    buf.free()
+
+  test "ZcSchema field offsets":
+    var schema = newZcSchema("user")
+    schema.addField("id", ztInt64)
+    schema.addField("name", ztString)
+    check schema.fields.len == 2
+    check schema.totalSize > 0
+
+  test "Encode and decode record":
+    var schema = newZcSchema("user")
+    schema.addField("id", ztInt32)
+    var buf = newZeroBuf(schema.totalSize)
+    buf.pos = schema.totalSize  # pretend we wrote
+    buf.encodeRecord(schema, {"id": "42"}.toTable)
+    # Reset pos for reading at offsets
+    var pos = 0
+    let row = buf.decodeRecord(schema)
+    check row["id"] == "42"
+    buf.free()
+
+  test "ZcTable batch operations":
+    var schema = newZcSchema("user")
+    schema.addField("id", ztInt32)
+    var table = newZcTable(schema)
+    var buf1 = newZeroBuf(schema.totalSize)
+    buf1.encodeRecord(schema, {"id": "1"}.toTable)
+    table.records.add(buf1)
+    var buf2 = newZeroBuf(schema.totalSize)
+    buf2.encodeRecord(schema, {"id": "2"}.toTable)
+    table.records.add(buf2)
+    table.totalRows = 2
+    check table.totalRows == 2
+    check table.getRecord(1)["id"] == "2"
+    for i in 0..<table.records.len:
+      table.records[i].free()
+
+suite "Adaptive Query Execution":
+  test "Cardinality estimation":
+    var planner = newAdaptivePlanner()
+    planner.updateCardinality("users", 500)
+    check planner.estimateRows("users") == 500
+
+  test "Should reoptimize":
+    var planner = newAdaptivePlanner()
+    check planner.shouldReoptimize(100, 500)  # 5x more
+    check not planner.shouldReoptimize(100, 200)  # 2x more (below threshold)
+
+  test "Plan cache":
+    var planner = newAdaptivePlanner()
+    let plan = QueryPlan(estimatedCost: 10.0, estimatedRows: 100)
+    planner.cachePlan("SELECT * FROM users", plan)
+    check planner.cacheSize == 1
+    let cached = planner.getCachedPlan("SELECT * FROM users")
+    check cached != nil
+
+  test "Execution context parallelization":
+    var ctx = newExecutionContext(enScan)
+    ctx.table = "big_table"
+    ctx.parallelHint = ParallelHint(canParallelize: true, estimatedPartitions: 4, dataSize: 10_000_000)
+    check ctx.canParallelize()
+    check ctx.estimateParallelism(8) == 4
+
+  test "Execution plan explain":
+    var root = newExecutionContext(enScan)
+    root.table = "users"
+    root.estimatedRows = 1000
+    var filter = newExecutionContext(enFilter)
+    filter.estimatedRows = 200
+    root.addChild(filter)
+    let plan = root.explain()
+    check "enScan" in plan
+    check "users" in plan
+
+suite "Distributed Transactions":
+  test "Create distributed transaction":
+    var txn = newDistributedTransaction("coordinator")
+    txn.addParticipant("node1", "10.0.0.1", 5432)
+    txn.addParticipant("node2", "10.0.0.2", 5432)
+    check txn.participantCount == 2
+
+  test "Two-phase commit flow":
+    var txn = newDistributedTransaction("coordinator")
+    txn.addParticipant("n1", "10.0.0.1", 5432)
+    check txn.prepare()
+    check txn.state() == dtsPrepared
+    check txn.commit()
+    check txn.isCommitted
+
+  test "Rollback dist transaction":
+    var txn = newDistributedTransaction("coordinator")
+    txn.addParticipant("n1", "10.0.0.1", 5432)
+    check txn.rollback()
+    check txn.isAborted
+
+  test "DistTxnManager lifecycle":
+    var tm = newDistTxnManager()
+    let txn = tm.beginTransaction("node1")
+    check tm.activeCount == 1
+    txn.addParticipant("n2", "10.0.0.2", 5432)
+    check txn.prepare()
+    check txn.commit()
+    tm.cleanupCompleted()
+    check tm.activeCount == 0
+
+  test "Saga pattern":
+    var saga = newSaga()
+    var executeCount = 0
+    var compensateCount = 0
+
+    saga.addStep(SagaStep(
+      name: "step1", nodeId: "n1",
+      execute: proc(): bool =
+        inc executeCount
+        return true,
+      compensate: proc() =
+        inc compensateCount))
+
+    saga.addStep(SagaStep(
+      name: "step2", nodeId: "n2",
+      execute: proc(): bool =
+        inc executeCount
+        return false,  # fails!
+      compensate: proc() =
+        inc compensateCount))
+
+    check not saga.execute()  # should fail at step2
+    check executeCount == 2
+    check compensateCount == 1  # step1 compensated
+
+suite "Vector Batch Operations":
+  test "Batch insert HNSW":
+    var idx = vengine.newHNSWIndex(3)
+    let batch = @[
+      (1'u64, @[1.0'f32, 0.0'f32, 0.0'f32]),
+      (2'u64, @[0.0'f32, 1.0'f32, 0.0'f32]),
+      (3'u64, @[0.0'f32, 0.0'f32, 1.0'f32]),
+    ]
+    vengine.batchInsert(idx, batch)
+    check vengine.len(idx) == 3
+
+  test "Batch search":
+    var idx = vengine.newHNSWIndex(3)
+    vengine.batchInsert(idx, @[
+      (1'u64, @[1.0'f32, 0.0'f32, 0.0'f32]),
+      (2'u64, @[0.0'f32, 1.0'f32, 0.0'f32]),
+    ])
+    let queries = @[@[1.0'f32, 0.0'f32, 0.0'f32], @[0.0'f32, 1.0'f32, 0.0'f32]]
+    let results = vengine.batchSearch(idx, queries, 2)
+    check results.len == 2
+
+  test "Index watcher auto-rebuild":
+    var watcher = newIndexWatcher(RebuildConfig(
+      maxUnindexedCount: 3, autoRebuild: true,
+      checkInterval: 0, rebuildThreshold: 0.5,
+    ))
+    watcher.trackUnindexed(5)  # 5 unindexed
+    check watcher.shouldRebuild()
+    watcher.markRebuilt()
+    let (total, unindexed, rebuilds) = watcher.stats()
+    check unindexed == 0
+    check rebuilds == 1
+
+  test "Rebuild threshold by ratio":
+    var watcher = newIndexWatcher(RebuildConfig(
+      autoRebuild: true, rebuildThreshold: 0.3,
+    ))
+    for i in 0..<100:
+      watcher.trackInsert()
+    watcher.trackUnindexed(40)  # 40% unindexed
+    check watcher.shouldRebuild()  # -та suffix

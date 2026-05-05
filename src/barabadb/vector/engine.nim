@@ -3,6 +3,7 @@ import std/math
 import std/algorithm
 import std/random
 import std/tables
+import std/monotimes
 
 type
   DistanceMetric* = enum
@@ -227,3 +228,96 @@ proc clear*(idx: HNSWIndex) =
   idx.nodes.clear()
   idx.entryPoint = 0
   idx.maxLevel = 0
+
+proc clear*(idx: IVFPQIndex) =
+  for i in 0..<idx.nClusters:
+    idx.clusters[i].entries.setLen(0)
+
+# Batch insert for HNSW
+proc batchInsert*(idx: HNSWIndex, batch: seq[(uint64, Vector)],
+                  metadata: seq[Table[string, string]] = @[]) =
+  for i, (id, vec) in batch:
+    var meta = initTable[string, string]()
+    if i < metadata.len:
+      meta = metadata[i]
+    idx.insert(id, vec, meta)
+
+# Batch insert for IVF-PQ
+proc batchInsert*(idx: IVFPQIndex, batch: seq[(uint64, Vector)]) =
+  var entries: seq[VectorEntry] = @[]
+  for (id, vec) in batch:
+    entries.add(VectorEntry(id: id, vector: vec, metadata: @[]))
+  idx.train(entries, nIterations = 5)
+
+# Batch search
+proc batchSearch*(idx: HNSWIndex, queries: seq[Vector], k: int,
+                  metric: DistanceMetric = dmCosine): seq[seq[(uint64, float64)]] =
+  result = newSeq[seq[(uint64, float64)]](queries.len)
+  for i, query in queries:
+    result[i] = idx.search(query, k, metric)
+
+# Auto-rebuild index when threshold exceeded
+type
+  RebuildConfig* = object
+    maxUnindexedCount*: int
+    checkInterval*: int64   # nanoseconds
+    rebuildThreshold*: float64  # ratio of unindexed/total to trigger rebuild
+    autoRebuild*: bool
+
+  IndexWatcher* = ref object
+    config: RebuildConfig
+    unindexedCount: int
+    totalCount: int
+    lastCheck: int64
+    lastRebuild: int64
+    rebuildsCount: int
+
+proc defaultRebuildConfig*(): RebuildConfig =
+  RebuildConfig(
+    maxUnindexedCount: 10000,
+    checkInterval: 60_000_000_000,  # 1 minute
+    rebuildThreshold: 0.1,  # 10% unindexed triggers rebuild
+    autoRebuild: true,
+  )
+
+proc newIndexWatcher*(config: RebuildConfig = defaultRebuildConfig()): IndexWatcher =
+  IndexWatcher(
+    config: config,
+    unindexedCount: 0,
+    totalCount: 0,
+    lastCheck: 0,
+    lastRebuild: 0,
+    rebuildsCount: 0,
+  )
+
+proc trackInsert*(watcher: IndexWatcher) =
+  inc watcher.totalCount
+
+proc trackUnindexed*(watcher: IndexWatcher, count: int = 1) =
+  watcher.unindexedCount += count
+
+proc shouldRebuild*(watcher: IndexWatcher): bool =
+  if not watcher.config.autoRebuild:
+    return false
+  if watcher.unindexedCount > watcher.config.maxUnindexedCount:
+    return true
+  if watcher.totalCount == 0:
+    return false
+  let ratio = float64(watcher.unindexedCount) / float64(watcher.totalCount)
+  if ratio > watcher.config.rebuildThreshold:
+    return true
+  return false
+
+proc markRebuilt*(watcher: IndexWatcher) =
+  watcher.unindexedCount = 0
+  inc watcher.rebuildsCount
+  watcher.lastRebuild = getMonoTime().ticks()
+
+proc stats*(watcher: IndexWatcher): (int, int, int) =
+  return (watcher.totalCount, watcher.unindexedCount, watcher.rebuildsCount)
+
+proc rebuildIfNeeded*(watcher: IndexWatcher, idx: HNSWIndex,
+                       rebuildFn: proc(idx: HNSWIndex)) =
+  if watcher.shouldRebuild():
+    rebuildFn(idx)
+    watcher.markRebuilt()
