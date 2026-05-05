@@ -94,34 +94,34 @@
 - [ ] Унифициран query interface през BaraQL
 - [ ] Cross-modal заявки (document + vector + graph в една заявка)
 
-### Фаза 4: Транзакции и ACID 🟡
+### Фаза 4: Транзакции и ACID ✅
 - [x] WAL (Write-Ahead Log) за durability
-- [ ] MVCC (Multi-Version Concurrency Control)
-- [ ] Snapshot isolation
-- [ ] Deadlock detection (wait-for graph)
+- [x] MVCC (Multi-Version Concurrency Control)
+- [x] Snapshot isolation
+- [x] Deadlock detection (wait-for graph)
+- [x] Savepoints и вложени транзакции
 - [ ] 2PC за cross-modal транзакции
-- [ ] Savepoints и вложени транзакции
 - [ ] Recovery при crash (REDO/UNDO)
 
-### Фаза 5: Мрежов протокол ⬜
-- [ ] TCP сървър с async I/O
-- [ ] Binary протокол (BaraDB Wire Protocol)
-- [ ] HTTP/REST API (JSON)
+### Фаза 5: Мрежов протокол 🟡
+- [x] TCP сървър с async I/O
+- [x] Binary протокол (BaraDB Wire Protocol)
+- [x] HTTP/REST API (JSON)
 - [ ] WebSocket за streaming
 - [ ] Connection pooling
 - [ ] Authentication (SCRAM-SHA-256, token)
 - [ ] TLS/SSL
 - [ ] Rate limiting
 
-### Фаза 6: Schema система ⬜
-- [ ] Декларативна schema (SDL)
-- [ ] Object types с properties
-- [ ] Links между типове (1:1, 1:N, N:M)
+### Фаза 6: Schema система ✅
+- [x] Декларативна schema (SDL)
+- [x] Object types с properties
+- [x] Links между типове (1:1, 1:N, N:M)
 - [ ] Наследоване и mixins
-- [ ] Constraints (unique, check, required)
+- [x] Constraints (unique, check, required)
 - [ ] Computed properties
-- [ ] Автоматични миграции (schema diff)
-- [ ] Версиониране на schema
+- [x] Автоматични миграции (schema diff)
+- [x] Версиониране на schema
 
 ### Фаза 7: Векторен engine ✅
 - [x] HNSW индекс (Hierarchical Navigable Small World)
@@ -191,13 +191,13 @@
 | 1. Ядро | ✅ Основно завършена | 70% |
 | 2. BaraQL | 🟡 В процес | 50% |
 | 3. Мултимодален storage | ✅ Основно завършена | 60% |
-| 4. Транзакции | 🟡 В процес | 15% |
-| 5. Протокол | ⬜ Не стартирана | 0% |
-| 6. Schema | ⬜ Не стартирана | 0% |
+| 4. Транзакции | ✅ Основно завършена | 80% |
+| 5. Протокол | 🟡 В процес | 50% |
+| 6. Schema | ✅ Основно завършена | 75% |
 | 7. Векторен engine | ✅ Завършена | 60% |
 | 8. Graph engine | ✅ Завършена | 70% |
 | 9. FTS | ✅ Завършена | 60% |
-| 10. Клиенти и CLI | ⬜ Не стартирана | 0% |
+| 10. Клиенти и CLI | ✅ Основно завършена | 60% |
 | 11. Кластер | ⬜ Не стартирана | 0% |
 | 12. Оптимизации | ⬜ Не стартирана | 0% |
 

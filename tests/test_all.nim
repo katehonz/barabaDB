@@ -1,8 +1,11 @@
 ## BaraDB — Test Suite
 import std/unittest
 import std/tables
+import std/strutils
 
 import barabadb/core/types
+import barabadb/core/mvcc
+import barabadb/core/deadlock
 import barabadb/storage/bloom
 import barabadb/storage/wal
 import barabadb/storage/lsm
@@ -12,6 +15,8 @@ import barabadb/query/parser
 import barabadb/vector/engine as vengine
 import barabadb/graph/engine as gengine
 import barabadb/fts/engine as fts
+import barabadb/protocol/wire
+import barabadb/schema/schema as schema
 
 suite "Core Types":
   test "Value creation":
@@ -235,3 +240,228 @@ suite "Full-Text Search":
 
     fts.removeDocument(idx, 1)
     check fts.documentCount(idx) == 1
+
+suite "MVCC Transactions":
+  test "Begin and commit transaction":
+    var tm = newTxnManager()
+    let txn = tm.beginTxn()
+    check txn.state == tsActive
+    check tm.write(txn, "key1", cast[seq[byte]]("value1"))
+    check tm.commit(txn)
+    check txn.state == tsCommitted
+
+  test "Read own writes":
+    var tm = newTxnManager()
+    let txn = tm.beginTxn()
+    discard tm.write(txn, "key1", cast[seq[byte]]("value1"))
+    let (found, val) = tm.read(txn, "key1")
+    check found
+    check val == cast[seq[byte]]("value1")
+    discard tm.commit(txn)
+
+  test "Abort transaction":
+    var tm = newTxnManager()
+    let txn = tm.beginTxn()
+    discard tm.write(txn, "key1", cast[seq[byte]]("value1"))
+    discard tm.abortTxn(txn)
+    check txn.state == tsAborted
+
+  test "Snapshot isolation — no dirty reads":
+    var tm = newTxnManager()
+    let txn1 = tm.beginTxn()
+    discard tm.write(txn1, "key1", cast[seq[byte]]("value1"))
+
+    let txn2 = tm.beginTxn()
+    let (found, _) = tm.read(txn2, "key1")
+    check not found  # txn2 can't see txn1's uncommitted write
+
+    discard tm.commit(txn1)
+    # txn2 still can't see it (snapshot taken before commit)
+    let (found2, _) = tm.read(txn2, "key1")
+    check not found2
+    discard tm.abortTxn(txn2)
+
+  test "Committed writes visible to new transactions":
+    var tm = newTxnManager()
+    let txn1 = tm.beginTxn()
+    discard tm.write(txn1, "key1", cast[seq[byte]]("value1"))
+    discard tm.commit(txn1)
+
+    let txn2 = tm.beginTxn()
+    let (found, val) = tm.read(txn2, "key1")
+    check found
+    check val == cast[seq[byte]]("value1")
+    discard tm.commit(txn2)
+
+  test "Savepoint and rollback":
+    var tm = newTxnManager()
+    let txn = tm.beginTxn()
+    discard tm.write(txn, "key1", cast[seq[byte]]("value1"))
+    tm.savepoint(txn)
+    discard tm.write(txn, "key2", cast[seq[byte]]("value2"))
+    check tm.rollbackToSavepoint(txn)
+    let (found1, _) = tm.read(txn, "key1")
+    check found1
+    let (found2, _) = tm.read(txn, "key2")
+    check not found2
+    discard tm.commit(txn)
+
+  test "Delete via xmax":
+    var tm = newTxnManager()
+    let txn1 = tm.beginTxn()
+    discard tm.write(txn1, "key1", cast[seq[byte]]("value1"))
+    discard tm.commit(txn1)
+
+    let txn2 = tm.beginTxn()
+    discard tm.delete(txn2, "key1")
+    discard tm.commit(txn2)
+
+    let txn3 = tm.beginTxn()
+    let (found, _) = tm.read(txn3, "key1")
+    check not found
+    discard tm.commit(txn3)
+
+suite "Deadlock Detection":
+  test "No deadlock without cycles":
+    var dd = newDeadlockDetector()
+    dd.addWait(1, 2)
+    dd.addWait(2, 3)
+    check not dd.hasDeadlock()
+
+  test "Detect simple deadlock":
+    var dd = newDeadlockDetector()
+    dd.addWait(1, 2)
+    dd.addWait(2, 1)
+    check dd.hasDeadlock()
+
+  test "Find deadlock victim":
+    var dd = newDeadlockDetector()
+    dd.addWait(1, 2)
+    dd.addWait(2, 3)
+    dd.addWait(3, 1)
+    let victim = dd.findDeadlockVictim()
+    check victim == 3  # youngest txn
+
+  test "Remove transaction clears edges":
+    var dd = newDeadlockDetector()
+    dd.addWait(1, 2)
+    dd.addWait(2, 1)
+    dd.removeTxn(2)
+    check not dd.hasDeadlock()
+
+suite "Wire Protocol":
+  test "Value serialization roundtrip":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkString, strVal: "hello world")
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkString
+    check decoded.strVal == "hello world"
+
+  test "Int64 serialization":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkInt64, int64Val: 42)
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkInt64
+    check decoded.int64Val == 42
+
+  test "Array serialization":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkArray, arrayVal: @[
+      WireValue(kind: fkInt32, int32Val: 1),
+      WireValue(kind: fkInt32, int32Val: 2),
+      WireValue(kind: fkInt32, int32Val: 3),
+    ])
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkArray
+    check decoded.arrayVal.len == 3
+    check decoded.arrayVal[1].int32Val == 2
+
+  test "Vector serialization":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkVector, vecVal: @[1.0'f32, 2.0'f32, 3.0'f32])
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkVector
+    check decoded.vecVal.len == 3
+
+  test "Query message creation":
+    let msg = makeQueryMessage(1, "SELECT * FROM users")
+    check msg.len > 0
+    check msg[3] == byte(mkQuery)  # big-endian uint32, last byte
+
+suite "Schema System":
+  test "Create type with properties":
+    var s = newSchema()
+    let person = newType("Person")
+    person.addProperty("name", "str", required = true)
+    person.addProperty("age", "int32")
+    s.addType("default", person)
+    check s.getType("Person") != nil
+    check s.getType("Person").properties.len == 2
+
+  test "Create type with links":
+    var s = newSchema()
+    let person = newType("Person")
+    person.addProperty("name", "str", required = true)
+    s.addType("default", person)
+
+    let movie = newType("Movie")
+    movie.addProperty("title", "str", required = true)
+    movie.addLink("actors", "Person", multi = true)
+    s.addType("default", movie)
+
+    check movie.links.len == 1
+    check movie.links["actors"].target == "Person"
+
+  test "Schema diff":
+    let s1 = newSchema()
+    let t1 = newType("Person")
+    t1.addProperty("name", "str")
+    s1.addType("default", t1)
+
+    let s2 = newSchema()
+    let t2 = newType("Person")
+    t2.addProperty("name", "str")
+    t2.addProperty("age", "int32")
+    s2.addType("default", t2)
+    let movieT = newType("Movie")
+    movieT.addProperty("title", "str")
+    s2.addType("default", movieT)
+
+    let d = diff(s1, s2)
+    check d.addedTypes.len == 1
+    check d.addedTypes[0] == "Movie"
+    check d.modifiedTypes.len == 1
+    check d.modifiedTypes[0].addedProperties.len == 1
+
+  test "Type validation":
+    let t = newType("Person")
+    t.addProperty("name", "str", required = true)
+    t.addLink("friend", "")  # empty target
+    let errors = t.validateType()
+    check errors.len == 1  # empty link target
+
+  test "Migration creation":
+    var s = newSchema()
+    let m1 = s.createMigration("initial", "CREATE TYPE Person { name: str }")
+    check m1.id == 1
+    let m2 = s.createMigration("add age", "ALTER TYPE Person { ADD age: int32 }")
+    check m2.id == 2
+    check m2.parentId == 1
+
+  test "Type to string":
+    let t = newType("Person")
+    t.addProperty("name", "str", required = true)
+    t.addProperty("age", "int32")
+    t.addLink("friend", "Person")
+    let s = $t
+    check s.find("Person") >= 0
+    check s.find("name") >= 0
+    check s.find("str") >= 0

@@ -4,7 +4,6 @@ import std/strutils
 import std/unicode
 import std/math
 import std/algorithm
-import std/sets
 
 type
   TermFreq* = Table[string, int]
