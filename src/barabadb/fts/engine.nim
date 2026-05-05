@@ -229,3 +229,133 @@ proc search*(idx: InvertedIndex, query: string, limit: int = 10,
 
 proc termCount*(idx: InvertedIndex): int = idx.postings.len
 proc documentCount*(idx: InvertedIndex): int = idx.docCount
+
+# TF-IDF ranking
+proc tfidfScore*(idx: InvertedIndex, term: string, docId: uint64): float64 =
+  if term notin idx.postings:
+    return 0.0
+  let df = idx.postings[term].len
+  let n = idx.docCount
+  if df == 0 or n == 0:
+    return 0.0
+
+  var tf = 0
+  for entry in idx.postings[term]:
+    if entry.docId == docId:
+      tf = entry.termFreq
+      break
+
+  let idf = ln(float64(n) / float64(df))
+  return float64(tf) * idf
+
+proc searchTfidf*(idx: InvertedIndex, query: string, limit: int = 10,
+                  config: TokenizerConfig = defaultTokenizerConfig()): seq[SearchResult] =
+  let queryTokens = tokenize(query, config)
+  if queryTokens.len == 0:
+    return @[]
+
+  var docScores = initTable[uint64, float64]()
+
+  for token in queryTokens:
+    if token notin idx.postings:
+      continue
+    for entry in idx.postings[token]:
+      let score = idx.tfidfScore(token, entry.docId)
+      if entry.docId notin docScores:
+        docScores[entry.docId] = 0.0
+      docScores[entry.docId] += score
+
+  var results: seq[SearchResult] = @[]
+  for docId, score in docScores:
+    results.add(SearchResult(docId: docId, score: score, highlights: @[]))
+
+  results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
+  if results.len > limit:
+    results = results[0..<limit]
+  return results
+
+# Levenshtein distance for fuzzy matching
+proc levenshtein*(a, b: string): int =
+  let m = a.len
+  let n = b.len
+  var d = newSeq[seq[int]](m + 1)
+  for i in 0..m:
+    d[i] = newSeq[int](n + 1)
+    d[i][0] = i
+  for j in 0..n:
+    d[0][j] = j
+
+  for i in 1..m:
+    for j in 1..n:
+      let cost = if a[i-1] == b[j-1]: 0 else: 1
+      d[i][j] = min(d[i-1][j] + 1, min(d[i][j-1] + 1, d[i-1][j-1] + cost))
+
+  return d[m][n]
+
+proc fuzzySearch*(idx: InvertedIndex, query: string, maxDistance: int = 2,
+                  limit: int = 10, config: TokenizerConfig = defaultTokenizerConfig()): seq[SearchResult] =
+  let queryTokens = tokenize(query, config)
+  if queryTokens.len == 0:
+    return @[]
+
+  var docScores = initTable[uint64, float64]()
+
+  for term in idx.postings.keys:
+    for queryToken in queryTokens:
+      let dist = levenshtein(term, queryToken)
+      if dist <= maxDistance:
+        let simScore = 1.0 - float64(dist) / float64(max(queryToken.len, term.len))
+        for entry in idx.postings[term]:
+          if entry.docId notin docScores:
+            docScores[entry.docId] = 0.0
+          docScores[entry.docId] += simScore * float64(entry.termFreq)
+
+  var results: seq[SearchResult] = @[]
+  for docId, score in docScores:
+    results.add(SearchResult(docId: docId, score: score, highlights: @[]))
+
+  results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
+  if results.len > limit:
+    results = results[0..<limit]
+  return results
+
+# Regex search
+proc regexSearch*(idx: InvertedIndex, pattern: string,
+                  limit: int = 10): seq[SearchResult] =
+  var docScores = initTable[uint64, float64]()
+
+  for term in idx.postings.keys:
+    # Simple pattern matching: check if pattern is substring
+    if pattern.len > 0:
+      var match = false
+      # Check if pattern starts with/ends with or contains
+      if pattern.startsWith("*") and pattern.endsWith("*"):
+        let inner = pattern[1..^2]
+        if term.find(inner) >= 0:
+          match = true
+      elif pattern.startsWith("*"):
+        let suffix = pattern[1..^1]
+        if term.endsWith(suffix):
+          match = true
+      elif pattern.endsWith("*"):
+        let prefix = pattern[0..^2]
+        if term.startsWith(prefix):
+          match = true
+      else:
+        if term == pattern:
+          match = true
+
+      if match:
+        for entry in idx.postings[term]:
+          if entry.docId notin docScores:
+            docScores[entry.docId] = 0.0
+          docScores[entry.docId] += float64(entry.termFreq)
+
+  var results: seq[SearchResult] = @[]
+  for docId, score in docScores:
+    results.add(SearchResult(docId: docId, score: score, highlights: @[]))
+
+  results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
+  if results.len > limit:
+    results = results[0..<limit]
+  return results

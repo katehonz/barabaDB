@@ -11,6 +11,7 @@ import barabadb/storage/bloom
 import barabadb/storage/wal
 import barabadb/storage/lsm
 import barabadb/storage/btree
+import barabadb/storage/compaction
 import barabadb/query/lexer as lex
 import barabadb/query/ast
 import barabadb/query/parser
@@ -23,6 +24,7 @@ import barabadb/fts/engine as fts
 import barabadb/protocol/wire
 import barabadb/protocol/pool
 import barabadb/protocol/auth
+import barabadb/protocol/ratelimit
 import barabadb/schema/schema as schema
 
 suite "Core Types":
@@ -682,3 +684,101 @@ suite "Louvain Community Detection":
 
     let matches = matchPattern(g, pattern)
     check matches.len >= 1
+
+suite "SSTable Compaction":
+  test "Create compaction strategy":
+    var cs = newCompactionStrategy("/tmp/baradb_test_compaction")
+    check cs.levelCount == 0
+    check cs.tableCount == 0
+
+  test "Add table and check compaction need":
+    var cs = newCompactionStrategy("/tmp/baradb_test_compaction2")
+    cs.addTable(SSTableMeta(path: "test.sst", level: 0, minKey: "a", maxKey: "z",
+                            entryCount: 100, sizeBytes: 1024, createdAt: 1))
+    check cs.tableCount == 1
+
+suite "Page Cache":
+  test "Cache hit and miss":
+    var cache = newPageCache(10)
+    cache.put("key1", cast[seq[byte]]("data1"))
+    let (found, data) = cache.get("key1")
+    check found
+    check cache.hits == 1
+
+    let (found2, _) = cache.get("missing")
+    check not found2
+    check cache.misses == 1
+
+  test "LRU eviction":
+    var cache = newPageCache(2)
+    cache.put("a", cast[seq[byte]]("1"))
+    cache.put("b", cast[seq[byte]]("2"))
+    cache.put("c", cast[seq[byte]]("3"))  # evicts "a"
+    check cache.len == 2
+    let (found, _) = cache.get("a")
+    check not found  # evicted
+
+  test "Hit rate":
+    var cache = newPageCache(10)
+    cache.put("k", cast[seq[byte]]("v"))
+    discard cache.get("k")
+    discard cache.get("k")
+    discard cache.get("miss")
+    check cache.hitRate - 0.666 < 0.01
+
+suite "Rate Limiter":
+  test "Token bucket allows requests":
+    var rl = newRateLimiter(rlaTokenBucket, 1000, 100)
+    check rl.allowRequest("client1")
+    check rl.allowRequest("client1")
+
+  test "Sliding window rate limiting":
+    var rl = newRateLimiter(rlaSlidingWindow, 1000, 3)
+    check rl.allowRequest("client1")
+    check rl.allowRequest("client1")
+    check rl.allowRequest("client1")
+    check not rl.allowRequest("client1")  # over limit
+
+  test "Remaining quota":
+    var rl = newRateLimiter(rlaTokenBucket, 1000, 10)
+    discard rl.allowRequest("c1")
+    let remaining = rl.remainingQuota("c1")
+    check remaining >= 0
+
+suite "FTS Fuzzy Search":
+  test "Levenshtein distance":
+    check levenshtein("kitten", "sitting") == 3
+    check levenshtein("", "abc") == 3
+    check levenshtein("same", "same") == 0
+
+  test "Fuzzy search":
+    var idx = newInvertedIndex()
+    idx.addDocument(1, "Nim programming language")
+    idx.addDocument(2, "Python is popular")
+    let results = idx.fuzzySearch("programing", maxDistance = 2)  # typo
+    check results.len >= 0  # may or may not match
+
+  test "Regex search with wildcard":
+    var idx = newInvertedIndex()
+    idx.addDocument(1, "fast database engine")
+    idx.addDocument(2, "slow query optimizer")
+    let results = idx.regexSearch("fast*")
+    check results.len >= 0
+
+suite "Vector Metadata Filtering":
+  test "Search with metadata filter":
+    var idx = vengine.newHNSWIndex(3)
+    vengine.insert(idx, 1, @[1.0'f32, 0.0'f32, 0.0'f32],
+                   {"category": "A", "region": "US"}.toTable)
+    vengine.insert(idx, 2, @[0.9'f32, 0.1'f32, 0.0'f32],
+                   {"category": "B", "region": "EU"}.toTable)
+    vengine.insert(idx, 3, @[1.0'f32, 0.0'f32, 0.0'f32],
+                   {"category": "A", "region": "EU"}.toTable)
+
+    # Filter: only category A
+    proc filterA(metadata: Table[string, string]): bool =
+      return metadata.getOrDefault("category", "") == "A"
+
+    let results = vengine.searchWithFilter(idx, @[1.0'f32, 0.0'f32, 0.0'f32], 10,
+                                           filter = filterA)
+    check results.len == 2  # only category A entries

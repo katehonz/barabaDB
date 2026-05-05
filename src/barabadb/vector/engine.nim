@@ -21,6 +21,7 @@ type
   HNSWNode* = ref object
     id*: uint64
     vector*: Vector
+    metadata*: Table[string, string]
     neighbors*: seq[seq[uint64]]  # neighbors per level
 
   HNSWIndex* = ref object
@@ -102,8 +103,9 @@ proc randomLevel(maxLevel: int): int =
     r = rand(1.0)
   return level
 
-proc insert*(idx: HNSWIndex, id: uint64, vector: Vector) =
-  let node = HNSWNode(id: id, vector: vector, neighbors: @[])
+proc insert*(idx: HNSWIndex, id: uint64, vector: Vector,
+             metadata: Table[string, string] = initTable[string, string]()) =
+  let node = HNSWNode(id: id, vector: vector, metadata: metadata, neighbors: @[])
   let level = randomLevel(16)
 
   for i in 0..level:
@@ -135,6 +137,23 @@ proc search*(idx: HNSWIndex, query: Vector, k: int,
   if candidates.len > k:
     candidates = candidates[0..<k]
 
+  return candidates
+
+proc searchWithFilter*(idx: HNSWIndex, query: Vector, k: int,
+                       filter: proc(metadata: Table[string, string]): bool {.gcsafe.},
+                       metric: DistanceMetric = dmCosine): seq[(uint64, float64)] =
+  if idx.nodes.len == 0:
+    return @[]
+
+  var candidates: seq[(uint64, float64)] = @[]
+  for nodeId, node in idx.nodes:
+    if filter(node.metadata):
+      let dist = distance(query, node.vector, metric)
+      candidates.add((nodeId, dist))
+
+  candidates.sort(proc(a, b: (uint64, float64)): int = cmp(a[1], b[1]))
+  if candidates.len > k:
+    candidates = candidates[0..<k]
   return candidates
 
 proc newIVFPQIndex*(dimensions: int, nClusters: int = 100,

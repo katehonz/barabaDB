@@ -65,8 +65,8 @@
 - [x] Типова система (int, float, string, bool, bytes, uuid, datetime, json, vector)
 - [x] Сериялизация на записите
 - [x] B-Tree индекс за точкови заявки
-- [ ] Компактиране на SSTable (compaction strategies)
-- [ ] Page cache и buffer pool
+- [x] Компактиране на SSTable (compaction strategies)
+- [x] Page cache и buffer pool (LRU)
 
 ### Фаза 2: Език за заявки — BaraQL 🟡
 - [x] Лексер с Unicode поддръжка
@@ -109,9 +109,9 @@
 - [x] HTTP/REST API (JSON)
 - [x] Connection pooling
 - [x] Authentication (JWT, SCRAM-SHA-256)
-- [ ] WebSocket за streaming
+- [x] WebSocket за streaming
+- [x] Rate limiting (token bucket, sliding window)
 - [ ] TLS/SSL
-- [ ] Rate limiting
 
 ### Фаза 6: Schema система ✅
 - [x] Декларативна schema (SDL)
@@ -128,7 +128,7 @@
 - [x] IVF-PQ индекс (Inverted File + Product Quantization)
 - [x] Дистанционни метрики (cosine, euclidean, dot product, Manhattan)
 - [x] Квантизация (scalar 8-bit/4-bit, product, binary)
-- [ ] Metadata filtering при vector search
+- [x] Metadata filtering при vector search
 - [ ] Batch insert/update
 - [ ] Автоматичен index rebuild при threshold
 
@@ -148,9 +148,9 @@
 - [x] Токенизация (Unicode, stemming, stop words)
 - [x] BM25 ранкиране
 - [x] Highlight на резултати
-- [ ] TF-IDF ранкиране
-- [ ] Fuzzy matching (Levenshtein)
-- [ ] Regex търсене
+- [x] TF-IDF ранкиране
+- [x] Fuzzy matching (Levenshtein)
+- [x] Regex търсене (wildcard patterns)
 - [ ] Многоезикова поддръжка
 
 ### Фаза 10: Клиентски библиотеки и CLI ✅
@@ -195,15 +195,15 @@
 
 | Фаза | Статус | Напредък |
 |------|--------|----------|
-| 1. Ядро | ✅ Основно завършена | 85% |
+| 1. Ядро | ✅ Завършена | 95% |
 | 2. BaraQL | 🟡 В процес | 60% |
 | 3. Мултимодален storage | 🟡 В процес | 75% |
 | 4. Транзакции | ✅ Основно завършена | 85% |
-| 5. Протокол | 🟡 В процес | 70% |
+| 5. Протокол | 🟡 В процес | 85% |
 | 6. Schema | ✅ Основно завършена | 75% |
-| 7. Векторен engine | ✅ Завършена | 85% |
+| 7. Векторен engine | ✅ Завършена | 95% |
 | 8. Graph engine | ✅ Завършена | 90% |
-| 9. FTS | ✅ Завършена | 60% |
+| 9. FTS | ✅ Завършена | 85% |
 | 10. Клиенти и CLI | 🟡 В процес | 50% |
 | 11. Кластер | ⬜ Не стартирана | 0% |
 | 12. Оптимизации | ⬜ Не стартирана | 0% |
