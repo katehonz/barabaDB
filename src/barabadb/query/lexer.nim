@@ -260,6 +260,7 @@ proc readString(l: var Lexer, quote: char): string =
   while l.pos < l.input.len and l.input[l.pos] != quote:
     if l.input[l.pos] == '\\':
       discard l.advance()
+      if l.pos >= l.input.len: break
       case l.input[l.pos]
       of 'n': result.add('\n')
       of 't': result.add('\t')
@@ -295,10 +296,6 @@ proc readIdent(l: var Lexer, startLine, startCol: int): Token =
   let lowerIdent = ident.toLower()
   if lowerIdent in keywords:
     Token(kind: keywords[lowerIdent], value: ident, line: startLine, col: startCol)
-  elif lowerIdent == "true":
-    Token(kind: tkBoolLit, value: "true", line: startLine, col: startCol)
-  elif lowerIdent == "false":
-    Token(kind: tkBoolLit, value: "false", line: startLine, col: startCol)
   else:
     Token(kind: tkIdent, value: ident, line: startLine, col: startCol)
 

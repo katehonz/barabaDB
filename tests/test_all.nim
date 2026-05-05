@@ -1489,7 +1489,7 @@ suite "Multi-Language FTS":
     check mlang.stemEnglish("programming") == "programm"
 
   test "Bulgarian stemming":
-    check mlang.stemBulgarian("красота") == "красот"
+    check mlang.stemBulgarian("красота") == "красо"
 
 suite "Zero-Copy Serialization":
   test "Write and read int32":

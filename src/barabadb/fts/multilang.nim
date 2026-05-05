@@ -81,17 +81,19 @@ proc stemEnglish*(word: string): string =
 
 proc stemBulgarian*(word: string): string =
   if word.len <= 3: return word
-  # Bulgarian suffixes
-  if word.endsWith("ища"): return word[0..^4]
-  if word.endsWith("ище"): return word[0..^4]
-  if word.endsWith("ция"): return word[0..^4]
-  if word.endsWith("ние"): return word[0..^4]
-  if word.endsWith("ост"): return word[0..^4]
-  if word.endsWith("ство"): return word[0..^5]
-  if word.endsWith("ски"): return word[0..^4]
-  if word.endsWith("ски"): return word[0..^4]
-  if word.endsWith("на"): return word[0..^3]
-  if word.endsWith("та"): return word[0..^3]
+  # Bulgarian suffixes (all Cyrillic chars are 2 bytes)
+  # 3 Cyrillic chars = 6 bytes -> ^7
+  if word.endsWith("ища"): return word[0..^7]
+  if word.endsWith("ище"): return word[0..^7]
+  if word.endsWith("ция"): return word[0..^7]
+  if word.endsWith("ние"): return word[0..^7]
+  if word.endsWith("ост"): return word[0..^7]
+  if word.endsWith("ски"): return word[0..^7]
+  # 4 Cyrillic chars = 8 bytes -> ^9
+  if word.endsWith("ство"): return word[0..^9]
+  # 2 Cyrillic chars = 4 bytes -> ^5
+  if word.endsWith("на"): return word[0..^5]
+  if word.endsWith("та"): return word[0..^5]
   return word
 
 proc stemGerman*(word: string): string =
@@ -124,17 +126,19 @@ proc stemFrench*(word: string): string =
 
 proc stemRussian*(word: string): string =
   if word.len <= 3: return word
-  # Russian suffixes
-  if word.endsWith("ость"): return word[0..^5]
-  if word.endsWith("ение"): return word[0..^5]
-  if word.endsWith("ание"): return word[0..^5]
-  if word.endsWith("тель"): return word[0..^5]
-  if word.endsWith("ский"): return word[0..^5]
-  if word.endsWith("ция"): return word[0..^4]
-  if word.endsWith("ние"): return word[0..^4]
-  if word.endsWith("ать"): return word[0..^4]
-  if word.endsWith("ить"): return word[0..^4]
-  if word.endsWith("ыть"): return word[0..^4]
+  # Russian suffixes (all Cyrillic chars are 2 bytes)
+  # 4 Cyrillic chars = 8 bytes -> ^9
+  if word.endsWith("ость"): return word[0..^9]
+  if word.endsWith("ение"): return word[0..^9]
+  if word.endsWith("ание"): return word[0..^9]
+  if word.endsWith("тель"): return word[0..^9]
+  if word.endsWith("ский"): return word[0..^9]
+  # 3 Cyrillic chars = 6 bytes -> ^7
+  if word.endsWith("ция"): return word[0..^7]
+  if word.endsWith("ние"): return word[0..^7]
+  if word.endsWith("ать"): return word[0..^7]
+  if word.endsWith("ить"): return word[0..^7]
+  if word.endsWith("ыть"): return word[0..^7]
   return word
 
 proc getLanguageConfig*(lang: Language): LanguageConfig =

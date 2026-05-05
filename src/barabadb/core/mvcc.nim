@@ -170,9 +170,12 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
                 if tm.activeTxns[creator].state == tsCommitted:
                   release(tm.lock)
                   return false  # write-write conflict
-              elif creator notin tm.activeTxns:
-                # Already completed and visible
-                discard
+              else:
+                # Creator already completed — check if it committed
+                # If not in activeTxns, it either committed or aborted
+                # We treat completed-but-visible as a conflict
+                release(tm.lock)
+                return false  # write-write conflict with completed txn
 
   let lsn = tm.allocLsn()
   let version = VersionedRecord(
@@ -201,9 +204,15 @@ proc commit*(tm: TxnManager, txn: Transaction): bool =
       tm.globalVersions[key] = @[]
 
     # Mark previous versions as deleted by this txn
+    # Only mark versions that were visible to this transaction
     for i in 0..<tm.globalVersions[key].len:
       if tm.globalVersions[key][i].xmax == TxnId(0):
-        tm.globalVersions[key][i].xmax = txn.id
+        let creator = tm.globalVersions[key][i].xmin
+        # Only mark as deleted if the version was visible (committed before our snapshot)
+        if creator != txn.id:
+          if uint64(creator) <= uint64(txn.snapshotMaxTxn) and
+             creator notin txn.snapshotTxns:
+            tm.globalVersions[key][i].xmax = txn.id
 
     tm.globalVersions[key].add(version)
 

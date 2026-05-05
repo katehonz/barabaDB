@@ -19,6 +19,7 @@ type
 
   ColumnPtr* = ref object
     typ*: ColumnType
+    nulls*: seq[bool]
     case kind: ColumnType
     of ctInt64: intData: seq[int64]
     of ctFloat64: floatData: seq[float64]
@@ -34,35 +35,39 @@ proc newColumnBatch*(): ColumnBatch =
   ColumnBatch(columns: initTable[string, ColumnPtr](), rowCount: 0)
 
 proc addInt64Col*(batch: var ColumnBatch, name: string): var ColumnPtr =
-  var col = ColumnPtr(typ: ctInt64, kind: ctInt64, intData: @[])
+  var col = ColumnPtr(typ: ctInt64, kind: ctInt64, nulls: @[], intData: @[])
   batch.columns[name] = col
   return batch.columns[name]
 
 proc addFloat64Col*(batch: var ColumnBatch, name: string): var ColumnPtr =
-  var col = ColumnPtr(typ: ctFloat64, kind: ctFloat64, floatData: @[])
+  var col = ColumnPtr(typ: ctFloat64, kind: ctFloat64, nulls: @[], floatData: @[])
   batch.columns[name] = col
   return batch.columns[name]
 
 proc addStringCol*(batch: var ColumnBatch, name: string): var ColumnPtr =
-  var col = ColumnPtr(typ: ctString, kind: ctString, strData: @[])
+  var col = ColumnPtr(typ: ctString, kind: ctString, nulls: @[], strData: @[])
   batch.columns[name] = col
   return batch.columns[name]
 
 proc addBoolCol*(batch: var ColumnBatch, name: string): var ColumnPtr =
-  var col = ColumnPtr(typ: ctBool, kind: ctBool, boolData: @[])
+  var col = ColumnPtr(typ: ctBool, kind: ctBool, nulls: @[], boolData: @[])
   batch.columns[name] = col
   return batch.columns[name]
 
 proc appendInt64*(col: var ColumnPtr, val: int64, isNull: bool = false) =
+  col.nulls.add(isNull)
   col.intData.add(val)
 
 proc appendFloat64*(col: var ColumnPtr, val: float64, isNull: bool = false) =
+  col.nulls.add(isNull)
   col.floatData.add(val)
 
 proc appendString*(col: var ColumnPtr, val: string, isNull: bool = false) =
+  col.nulls.add(isNull)
   col.strData.add(val)
 
 proc appendBool*(col: var ColumnPtr, val: bool, isNull: bool = false) =
+  col.nulls.add(isNull)
   col.boolData.add(val)
 
 proc rowCount*(batch: ColumnBatch): int =

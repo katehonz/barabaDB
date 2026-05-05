@@ -5,6 +5,7 @@ import std/strutils
 import std/base64
 import std/sha1
 import std/hashes
+import std/tables
 
 const
   WS_FIN* = 0x80'u8

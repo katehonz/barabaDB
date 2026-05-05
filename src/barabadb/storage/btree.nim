@@ -48,7 +48,7 @@ proc splitChild[K, V](parent: BTreeNode[K, V], index: int, order: int) =
       newNode.values.add(child.values[j])
 
   if not child.isLeaf:
-    for j in mid+1..child.children.len:
+    for j in mid+1..<child.children.len:
       newNode.children.add(child.children[j])
     child.children.setLen(mid + 1)
 

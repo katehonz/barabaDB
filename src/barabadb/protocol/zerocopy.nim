@@ -176,7 +176,8 @@ proc encodeRecord*(buf: var ZeroBuf, schema: ZcSchema,
         var v: int64 = 0
         bigEndian64(addr buf.data[field.offset], unsafeAddr v)
     of ztString:
-      buf.data[field.offset] = byte(value.len)
+      var len32 = int32(value.len)
+      bigEndian32(addr buf.data[field.offset], unsafeAddr len32)
       if value.len > 0:
         copyMem(addr buf.data[field.offset + 4], unsafeAddr value[0], value.len)
     else:

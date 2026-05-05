@@ -64,6 +64,7 @@ type
     messageQueue*: Deque[RaftMessage]
 
 proc newRaftNode*(id: string, peers: seq[string]): RaftNode =
+  randomize()
   RaftNode(
     id: id,
     state: rsFollower,
@@ -211,8 +212,9 @@ proc appendEntries*(node: RaftNode, peerId: string): RaftMessage =
     prevTerm = node.log[prevIdx - 1].term
 
   var entries: seq[LogEntry] = @[]
-  for i in int(nextIdx - 1)..<node.log.len:
-    entries.add(node.log[i])
+  if nextIdx > 0:
+    for i in int(nextIdx - 1)..<node.log.len:
+      entries.add(node.log[i])
 
   return RaftMessage(
     kind: rmkAppendEntries,

@@ -180,44 +180,48 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
   let kind = FieldKind(buf[pos])
   inc pos
   case kind
-  of fkNull: WireValue(kind: fkNull)
-  of fkBool: WireValue(kind: fkBool, boolVal: buf[pos] != 0)
-  of fkInt8: WireValue(kind: fkInt8, int8Val: cast[int8](buf[pos]))
+  of fkNull: result = WireValue(kind: fkNull)
+  of fkBool:
+    result = WireValue(kind: fkBool, boolVal: buf[pos] != 0)
+    inc pos
+  of fkInt8:
+    result = WireValue(kind: fkInt8, int8Val: cast[int8](buf[pos]))
+    inc pos
   of fkInt16:
     var val: int16
     var bytes: array[2, byte]
     for i in 0..1: bytes[i] = buf[pos + i]
     bigEndian16(addr val, unsafeAddr bytes)
     pos += 2
-    WireValue(kind: fkInt16, int16Val: val)
+    result = WireValue(kind: fkInt16, int16Val: val)
   of fkInt32:
-    WireValue(kind: fkInt32, int32Val: int32(readUint32(buf, pos)))
+    result = WireValue(kind: fkInt32, int32Val: int32(readUint32(buf, pos)))
   of fkInt64:
-    WireValue(kind: fkInt64, int64Val: int64(readUint64(buf, pos)))
+    result = WireValue(kind: fkInt64, int64Val: int64(readUint64(buf, pos)))
   of fkFloat32:
     var fl: float32
     var bytes: array[4, byte]
     for i in 0..3: bytes[i] = buf[pos + i]
     copyMem(addr fl, unsafeAddr bytes, 4)
     pos += 4
-    WireValue(kind: fkFloat32, float32Val: fl)
+    result = WireValue(kind: fkFloat32, float32Val: fl)
   of fkFloat64:
     var fl: float64
     var bytes: array[8, byte]
     for i in 0..7: bytes[i] = buf[pos + i]
     copyMem(addr fl, unsafeAddr bytes, 8)
     pos += 8
-    WireValue(kind: fkFloat64, float64Val: fl)
+    result = WireValue(kind: fkFloat64, float64Val: fl)
   of fkString:
-    WireValue(kind: fkString, strVal: readString(buf, pos))
+    result = WireValue(kind: fkString, strVal: readString(buf, pos))
   of fkBytes:
-    WireValue(kind: fkBytes, bytesVal: readBytes(buf, pos))
+    result = WireValue(kind: fkBytes, bytesVal: readBytes(buf, pos))
   of fkArray:
     let count = int(readUint32(buf, pos))
     var arr: seq[WireValue] = @[]
     for i in 0..<count:
       arr.add(deserializeValue(buf, pos))
-    WireValue(kind: fkArray, arrayVal: arr)
+    result = WireValue(kind: fkArray, arrayVal: arr)
   of fkObject:
     let count = int(readUint32(buf, pos))
     var obj: seq[(string, WireValue)] = @[]
@@ -225,7 +229,7 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
       let name = readString(buf, pos)
       let val = deserializeValue(buf, pos)
       obj.add((name, val))
-    WireValue(kind: fkObject, objVal: obj)
+    result = WireValue(kind: fkObject, objVal: obj)
   of fkVector:
     let count = int(readUint32(buf, pos))
     var vec: seq[float32] = @[]
@@ -236,7 +240,7 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
       copyMem(addr fl, unsafeAddr bytes, 4)
       pos += 4
       vec.add(fl)
-    WireValue(kind: fkVector, vecVal: vec)
+    result = WireValue(kind: fkVector, vecVal: vec)
 
 proc serializeMessage*(msg: WireMessage): seq[byte] =
   result = @[]

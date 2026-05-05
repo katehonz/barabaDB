@@ -62,9 +62,20 @@ proc put*(mt: var MemTable, key: string, value: seq[byte], timestamp: uint64, de
   return true
 
 proc get*(mt: MemTable, key: string): (bool, Entry) =
-  for entry in mt.entries:
-    if entry.key == key:
-      return (true, entry)
+  if mt.entries.len == 0:
+    return (false, Entry())
+  # Binary search since entries are kept sorted by key
+  var lo = 0
+  var hi = mt.entries.len - 1
+  while lo <= hi:
+    let mid = (lo + hi) div 2
+    let cmp = cmp(mt.entries[mid].key, key)
+    if cmp == 0:
+      return (true, mt.entries[mid])
+    elif cmp < 0:
+      lo = mid + 1
+    else:
+      hi = mid - 1
   return (false, Entry())
 
 proc scan*(mt: MemTable, startKey, endKey: string): seq[Entry] =
