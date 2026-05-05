@@ -4,6 +4,7 @@ import std/sets
 import std/deques
 import std/algorithm
 import std/random
+import std/monotimes
 
 type
   RaftState* = enum
@@ -278,3 +279,47 @@ proc state*(node: RaftNode): RaftState = node.state
 proc isLeader*(node: RaftNode): bool = node.state == rsLeader
 proc leaderId*(node: RaftNode): string = node.leaderId
 proc logLen*(node: RaftNode): int = node.log.len
+
+# Leader election timer loop
+type
+  ElectionTimer* = ref object
+    node: RaftNode
+    timeoutMs: int
+    lastHeartbeat: int64
+    running: bool
+
+proc newElectionTimer*(node: RaftNode, timeoutMs: int = 150): ElectionTimer =
+  ElectionTimer(
+    node: node,
+    timeoutMs: timeoutMs,
+    lastHeartbeat: getMonoTime().ticks(),
+    running: false,
+  )
+
+proc resetTimeout*(timer: ElectionTimer) =
+  timer.lastHeartbeat = getMonoTime().ticks()
+
+proc checkTimeout*(timer: ElectionTimer): bool =
+  let elapsed = (getMonoTime().ticks() - timer.lastHeartbeat) div 1_000_000
+  return elapsed > timer.timeoutMs
+
+proc startElection*(timer: ElectionTimer) =
+  if timer.node.state != rsCandidate:
+    timer.node.becomeCandidate()
+
+proc tick*(timer: ElectionTimer) =
+  case timer.node.state
+  of rsFollower:
+    if timer.checkTimeout():
+      timer.startElection()
+      timer.resetTimeout()
+  of rsCandidate:
+    if timer.checkTimeout():
+      # Election timed out — restart
+      timer.node.becomeCandidate()
+      timer.resetTimeout()
+  of rsLeader:
+    timer.resetTimeout()  # Keep alive
+
+proc stop*(timer: ElectionTimer) =
+  timer.running = false

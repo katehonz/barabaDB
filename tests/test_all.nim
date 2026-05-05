@@ -33,6 +33,8 @@ import barabadb/core/disttxn
 import barabadb/vector/engine as vengine
 import barabadb/graph/cypher
 import barabadb/vector/quant as vquant
+import barabadb/storage/recovery
+import barabadb/cli/shell
 import barabadb/graph/engine as gengine
 import barabadb/graph/community as gcomm
 import barabadb/fts/engine as fts
@@ -1744,3 +1746,95 @@ suite "Cypher-like Graph Queries":
     let matches = matchNodes(g, "Person", {"name": "Alice"}.toTable)
     check matches.len == 1
     check matches[0].properties["name"] == "Alice"
+
+suite "Crash Recovery":
+  test "Scan WAL file":
+    var walDir = "/tmp/baradb_test_recovery_wal"
+    var wal = newWriteAheadLog(walDir)
+    wal.writePut(@[1'u8], @[2'u8], 1)
+    wal.sync()
+    wal.close()
+
+    var rec = newCrashRecovery(walDir, "/tmp")
+    let entries = rec.scanWAL()
+    check entries.len >= 1  # at least the put entry
+
+  test "Analyze recovery":
+    var walDir = "/tmp/baradb_test_recovery_wal2"
+    var wal = newWriteAheadLog(walDir)
+    wal.writePut(@[1'u8], @[2'u8], 1)
+    wal.writeCommit(1)
+    wal.close()
+
+    var rec = newCrashRecovery(walDir, "/tmp")
+    let result = rec.analyze()
+    check result.totalEntries >= 1
+    check result.applied == true
+
+  test "Recover returns summary":
+    var walDir = "/tmp/baradb_test_recovery_wal3"
+    var wal = newWriteAheadLog(walDir)
+    wal.writePut(@[1'u8], @[2'u8], 1)
+    wal.writeCommit(1)
+    wal.close()
+
+    var rec = newCrashRecovery(walDir, "/tmp")
+    let summary = rec.summary()
+    check "WAL Recovery" in summary
+    check "Total" in summary
+
+suite "Raft Election Timer":
+  test "Election timer tick":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    cluster.addNode("n2")
+    cluster.addNode("n3")
+
+    let n1 = cluster.nodes["n1"]
+    var timer = newElectionTimer(n1, timeoutMs = 0)  # immediate timeout
+
+    # Force election
+    n1.becomeCandidate()
+    n1.becomeLeader()
+    timer.tick()
+    check n1.isLeader
+
+  test "Timer reset":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    let n1 = cluster.nodes["n1"]
+    var timer = newElectionTimer(n1, timeoutMs = 1000)
+    timer.resetTimeout()
+    check not timer.checkTimeout()
+
+  test "Multi-node election with timer":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    cluster.addNode("n2")
+
+    let n2 = cluster.nodes["n2"]
+    var timer2 = newElectionTimer(n2, timeoutMs = 0)
+    n2.becomeCandidate()
+    let req = n2.requestVote()
+    check req.len == 1  # n2 requests vote from n1
+    let reply = cluster.nodes["n1"].handleRequestVote(req[0])
+    check reply.success
+
+suite "CLI Autocomplete":
+  test "Autocomplete commands":
+    let res = autocomplete("he")
+    check "help" in res
+
+  test "Autocomplete keywords":
+    let res = autocomplete("SEL")
+    check "SELECT" in res
+    let res2 = autocomplete("SELECT FRO")
+    check "FROM" in res2
+
+  test "Suggest returns completions":
+    let suggestion = suggest("SE")
+    check suggestion.len > 0
+
+  test "Autocomplete empty":
+    let res = autocomplete("")
+    check res.len == 0

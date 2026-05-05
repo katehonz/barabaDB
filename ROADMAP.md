@@ -91,8 +91,8 @@
 - [x] Граф engine — adjacency list, edge properties, incident index
 - [x] Векторен engine — float32 arrays, distance metrics
 - [x] Колонен engine — column-oriented storage за analytics (RLE, dict encoding, GroupBy)
-- [ ] Унифициран query interface през BaraQL
-- [ ] Cross-modal заявки (document + vector + graph в една заявка)
+- [x] Унифициран query interface през BaraQL (CrossModalEngine)
+- [x] Cross-modal заявки (document + vector + graph в една заявка) — hybridSearch
 
 ### Фаза 4: Транзакции и ACID ✅
 - [x] WAL (Write-Ahead Log) за durability
@@ -100,10 +100,10 @@
 - [x] Snapshot isolation
 - [x] Deadlock detection (wait-for graph)
 - [x] Savepoints и вложени транзакции
-- [ ] 2PC за cross-modal транзакции
+- [x] 2PC за cross-modal транзакции (TPCTransaction)
 - [ ] Recovery при crash (REDO/UNDO)
 
-### Фаза 5: Мрежов протокол 🟡
+### Фаза 5: Мрежов протокол ✅
 - [x] TCP сървър с async I/O
 - [x] Binary протокол (BaraDB Wire Protocol)
 - [x] HTTP/REST API (JSON)
@@ -129,8 +129,8 @@
 - [x] Дистанционни метрики (cosine, euclidean, dot product, Manhattan)
 - [x] Квантизация (scalar 8-bit/4-bit, product, binary)
 - [x] Metadata filtering при vector search
-- [ ] Batch insert/update
-- [ ] Автоматичен index rebuild при threshold
+- [x] Batch insert/update (batchInsert, batchSearch)
+- [x] Автоматичен index rebuild при threshold (IndexWatcher)
 
 ### Фаза 8: Graph engine ✅
 - [x] Adjacency list storage
@@ -141,7 +141,7 @@
 - [x] PageRank
 - [x] Community detection (Louvain)
 - [x] Pattern matching (subgraph isomorphism)
-- [ ] Cypher-подобен query syntax (или BaraQL extension)
+- [x] Cypher-подобен query syntax (parseCypher, executeCypher)
 
 ### Фаза 9: Full-Text Search ✅
 - [x] Инвертиран индекс
@@ -151,42 +151,36 @@
 - [x] TF-IDF ранкиране
 - [x] Fuzzy matching (Levenshtein)
 - [x] Regex търсене (wildcard patterns)
-- [ ] Многоезикова поддръжка
+- [x] Многоезикова поддръжка (EN, BG, DE, FR, RU)
 
-### Фаза 10: Клиентски библиотеки и CLI ✅
+### Фаза 10: Клиентски библиотеки и CLI 🟡
 - [x] CLI tool (bara shell) — интерактивен shell
-- [ ] Nim client library
+- [x] Nim client library (client.nim — async/sync, query builder)
+- [x] Import/Export (JSON, CSV, NDJSON)
 - [ ] Python client library
 - [ ] JavaScript/TypeScript client library
 - [ ] Go client library
 - [ ] Rust client library
 - [ ] Interactive query editor с autocomplete
-- [ ] Import/Export (JSON, CSV, Parquet)
-- [ ] Nim client library
-- [ ] Python client library
-- [ ] JavaScript/TypeScript client library
-- [ ] Go client library
-- [ ] Rust client library
-- [ ] Interactive query editor с autocomplete
-- [ ] Import/Export (JSON, CSV, Parquet)
 
 ### Фаза 11: Кластеризация и разпределение 🟡
 - [x] Raft консенсус протокол (leader election + log replication)
 - [x] Sharding (hash-based, range-based, consistent hashing)
 - [x] Replication (sync, async, semi-sync)
-- [ ] Leader election за multi-node
-- [ ] Gossip protocol за membership
-- [ ] Distributed transactions
-- [ ] Auto-rebalancing
+- [x] Gossip protocol за membership (GossipProtocol)
+- [x] Distributed transactions (DistTxnManager + Saga pattern)
+- [x] Auto-rebalancing (ClusterMembership — onNodeJoin/Leave/Fail)
+- [ ] Leader election за multi-node (timer loop)
 
-### Фаза 12: Оптимизации, бенчмаркове, документация ⬜
+### Фаза 12: Оптимизации, бенчмаркове, документация 🟡
 - [x] SIMD оптимизации за vector operations (unrolled loops, batch distance)
 - [x] Memory-mapped I/O (mmap + madvise hints)
-- [ ] Zero-copy serialization
-- [ ] Adaptive query execution
+- [x] Zero-copy serialization (ZeroBuf + ZcSchema)
+- [x] Adaptive query execution (AdaptivePlanner + ExecutionContext)
 - [ ] Бенчмаркове vs GEL, PostgreSQL, MongoDB, Redis
-- [ ] API документация
+- [ ] API документация (extended reference)
 - [ ] Архитектурна документация
+- [x] Tutorial и примери (examples/tutorial.nim)
 - [ ] Tutorial и примери
 
 ---
@@ -197,15 +191,15 @@
 |------|--------|----------|
 | 1. Ядро | ✅ Завършена | 95% |
 | 2. BaraQL | ✅ Завършена | 100% |
-| 3. Мултимодален storage | 🟡 В процес | 75% |
-| 4. Транзакции | ✅ Основно завършена | 85% |
-| 5. Протокол | ✅ Завършена | 85% |
-| 6. Schema | ✅ Завършена | 95% |
-| 7. Векторен engine | ✅ Завършена | 95% |
-| 8. Graph engine | ✅ Завършена | 90% |
-| 9. FTS | ✅ Завършена | 85% |
-| 10. Клиенти и CLI | 🟡 В процес | 50% |
-| 11. Кластер | ✅ Основно завършена | 60% |
-| 12. Оптимизации | 🟡 В процес | 40% |
+| 3. Мултимодален storage | ✅ Завършена | 95% |
+| 4. Транзакции | ✅ Завършена | 90% |
+| 5. Протокол | ✅ Завършена | 95% |
+| 6. Schema | ✅ Завършена | 100% |
+| 7. Векторен engine | ✅ Завършена | 100% |
+| 8. Graph engine | ✅ Завършена | 100% |
+| 9. FTS | ✅ Завършена | 100% |
+| 10. Клиенти и CLI | 🟡 В процес | 60% |
+| 11. Кластер | ✅ Основно завършена | 90% |
+| 12. Оптимизации | ✅ Основно завършена | 80% |
 
 **Легенда:** ⬜ Не стартирана | 🟡 В процес | ✅ Завършена

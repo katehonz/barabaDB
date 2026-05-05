@@ -36,15 +36,15 @@ proc printBanner*() =
 
 proc printHelp*() =
   styledEcho fgYellow, "Commands:"
-  styledEcho fgWhite, "  help          ", fgGray, "— show this help"
-  styledEcho fgWhite, "  quit/exit     ", fgGray, "— exit the shell"
-  styledEcho fgWhite, "  version       ", fgGray, "— show version"
-  styledEcho fgWhite, "  tables        ", fgGray, "— list all tables/types"
-  styledEcho fgWhite, "  describe <t>  ", fgGray, "— describe a type"
-  styledEcho fgWhite, "  history       ", fgGray, "— show query history"
-  styledEcho fgWhite, "  verbose       ", fgGray, "— toggle verbose mode"
-  styledEcho fgWhite, "  clear         ", fgGray, "— clear screen"
-  styledEcho fgWhite, "  status        ", fgGray, "— show connection status"
+  styledEcho fgWhite, "  help          ", fgWhite, "— show this help"
+  styledEcho fgWhite, "  quit/exit     ", fgWhite, "— exit the shell"
+  styledEcho fgWhite, "  version       ", fgWhite, "— show version"
+  styledEcho fgWhite, "  tables        ", fgWhite, "— list all tables/types"
+  styledEcho fgWhite, "  describe <t>  ", fgWhite, "— describe a type"
+  styledEcho fgWhite, "  history       ", fgWhite, "— show query history"
+  styledEcho fgWhite, "  verbose       ", fgWhite, "— toggle verbose mode"
+  styledEcho fgWhite, "  clear         ", fgWhite, "— clear screen"
+  styledEcho fgWhite, "  status        ", fgWhite, "— show connection status"
   echo ""
   styledEcho fgYellow, "Query Language (BaraQL):"
   styledEcho fgWhite, "  SELECT <fields> FROM <type> [WHERE <cond>] [LIMIT <n>]"
@@ -88,6 +88,66 @@ proc formatResult*(columns: seq[string], rows: seq[seq[string]]): string =
     result &= "\n"
 
   result &= "(" & $rows.len & " rows)"
+
+const
+  Keywords = @[
+    "SELECT", "FROM", "WHERE", "INSERT", "UPDATE", "DELETE", "SET",
+    "CREATE", "DROP", "ALTER", "TYPE", "TABLE", "INDEX",
+    "INNER", "LEFT", "RIGHT", "FULL", "CROSS", "JOIN", "ON",
+    "GROUP", "BY", "HAVING", "ORDER", "ASC", "DESC",
+    "LIMIT", "OFFSET", "DISTINCT", "WITH", "AS",
+    "AND", "OR", "NOT", "IN", "IS", "NULL", "EXISTS",
+    "LIKE", "ILIKE", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "END",
+    "COUNT", "SUM", "AVG", "MIN", "MAX",
+    "RETURNING", "VALUES", "INTO",
+    "true", "false", "null",
+    "INT32", "INT64", "FLOAT32", "FLOAT64", "STR", "BOOL", "DATETIME",
+    "ARRAY", "VECTOR", "UUID", "JSON", "BYTES",
+  ]
+
+  Commands = @[
+    "help", "quit", "exit", "version", "tables", "describe",
+    "history", "verbose", "clear", "status",
+    "\\h", "\\q", "\\v", "\\dt", "\\d", "\\history", "\\c", "\\conninfo",
+  ]
+
+proc autocomplete*(input: string): seq[string] =
+  result = @[]
+  let trimmed = input.strip()
+  if trimmed.len == 0:
+    return
+
+  if not trimmed.contains(" "):
+    # Completing first word — could be command or keyword
+    for cmd in Commands:
+      if cmd.startsWith(trimmed):
+        result.add(cmd)
+    for kw in Keywords:
+      if kw.startsWith(trimmed):
+        result.add(kw)
+    return
+
+  # Completing after first word
+  let parts = trimmed.split(" ")
+  let lastWord = parts[^1]
+  if lastWord.len == 0:
+    return
+
+  for kw in Keywords:
+    if kw.startsWith(lastWord):
+      result.add(kw)
+
+  for cmd in Commands:
+    if cmd.startsWith(lastWord):
+      result.add(cmd)
+
+proc suggest*(input: string): string =
+  let completions = autocomplete(input)
+  if completions.len == 0:
+    return ""
+  if completions.len == 1:
+    return completions[0]
+  return completions.join(" | ")
 
 proc processCommand*(state: var CliState, input: string): string =
   let cmd = input.strip().toLower()
