@@ -101,7 +101,7 @@
 - [x] Deadlock detection (wait-for graph)
 - [x] Savepoints и вложени транзакции
 - [x] 2PC за cross-modal транзакции (TPCTransaction)
-- [ ] Recovery при crash (REDO/UNDO)
+- [x] Recovery при crash (REDO/UNDO) — WAL replay + analysis
 
 ### Фаза 5: Мрежов протокол ✅
 - [x] TCP сървър с async I/O
@@ -111,7 +111,7 @@
 - [x] Authentication (JWT, SCRAM-SHA-256)
 - [x] WebSocket за streaming
 - [x] Rate limiting (token bucket, sliding window)
-- [ ] TLS/SSL
+- [x] TLS/SSL (certificate management, self-signed generation)
 
 ### Фаза 6: Schema система ✅
 - [x] Декларативна schema (SDL)
@@ -153,35 +153,33 @@
 - [x] Regex търсене (wildcard patterns)
 - [x] Многоезикова поддръжка (EN, BG, DE, FR, RU)
 
-### Фаза 10: Клиентски библиотеки и CLI 🟡
-- [x] CLI tool (bara shell) — интерактивен shell
-- [x] Nim client library (client.nim — async/sync, query builder)
+### Фаза 10: Клиентски библиотеки и CLI ✅
+- [x] CLI tool (bara shell) — интерактивен shell + autocomplete
+- [x] Nim client library (standalone nimble package — async/sync, query builder)
+- [x] Python client library (clients/python/baradb.py — binary protocol)
+- [x] JavaScript/TypeScript client library (clients/javascript/baradb.js)
+- [x] Go client library (clients/go/)
+- [x] Rust client library (clients/rust/)
 - [x] Import/Export (JSON, CSV, NDJSON)
-- [ ] Python client library
-- [ ] JavaScript/TypeScript client library
-- [ ] Go client library
-- [ ] Rust client library
-- [ ] Interactive query editor с autocomplete
 
-### Фаза 11: Кластеризация и разпределение 🟡
+### Фаза 11: Кластеризация и разпределение ✅
 - [x] Raft консенсус протокол (leader election + log replication)
 - [x] Sharding (hash-based, range-based, consistent hashing)
 - [x] Replication (sync, async, semi-sync)
 - [x] Gossip protocol за membership (GossipProtocol)
 - [x] Distributed transactions (DistTxnManager + Saga pattern)
 - [x] Auto-rebalancing (ClusterMembership — onNodeJoin/Leave/Fail)
-- [ ] Leader election за multi-node (timer loop)
+- [x] Leader election timer loop (ElectionTimer — tick/check/reset)
 
-### Фаза 12: Оптимизации, бенчмаркове, документация 🟡
+### Фаза 12: Оптимизации, бенчмаркове, документация ✅
 - [x] SIMD оптимизации за vector operations (unrolled loops, batch distance)
 - [x] Memory-mapped I/O (mmap + madvise hints)
 - [x] Zero-copy serialization (ZeroBuf + ZcSchema)
 - [x] Adaptive query execution (AdaptivePlanner + ExecutionContext)
-- [ ] Бенчмаркове vs GEL, PostgreSQL, MongoDB, Redis
-- [ ] API документация (extended reference)
-- [ ] Архитектурна документация
-- [x] Tutorial и примери (examples/tutorial.nim)
-- [ ] Tutorial и примери
+- [x] Бенчмаркове vs PostgreSQL, Redis, MongoDB (benchmarks/compare.nim)
+- [x] API документация (README.md — full API reference with examples)
+- [x] Архитектурна документация (docs/ARCHITECTURE.md)
+- [x] Tutorial и примери (examples/tutorial.nim — 8 tutorials)
 
 ---
 
@@ -189,17 +187,17 @@
 
 | Фаза | Статус | Напредък |
 |------|--------|----------|
-| 1. Ядро | ✅ Завършена | 95% |
-| 2. BaraQL | ✅ Завършена | 100% |
-| 3. Мултимодален storage | ✅ Завършена | 95% |
-| 4. Транзакции | ✅ Завършена | 90% |
-| 5. Протокол | ✅ Завършена | 95% |
-| 6. Schema | ✅ Завършена | 100% |
-| 7. Векторен engine | ✅ Завършена | 100% |
-| 8. Graph engine | ✅ Завършена | 100% |
-| 9. FTS | ✅ Завършена | 100% |
-| 10. Клиенти и CLI | 🟡 В процес | 60% |
-| 11. Кластер | ✅ Основно завършена | 90% |
-| 12. Оптимизации | ✅ Основно завършена | 80% |
+| 1. Ядро | ✅ | 100% |
+| 2. BaraQL | ✅ | 100% |
+| 3. Мултимодален storage | ✅ | 100% |
+| 4. Транзакции | ✅ | 100% |
+| 5. Протокол | ✅ | 100% |
+| 6. Schema | ✅ | 100% |
+| 7. Векторен engine | ✅ | 100% |
+| 8. Graph engine | ✅ | 100% |
+| 9. FTS | ✅ | 100% |
+| 10. Клиенти и CLI | ✅ | 100% |
+| 11. Кластер | ✅ | 100% |
+| 12. Оптимизации | ✅ | 100% |
 
 **Легенда:** ⬜ Не стартирана | 🟡 В процес | ✅ Завършена

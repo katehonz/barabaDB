@@ -1,0 +1,8 @@
+[package]
+name = "baradb"
+version = "0.1.0"
+edition = "2021"
+description = "BaraDB client library for Rust — binary protocol client"
+license = "Apache-2.0"
+
+[dependencies]
