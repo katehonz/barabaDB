@@ -131,3 +131,50 @@ proc rebalance*(router: var ShardRouter, nodes: seq[string]) =
       router.shards[i].nodeIds.add(nodes[nodeIdx])
 
 proc shardCount*(router: ShardRouter): int = router.shards.len
+
+# Auto-rebalance with active node management
+type
+  ClusterMembership* = ref object
+    nodes*: seq[string]
+    router*: ShardRouter
+
+proc newClusterMembership*(router: ShardRouter): ClusterMembership =
+  ClusterMembership(nodes: @[], router: router)
+
+proc addNode*(cm: ClusterMembership, nodeId: string) =
+  if nodeId in cm.nodes:
+    return
+  cm.nodes.add(nodeId)
+  if cm.nodes.len >= 2:  # Only rebalance with 2+ nodes
+    cm.router.rebalance(cm.nodes)
+
+proc removeNode*(cm: ClusterMembership, nodeId: string) =
+  var newNodes: seq[string] = @[]
+  for n in cm.nodes:
+    if n != nodeId:
+      newNodes.add(n)
+  cm.nodes = newNodes
+  if cm.nodes.len >= 1:
+    cm.router.rebalance(cm.nodes)
+
+proc onNodeJoin*(cm: ClusterMembership, nodeId: string) =
+  echo "[cluster] node joined: ", nodeId
+  cm.addNode(nodeId)
+
+proc onNodeLeave*(cm: ClusterMembership, nodeId: string) =
+  echo "[cluster] node left: ", nodeId
+  cm.removeNode(nodeId)
+
+proc onNodeFail*(cm: ClusterMembership, nodeId: string) =
+  echo "[cluster] node failed: ", nodeId
+  cm.removeNode(nodeId)
+  # Re-assign shards that were on the failed node
+  for i in 0..<cm.router.shards.len:
+    var newReplicas: seq[string] = @[]
+    for rid in cm.router.shards[i].nodeIds:
+      if rid != nodeId:
+        newReplicas.add(rid)
+    cm.router.shards[i].nodeIds = newReplicas
+
+proc nodeCount*(cm: ClusterMembership): int = cm.nodes.len
+proc activeNodes*(cm: ClusterMembership): seq[string] = cm.nodes

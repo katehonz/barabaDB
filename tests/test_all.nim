@@ -31,6 +31,7 @@ import barabadb/protocol/zerocopy
 import barabadb/query/adaptive
 import barabadb/core/disttxn
 import barabadb/vector/engine as vengine
+import barabadb/graph/cypher
 import barabadb/vector/quant as vquant
 import barabadb/graph/engine as gengine
 import barabadb/graph/community as gcomm
@@ -1673,4 +1674,73 @@ suite "Vector Batch Operations":
     for i in 0..<100:
       watcher.trackInsert()
     watcher.trackUnindexed(40)  # 40% unindexed
-    check watcher.shouldRebuild()  # -та suffix
+    check watcher.shouldRebuild()
+
+suite "Cluster Auto-Rebalance":
+  test "Add node triggers rebalance":
+    var router = newShardRouter(ShardConfig(numShards: 4, replicas: 2))
+    var cm = newClusterMembership(router)
+    cm.addNode("node1")
+    cm.addNode("node2")
+    cm.addNode("node3")
+    check cm.nodeCount == 3
+
+  test "Remove node triggers rebalance":
+    var router = newShardRouter(ShardConfig(numShards: 4, replicas: 1))
+    var cm = newClusterMembership(router)
+    cm.addNode("node1")
+    cm.addNode("node2")
+    cm.addNode("node3")
+    cm.removeNode("node2")
+    check cm.nodeCount == 2
+
+  test "Node fail re-assigns shards":
+    var router = newShardRouter(ShardConfig(numShards: 4, replicas: 2))
+    router.rebalance(@["node1", "node2", "node3"])
+    var cm = newClusterMembership(router)
+    cm.nodes = @["node1", "node2", "node3"]
+    cm.onNodeFail("node1")
+    check cm.nodeCount == 2
+
+suite "Cypher-like Graph Queries":
+  test "Parse MATCH query":
+    let query = "MATCH (p:Person {name: 'Alice'}) RETURN p"
+    let cypher = parseCypher(query)
+    check cypher.kind == "MATCH"
+    check cypher.pattern.nodes.len == 1
+    check cypher.pattern.nodes[0].label == "Person"
+    check cypher.returnExprs.len == 1
+
+  test "Parse MATCH with edge":
+    let query = "MATCH (a:Person)-[r:KNOWS]->(b:Person) RETURN a, b"
+    let cypher = parseCypher(query)
+    check cypher.pattern.nodes.len == 2
+    check cypher.pattern.edges.len == 1
+    check cypher.pattern.edges[0].label == "KNOWS"
+
+  test "Parse MATCH with WHERE and LIMIT":
+    let query = "MATCH (p:Person) WHERE p.age > 18 RETURN p.name, p.age ORDER BY p.age LIMIT 10"
+    let cypher = parseCypher(query)
+    check cypher.whereClause.len > 0
+    check cypher.returnExprs.len == 2
+    check cypher.orderBy.len > 0
+    check cypher.limit == 10
+
+  test "Execute basic MATCH":
+    var g = newGraph()
+    discard g.addNode("Person", {"name": "Alice"}.toTable)
+    discard g.addNode("Person", {"name": "Bob"}.toTable)
+    discard g.addNode("Company", {"name": "Acme"}.toTable)
+
+    let query = parseCypher("MATCH (p:Person) RETURN p")
+    let result = executeCypher(g, query)
+    check result.rows.len == 2
+
+  test "Match nodes with properties":
+    var g = newGraph()
+    discard g.addNode("Person", {"name": "Alice", "age": "30"}.toTable)
+    discard g.addNode("Person", {"name": "Bob", "age": "25"}.toTable)
+
+    let matches = matchNodes(g, "Person", {"name": "Alice"}.toTable)
+    check matches.len == 1
+    check matches[0].properties["name"] == "Alice"
