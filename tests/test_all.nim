@@ -6,16 +6,23 @@ import std/strutils
 import barabadb/core/types
 import barabadb/core/mvcc
 import barabadb/core/deadlock
+import barabadb/core/columnar
 import barabadb/storage/bloom
 import barabadb/storage/wal
 import barabadb/storage/lsm
+import barabadb/storage/btree
 import barabadb/query/lexer as lex
 import barabadb/query/ast
 import barabadb/query/parser
+import barabadb/query/ir as qir
 import barabadb/vector/engine as vengine
+import barabadb/vector/quant as vquant
 import barabadb/graph/engine as gengine
+import barabadb/graph/community as gcomm
 import barabadb/fts/engine as fts
 import barabadb/protocol/wire
+import barabadb/protocol/pool
+import barabadb/protocol/auth
 import barabadb/schema/schema as schema
 
 suite "Core Types":
@@ -465,3 +472,213 @@ suite "Schema System":
     check s.find("Person") >= 0
     check s.find("name") >= 0
     check s.find("str") >= 0
+
+suite "B-Tree Index":
+  test "Insert and get":
+    var btree = newBTreeIndex[string, string]()
+    btree.insert("key1", "value1")
+    btree.insert("key2", "value2")
+    check btree.get("key1") == @["value1"]
+    check btree.get("key2") == @["value2"]
+    check not btree.contains("nonexistent")
+
+  test "Scan range":
+    var btree = newBTreeIndex[string, string]()
+    for i in 0..9:
+      btree.insert("key" & $i, "val" & $i)
+    let results = btree.scan("key2", "key5")
+    check results.len == 4
+
+  test "Duplicate keys":
+    var btree = newBTreeIndex[string, string]()
+    btree.insert("a", "val1")
+    btree.insert("a", "val2")
+    let vals = btree.get("a")
+    check vals.len == 2
+
+suite "Columnar Engine":
+  test "Column batch operations":
+    var batch = newColumnBatch()
+    var intCol = batch.addInt64Col("age")
+    var strCol = batch.addStringCol("name")
+    intCol.appendInt64(25)
+    intCol.appendInt64(30)
+    intCol.appendInt64(35)
+    strCol.appendString("Alice")
+    strCol.appendString("Bob")
+    strCol.appendString("Charlie")
+    check batch.rowCount() == 3
+
+  test "Aggregate operations":
+    var batch = newColumnBatch()
+    var col = batch.addInt64Col("age")
+    col.appendInt64(10)
+    col.appendInt64(20)
+    col.appendInt64(30)
+    check col.sumInt64() == 60
+    check col.avgInt64() - 20.0 < 0.001
+    check col.minInt64() == 10
+    check col.maxInt64() == 30
+    check col.count() == 3
+
+  test "RLE encoding":
+    let data = @[1'i64, 1, 1, 2, 2, 3, 3, 3, 3]
+    let encoded = rleEncode(data)
+    let decoded = rleDecode(encoded)
+    check decoded == data
+
+  test "Dictionary encoding":
+    let data = @["apple", "banana", "apple", "cherry", "banana"]
+    let encoded = dictEncode(data)
+    let decoded = dictDecode(encoded)
+    check decoded == data
+    check encoded.dict.len == 3
+
+  test "GroupBy":
+    var batch = newColumnBatch()
+    var deptCol = batch.addStringCol("department")
+    var salaryCol = batch.addInt64Col("salary")
+    deptCol.appendString("Engineering")
+    deptCol.appendString("Sales")
+    deptCol.appendString("Engineering")
+    salaryCol.appendInt64(100)
+    salaryCol.appendInt64(80)
+    salaryCol.appendInt64(120)
+
+    let groups = groupBy(batch, @["department"])
+    check groups.groups.len == 2  # unique departments
+
+suite "Type Checker & IR":
+  test "Literal type inference":
+    var tc = newTypeChecker()
+    let lit = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkInt64, int64Val: 42))
+    let t = tc.inferExpr(lit, initTable[string, IRType]())
+    check t.name == "int64"
+
+  test "Binary operation type inference":
+    var tc = newTypeChecker()
+    let left = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkInt64, int64Val: 1))
+    let right = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkInt64, int64Val: 2))
+    let bin = IRExpr(kind: irekBinary, binOp: irEq, binLeft: left, binRight: right)
+    let t = tc.inferExpr(bin, initTable[string, IRType]())
+    check t.name == "bool"
+
+  test "Aggregate type inference":
+    var tc = newTypeChecker()
+    let agg = IRExpr(kind: irekAggregate, aggOp: irCount)
+    let t = tc.inferExpr(agg, initTable[string, IRType]())
+    check t.name == "int64"
+
+suite "Connection Pool":
+  test "Create pool and acquire connection":
+    var pool = newConnectionPool("127.0.0.1", 5432)
+    let conn = pool.acquire()
+    check conn != nil
+    check conn.host == "127.0.0.1"
+    check conn.port == 5432
+    pool.release(conn)
+
+  test "Pool stats":
+    var cfg = defaultPoolConfig()
+    cfg.minConnections = 1
+    cfg.maxConnections = 10
+    var pool = newConnectionPool("127.0.0.1", 5432, "default", cfg)
+    let conn1 = pool.acquire()
+    let (total, idle, inUse) = pool.stats()
+    check inUse == 1
+    pool.release(conn1)
+    let (t2, i2, u2) = pool.stats()
+    check u2 == 0
+
+suite "Authentication":
+  test "Anonymous auth":
+    var am = newAuthManager()
+    let result = am.validateCredentials(AuthCredentials(authMethod: amNone))
+    check result.authenticated
+    check result.username == "anonymous"
+
+  test "Token auth":
+    var am = newAuthManager("mysecretkey")
+    let token = am.createToken(JWTClaims(sub: "user1", role: "admin"))
+    let result = am.validateCredentials(AuthCredentials(
+      authMethod: amToken, payload: token))
+    check result.authenticated
+
+  test "Invalid token":
+    var am = newAuthManager("mysecretkey")
+    let result = am.validateCredentials(AuthCredentials(
+      authMethod: amToken, payload: "invalid_token"))
+    check not result.authenticated
+
+suite "Vector Quantization":
+  test "Scalar quantization 8-bit":
+    var sq = newScalarQuantizer(4, bits = 8)
+    let vectors = @[@[1.0'f32, 2.0'f32, 3.0'f32, 4.0'f32],
+                     @[5.0'f32, 6.0'f32, 7.0'f32, 8.0'f32]]
+    sq.train(vectors)
+    let qv = sq.encode(@[3.0'f32, 4.0'f32, 5.0'f32, 6.0'f32])
+    check qv.kind == qkScalar8
+    check qv.int8Data.len == 4
+
+  test "Scalar quantization 4-bit":
+    var sq = newScalarQuantizer(4, bits = 4)
+    let vectors = @[@[1.0'f32, 2.0'f32, 3.0'f32, 4.0'f32]]
+    sq.train(vectors)
+    let qv = sq.encode(@[3.0'f32, 4.0'f32, 5.0'f32, 6.0'f32])
+    check qv.kind == qkScalar4
+    check qv.int4Data.len == 2
+
+  test "Product quantization":
+    var pq = newProductQuantizer(8, nSubspaces = 4, nClusters = 16)
+    var vectors: seq[seq[float32]] = @[]
+    for i in 0..<50:
+      var v: seq[float32] = @[]
+      for j in 0..<8:
+        v.add(float32(i * 8 + j) * 0.1)
+      vectors.add(v)
+    pq.train(vectors, nIterations = 5)
+    let qv = pq.encode(vectors[0])
+    check qv.kind == qkProduct
+    check qv.pqCodes.len == 4
+
+  test "Binary quantization":
+    let v = @[1.0'f32, -1.0'f32, 0.5'f32, -0.5'f32]
+    let qv = binaryQuantize(v)
+    check qv.kind == qkBinary
+    check qv.binData.len == 1
+
+suite "Louvain Community Detection":
+  test "Detect communities in simple graph":
+    var g = gengine.newGraph()
+    # Create two communities
+    let n1 = gengine.addNode(g, "A")
+    let n2 = gengine.addNode(g, "B")
+    let n3 = gengine.addNode(g, "C")
+    let n4 = gengine.addNode(g, "D")
+    # Community 1: fully connected
+    discard gengine.addEdge(g, n1, n2)
+    discard gengine.addEdge(g, n2, n3)
+    discard gengine.addEdge(g, n1, n3)
+    # Community 2
+    discard gengine.addEdge(g, n3, n4)  # single connection
+
+    let result = louvain(g)
+    check result.communities.len > 0
+    check result.numCommunities >= 1
+
+  test "Pattern matching":
+    var g = gengine.newGraph()
+    let a = gengine.addNode(g, "Person", {"name": "Alice"}.toTable)
+    let b = gengine.addNode(g, "Person", {"name": "Bob"}.toTable)
+    let c = gengine.addNode(g, "Person", {"name": "Charlie"}.toTable)
+    discard gengine.addEdge(g, a, b, "knows")
+    discard gengine.addEdge(g, b, c, "knows")
+    discard gengine.addEdge(g, a, c, "knows")
+
+    var pattern = newGraphPattern()
+    pattern.addNode(0, "Person", {"name": "Alice"}.toTable)
+    pattern.addNode(1, "Person")
+    pattern.addEdge(0, 1, "knows")
+
+    let matches = matchPattern(g, pattern)
+    check matches.len >= 1

@@ -1,0 +1,242 @@
+## BaraQL IR — Intermediate Representation for compilation
+import std/tables
+import ../core/types
+
+type
+  IRTypeKind* = enum
+    itkScalar
+    itkObject
+    itkArray
+    itkSet
+    itkOptional
+    itkFunction
+
+  IRType* = ref object
+    name*: string
+    kind*: IRTypeKind
+    fields*: Table[string, IRType]
+    isNullable*: bool
+    elementType*: IRType
+
+  IROperator* = enum
+    irAdd, irSub, irMul, irDiv, irMod, irPow
+    irEq, irNeq, irLt, irLte, irGt, irGte
+    irAnd, irOr, irNot
+    irIn, irNotIn
+    irLike, irILike
+    irBetween
+    irIsNull, irIsNotNull
+
+  IRAggregate* = enum
+    irCount, irSum, irAvg, irMin, irMax
+
+  IRLiteral* = object
+    case kind*: ValueKind
+    of vkNull: discard
+    of vkBool: boolVal*: bool
+    of vkInt64: int64Val*: int64
+    of vkFloat64: float64Val*: float64
+    of vkString: strVal*: string
+    else: discard
+
+  IRExprKind* = enum
+    irekLiteral
+    irekField
+    irekUnary
+    irekBinary
+    irekAggregate
+    irekFuncCall
+    irekCast
+    irekConditional
+    irekExists
+
+  IRJoinKind* = enum
+    irjkInner
+    irjkLeft
+    irjkRight
+    irjkFull
+    irjkCross
+
+  IRPlanKind* = enum
+    irpkScan
+    irpkFilter
+    irpkProject
+    irpkGroupBy
+    irpkJoin
+    irpkSort
+    irpkLimit
+    irpkInsert
+    irpkUpdate
+    irpkDelete
+    irpkCreateType
+    irpkUnion
+    irpkCTE
+    irpkValues
+    irpkExplain
+
+  IRPlan* = ref object
+    case kind*: IRPlanKind
+    of irpkScan:
+      scanTable*: string
+      scanAlias*: string
+    of irpkFilter:
+      filterSource*: IRPlan
+      filterCond*: IRExpr
+    of irpkProject:
+      projectSource*: IRPlan
+      projectExprs*: seq[IRExpr]
+      projectAliases*: seq[string]
+    of irpkGroupBy:
+      groupSource*: IRPlan
+      groupKeys*: seq[IRExpr]
+      groupAggs*: seq[IRExpr]
+      groupHaving*: IRExpr
+    of irpkJoin:
+      joinKind*: IRJoinKind
+      joinLeft*: IRPlan
+      joinRight*: IRPlan
+      joinCond*: IRExpr
+      joinAlias*: string
+    of irpkSort:
+      sortSource*: IRPlan
+      sortExprs*: seq[IRExpr]
+      sortDirs*: seq[bool]
+    of irpkLimit:
+      limitSource*: IRPlan
+      limitCount*: int64
+      limitOffset*: int64
+    of irpkInsert:
+      insertTable*: string
+      insertFields*: seq[string]
+      insertValues*: seq[seq[IRExpr]]
+    of irpkUpdate:
+      updateTable*: string
+      updateAlias*: string
+      updateSets*: seq[(string, IRExpr)]
+      updateSource*: IRPlan
+    of irpkDelete:
+      deleteTable*: string
+      deleteAlias*: string
+      deleteSource*: IRPlan
+    of irpkCreateType:
+      createTypeName*: string
+      createTypeDef*: IRType
+    of irpkUnion:
+      unionLeft*: IRPlan
+      unionRight*: IRPlan
+      unionAll*: bool
+    of irpkCTE:
+      cteName*: string
+      cteQuery*: IRPlan
+      cteMain*: IRPlan
+    of irpkValues:
+      valuesRows*: seq[seq[IRExpr]]
+    of irpkExplain:
+      explainPlan*: IRPlan
+
+  IRExpr* = ref object
+    case kind*: IRExprKind
+    of irekLiteral:
+      literal*: IRLiteral
+    of irekField:
+      fieldPath*: seq[string]
+    of irekUnary:
+      unOp*: IROperator
+      unExpr*: IRExpr
+    of irekBinary:
+      binOp*: IROperator
+      binLeft*: IRExpr
+      binRight*: IRExpr
+    of irekAggregate:
+      aggOp*: IRAggregate
+      aggArgs*: seq[IRExpr]
+      aggDistinct*: bool
+    of irekFuncCall:
+      irFunc*: string
+      irFuncArgs*: seq[IRExpr]
+    of irekCast:
+      irCastType*: IRType
+      irCastExpr*: IRExpr
+    of irekConditional:
+      cond*: IRExpr
+      thenExpr*: IRExpr
+      elseExpr*: IRExpr
+    of irekExists:
+      existsSubquery*: IRPlan
+
+type
+  TypeChecker* = ref object
+    schemas: Table[string, IRType]
+
+proc newTypeChecker*(): TypeChecker =
+  TypeChecker(schemas: initTable[string, IRType]())
+
+proc registerType*(tc: TypeChecker, name: string, typ: IRType) =
+  tc.schemas[name] = typ
+
+proc getType*(tc: TypeChecker, name: string): IRType =
+  tc.schemas.getOrDefault(name, nil)
+
+proc inferExpr*(tc: TypeChecker, expr: IRExpr, context: Table[string, IRType]): IRType =
+  case expr.kind
+  of irekLiteral:
+    case expr.literal.kind
+    of vkBool: return IRType(name: "bool", kind: itkScalar)
+    of vkInt64: return IRType(name: "int64", kind: itkScalar)
+    of vkFloat64: return IRType(name: "float64", kind: itkScalar)
+    of vkString: return IRType(name: "str", kind: itkScalar)
+    of vkNull: return IRType(name: "null", kind: itkScalar, isNullable: true)
+    else: return IRType(name: "unknown", kind: itkScalar)
+  of irekField:
+    if expr.fieldPath.len == 0:
+      return nil
+    let rootName = expr.fieldPath[0]
+    if rootName in context:
+      var current = context[rootName]
+      for i in 1..<expr.fieldPath.len:
+        if expr.fieldPath[i] in current.fields:
+          current = current.fields[expr.fieldPath[i]]
+        else:
+          return nil
+      return current
+    return nil
+  of irekUnary:
+    let operandType = tc.inferExpr(expr.unExpr, context)
+    if operandType == nil:
+      return nil
+    case expr.unOp
+    of irEq, irNeq, irLt, irLte, irGt, irGte, irAnd, irOr, irNot,
+       irIsNull, irIsNotNull, irIn, irNotIn, irLike, irILike, irBetween:
+      return IRType(name: "bool", kind: itkScalar)
+    else:
+      return nil
+  of irekBinary:
+    let leftType = tc.inferExpr(expr.binLeft, context)
+    let rightType = tc.inferExpr(expr.binRight, context)
+    if leftType == nil or rightType == nil:
+      return nil
+    case expr.binOp
+    of irAdd, irSub, irMul, irDiv, irMod, irPow:
+      return leftType
+    of irEq, irNeq, irLt, irLte, irGt, irGte, irAnd, irOr,
+       irIn, irNotIn, irLike, irILike, irBetween:
+      return IRType(name: "bool", kind: itkScalar)
+    else:
+      return nil
+  of irekAggregate:
+    case expr.aggOp
+    of irCount: return IRType(name: "int64", kind: itkScalar)
+    of irSum, irAvg: return IRType(name: "float64", kind: itkScalar)
+    of irMin, irMax:
+      if expr.aggArgs.len > 0:
+        return tc.inferExpr(expr.aggArgs[0], context)
+      return nil
+  of irekFuncCall:
+    return IRType(name: "unknown", kind: itkScalar)
+  of irekCast:
+    return expr.irCastType
+  of irekConditional:
+    let thenType = tc.inferExpr(expr.thenExpr, context)
+    return thenType
+  of irekExists:
+    return IRType(name: "bool", kind: itkScalar)

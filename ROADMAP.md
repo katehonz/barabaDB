@@ -64,7 +64,7 @@
 - [x] Bloom filter за бързо отхвърляне
 - [x] Типова система (int, float, string, bool, bytes, uuid, datetime, json, vector)
 - [x] Сериялизация на записите
-- [ ] B-Tree индекс за точкови заявки
+- [x] B-Tree индекс за точкови заявки
 - [ ] Компактиране на SSTable (compaction strategies)
 - [ ] Page cache и buffer pool
 
@@ -76,8 +76,8 @@
 - [x] Бинарни оператори (+, -, *, /, =, !=, <, >, AND, OR, NOT)
 - [x] Подзаявки и EXISTS
 - [x] Array литерали
-- [ ] Типов анализатор (type checker)
-- [ ] IR (Intermediate Representation)
+- [x] Типов анализатор (type checker)
+- [x] IR (Intermediate Representation)
 - [ ] Оптимизатор на заявки (predicate pushdown, projection pushdown)
 - [ ] Codegen → storage операции
 - [ ] GROUP BY, HAVING
@@ -86,11 +86,11 @@
 - [ ] Агрегатни функции (count, sum, avg, min, max)
 - [ ] Потребителски функции (UDF)
 
-### Фаза 3: Мултимодален storage ✅
+### Фаза 3: Мултимодален storage 🟡
 - [x] Документен engine — вложени JSON документи, масиви, вложени обекти
 - [x] Граф engine — adjacency list, edge properties, incident index
 - [x] Векторен engine — float32 arrays, distance metrics
-- [ ] Колонен engine — column-oriented storage за analytics
+- [x] Колонен engine — column-oriented storage за analytics (RLE, dict encoding, GroupBy)
 - [ ] Унифициран query interface през BaraQL
 - [ ] Cross-modal заявки (document + vector + graph в една заявка)
 
@@ -107,9 +107,9 @@
 - [x] TCP сървър с async I/O
 - [x] Binary протокол (BaraDB Wire Protocol)
 - [x] HTTP/REST API (JSON)
+- [x] Connection pooling
+- [x] Authentication (JWT, SCRAM-SHA-256)
 - [ ] WebSocket за streaming
-- [ ] Connection pooling
-- [ ] Authentication (SCRAM-SHA-256, token)
 - [ ] TLS/SSL
 - [ ] Rate limiting
 
@@ -127,7 +127,7 @@
 - [x] HNSW индекс (Hierarchical Navigable Small World)
 - [x] IVF-PQ индекс (Inverted File + Product Quantization)
 - [x] Дистанционни метрики (cosine, euclidean, dot product, Manhattan)
-- [ ] Квантизация (scalar, product, binary)
+- [x] Квантизация (scalar 8-bit/4-bit, product, binary)
 - [ ] Metadata filtering при vector search
 - [ ] Batch insert/update
 - [ ] Автоматичен index rebuild при threshold
@@ -139,8 +139,8 @@
 - [x] DFS (Depth-First Search)
 - [x] Най-къс път (Dijkstra)
 - [x] PageRank
-- [ ] Community detection (Louvain)
-- [ ] Pattern matching (subgraph isomorphism)
+- [x] Community detection (Louvain)
+- [x] Pattern matching (subgraph isomorphism)
 - [ ] Cypher-подобен query syntax (или BaraQL extension)
 
 ### Фаза 9: Full-Text Search ✅
@@ -153,8 +153,15 @@
 - [ ] Regex търсене
 - [ ] Многоезикова поддръжка
 
-### Фаза 10: Клиентски библиотеки и CLI ⬜
-- [ ] CLI tool (bara shell)
+### Фаза 10: Клиентски библиотеки и CLI ✅
+- [x] CLI tool (bara shell) — интерактивен shell
+- [ ] Nim client library
+- [ ] Python client library
+- [ ] JavaScript/TypeScript client library
+- [ ] Go client library
+- [ ] Rust client library
+- [ ] Interactive query editor с autocomplete
+- [ ] Import/Export (JSON, CSV, Parquet)
 - [ ] Nim client library
 - [ ] Python client library
 - [ ] JavaScript/TypeScript client library
@@ -188,16 +195,16 @@
 
 | Фаза | Статус | Напредък |
 |------|--------|----------|
-| 1. Ядро | ✅ Основно завършена | 70% |
-| 2. BaraQL | 🟡 В процес | 50% |
-| 3. Мултимодален storage | ✅ Основно завършена | 60% |
-| 4. Транзакции | ✅ Основно завършена | 80% |
-| 5. Протокол | 🟡 В процес | 50% |
+| 1. Ядро | ✅ Основно завършена | 85% |
+| 2. BaraQL | 🟡 В процес | 60% |
+| 3. Мултимодален storage | 🟡 В процес | 75% |
+| 4. Транзакции | ✅ Основно завършена | 85% |
+| 5. Протокол | 🟡 В процес | 70% |
 | 6. Schema | ✅ Основно завършена | 75% |
-| 7. Векторен engine | ✅ Завършена | 60% |
-| 8. Graph engine | ✅ Завършена | 70% |
+| 7. Векторен engine | ✅ Завършена | 85% |
+| 8. Graph engine | ✅ Завършена | 90% |
 | 9. FTS | ✅ Завършена | 60% |
-| 10. Клиенти и CLI | ✅ Основно завършена | 60% |
+| 10. Клиенти и CLI | 🟡 В процес | 50% |
 | 11. Кластер | ⬜ Не стартирана | 0% |
 | 12. Оптимизации | ⬜ Не стартирана | 0% |
 
