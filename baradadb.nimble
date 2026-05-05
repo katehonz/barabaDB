@@ -1,0 +1,24 @@
+# Package
+version       = "0.1.0"
+author        = "BaraDB Team"
+description   = "BaraDB — Multimodal database written in Nim"
+license       = "Apache-2.0"
+srcDir        = "src"
+bin           = @["baradadb"]
+binDir        = "build"
+
+# Dependencies
+requires "nim >= 2.2.0"
+
+# Tasks
+task build_debug, "Build debug version":
+  exec "nim c --debugger:native --linedir:on -o:build/baradadb src/baradadb.nim"
+
+task build_release, "Build release version":
+  exec "nim c -d:release --opt:speed -o:build/baradadb src/baradadb.nim"
+
+task test, "Run all tests":
+  exec "nim c -r tests/test_all.nim"
+
+task bench, "Run benchmarks":
+  exec "nim c -d:release -r benchmarks/bench_storage.nim"

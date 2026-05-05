@@ -1,0 +1,232 @@
+## Full-Text Search Engine — inverted index with BM25 ranking
+import std/tables
+import std/strutils
+import std/unicode
+import std/math
+import std/algorithm
+import std/sets
+
+type
+  TermFreq* = Table[string, int]
+  DocLen* = int
+
+  PostingEntry* = object
+    docId*: uint64
+    termFreq*: int
+    positions*: seq[int]
+
+  InvertedIndex* = ref object
+    postings*: Table[string, seq[PostingEntry]]
+    docLengths*: Table[uint64, int]
+    docCount*: int
+    avgDocLen*: float64
+    totalTerms*: int
+
+  SearchResult* = object
+    docId*: uint64
+    score*: float64
+    highlights*: seq[(int, int)]
+
+  TokenizerConfig* = object
+    lowercase*: bool
+    removeStopWords*: bool
+    stemming*: bool
+    minWordLen*: int
+    maxWordLen*: int
+
+const stopWords* = [
+  "a", "an", "the", "is", "it", "in", "on", "at", "to", "for",
+  "of", "with", "by", "from", "as", "into", "through", "during",
+  "before", "after", "above", "below", "between", "out", "off",
+  "over", "under", "again", "further", "then", "once", "here",
+  "there", "when", "where", "why", "how", "all", "each", "every",
+  "both", "few", "more", "most", "other", "some", "such", "no",
+  "nor", "not", "only", "own", "same", "so", "than", "too",
+  "very", "can", "will", "just", "don", "should", "now",
+  "и", "в", "на", "за", "от", "да", "се", "е", "са", "по",
+  "не", "че", "с", "към", "но", "или", "ако", "при", "до",
+]
+
+proc defaultTokenizerConfig*(): TokenizerConfig =
+  TokenizerConfig(
+    lowercase: true,
+    removeStopWords: true,
+    stemming: false,
+    minWordLen: 2,
+    maxWordLen: 64,
+  )
+
+proc simpleStem(word: string): string =
+  if word.len <= 3:
+    return word
+  if word.endsWith("ing"):
+    return word[0..^4]
+  if word.endsWith("tion"):
+    return word[0..^5]
+  if word.endsWith("ness"):
+    return word[0..^5]
+  if word.endsWith("ment"):
+    return word[0..^5]
+  if word.endsWith("able"):
+    return word[0..^5]
+  if word.endsWith("ible"):
+    return word[0..^5]
+  if word.endsWith("ies"):
+    return word[0..^4] & "y"
+  if word.endsWith("es") and word.len > 4:
+    return word[0..^3]
+  if word.endsWith("ed") and word.len > 4:
+    return word[0..^3]
+  if word.endsWith("ly") and word.len > 4:
+    return word[0..^3]
+  if word.endsWith("s") and not word.endsWith("ss") and word.len > 3:
+    return word[0..^2]
+  return word
+
+proc tokenize*(text: string, config: TokenizerConfig = defaultTokenizerConfig()): seq[string] =
+  result = @[]
+  var word = ""
+  for ch in text:
+    if ch.isAlphaNumeric() or ch in {'_', '-'}:
+      word.add(ch)
+    else:
+      if word.len > 0:
+        var token = word
+        if config.lowercase:
+          token = token.toLower()
+        if config.stemming:
+          token = simpleStem(token)
+        if token.len >= config.minWordLen and token.len <= config.maxWordLen:
+          if not config.removeStopWords or token notin stopWords:
+            result.add(token)
+        word = ""
+  if word.len > 0:
+    var token = word
+    if config.lowercase:
+      token = token.toLower()
+    if config.stemming:
+      token = simpleStem(token)
+    if token.len >= config.minWordLen and token.len <= config.maxWordLen:
+      if not config.removeStopWords or token notin stopWords:
+        result.add(token)
+
+proc newInvertedIndex*(): InvertedIndex =
+  InvertedIndex(
+    postings: initTable[string, seq[PostingEntry]](),
+    docLengths: initTable[uint64, int](),
+    docCount: 0,
+    avgDocLen: 0.0,
+    totalTerms: 0,
+  )
+
+proc addDocument*(idx: InvertedIndex, docId: uint64, text: string,
+                  config: TokenizerConfig = defaultTokenizerConfig()) =
+  let tokens = tokenize(text, config)
+  var termFreqs = initTable[string, int]()
+  var positions = initTable[string, seq[int]]()
+
+  for i, token in tokens:
+    if token notin termFreqs:
+      termFreqs[token] = 0
+      positions[token] = @[]
+    inc termFreqs[token]
+    positions[token].add(i)
+
+  for term, freq in termFreqs:
+    if term notin idx.postings:
+      idx.postings[term] = @[]
+    idx.postings[term].add(PostingEntry(
+      docId: docId,
+      termFreq: freq,
+      positions: positions[term],
+    ))
+
+  idx.docLengths[docId] = tokens.len
+  inc idx.docCount
+  idx.totalTerms += tokens.len
+  idx.avgDocLen = float64(idx.totalTerms) / float64(idx.docCount)
+
+proc removeDocument*(idx: InvertedIndex, docId: uint64) =
+  if docId notin idx.docLengths:
+    return
+  let docLen = idx.docLengths[docId]
+  idx.docLengths.del(docId)
+  dec idx.docCount
+  idx.totalTerms -= docLen
+  if idx.docCount > 0:
+    idx.avgDocLen = float64(idx.totalTerms) / float64(idx.docCount)
+
+  for term, postings in idx.postings.mpairs:
+    var newPostings: seq[PostingEntry] = @[]
+    for entry in postings:
+      if entry.docId != docId:
+        newPostings.add(entry)
+    postings = newPostings
+
+proc bm25Score*(idx: InvertedIndex, term: string, docId: uint64,
+                k1: float64 = 1.2, b: float64 = 0.75): float64 =
+  if term notin idx.postings:
+    return 0.0
+
+  let df = idx.postings[term].len
+  let n = idx.docCount
+  if df == 0 or n == 0:
+    return 0.0
+
+  var tf = 0
+  var found = false
+  for entry in idx.postings[term]:
+    if entry.docId == docId:
+      tf = entry.termFreq
+      found = true
+      break
+
+  if not found:
+    return 0.0
+
+  let idf = ln((float64(n) - float64(df) + 0.5) / (float64(df) + 0.5) + 1.0)
+  let docLen = float64(idx.docLengths.getOrDefault(docId, 0))
+  let tfNorm = (float64(tf) * (k1 + 1.0)) /
+               (float64(tf) + k1 * (1.0 - b + b * docLen / idx.avgDocLen))
+  return idf * tfNorm
+
+proc search*(idx: InvertedIndex, query: string, limit: int = 10,
+             config: TokenizerConfig = defaultTokenizerConfig()): seq[SearchResult] =
+  let queryTokens = tokenize(query, config)
+  if queryTokens.len == 0:
+    return @[]
+
+  var docScores = initTable[uint64, float64]()
+  var docHighlights = initTable[uint64, seq[(int, int)]]()
+
+  for token in queryTokens:
+    if token notin idx.postings:
+      continue
+    for entry in idx.postings[token]:
+      let score = bm25Score(idx, token, entry.docId)
+      if entry.docId notin docScores:
+        docScores[entry.docId] = 0.0
+        docHighlights[entry.docId] = @[]
+      docScores[entry.docId] += score
+      for pos in entry.positions:
+        let start = pos
+        let stop = pos + token.len
+        docHighlights[entry.docId].add((start, stop))
+
+  var results: seq[SearchResult] = @[]
+  for docId, score in docScores:
+    results.add(SearchResult(
+      docId: docId,
+      score: score,
+      highlights: docHighlights.getOrDefault(docId, @[]),
+    ))
+
+  results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
+
+  if results.len > limit:
+    results = results[0..<limit]
+
+  return results
+
+proc termCount*(idx: InvertedIndex): int = idx.postings.len
+proc documentCount*(idx: InvertedIndex): int = idx.docCount

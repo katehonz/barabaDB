@@ -1,0 +1,15 @@
+# Build
+build/
+nimcache/
+nimblecache/
+
+# Temp
+*.tmp
+*.log
+
+# Data
+data/
+
+# OS
+.DS_Store
+Thumbs.db
