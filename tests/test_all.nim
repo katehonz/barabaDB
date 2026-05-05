@@ -9,6 +9,7 @@ import barabadb/core/deadlock
 import barabadb/core/columnar
 import barabadb/core/raft
 import barabadb/core/sharding
+import barabadb/core/replication
 import barabadb/storage/bloom
 import barabadb/storage/wal
 import barabadb/storage/lsm
@@ -18,6 +19,7 @@ import barabadb/query/lexer as lex
 import barabadb/query/ast
 import barabadb/query/parser
 import barabadb/query/ir as qir
+import barabadb/query/codegen
 import barabadb/vector/engine as vengine
 import barabadb/vector/quant as vquant
 import barabadb/graph/engine as gengine
@@ -954,3 +956,178 @@ suite "Sharding":
   test "Active shard count":
     var router = newShardRouter()
     check router.activeShardCount == 4
+
+suite "Schema Inheritance":
+  test "Inheritance — merge properties from base":
+    var s = newSchema()
+    let base = newType("Base")
+    base.addProperty("id", "str", required = true)
+    base.addProperty("created", "datetime")
+    s.addType("default", base)
+
+    let child = newType("Person")
+    child.setBases(@["Base"])
+    child.addProperty("name", "str", required = true)
+    s.addType("default", child)
+
+    let resolved = s.resolveInheritance(child)
+    check resolved.properties.len == 3  # id + created + name
+    check "id" in resolved.properties
+    check "name" in resolved.properties
+    check "created" in resolved.properties
+
+  test "Multi-level inheritance":
+    var s = newSchema()
+    let a = newType("A")
+    a.addProperty("a1", "str")
+    s.addType("default", a)
+
+    let b = newType("B")
+    b.setBases(@["A"])
+    b.addProperty("b1", "int32")
+    s.addType("default", b)
+
+    let c = newType("C")
+    c.setBases(@["B"])
+    c.addProperty("c1", "bool")
+    s.addType("default", c)
+
+    let resolved = s.resolveInheritance(c)
+    check resolved.properties.len == 3  # a1 + b1 + c1
+
+  test "Override base property":
+    var s = newSchema()
+    let base = newType("Base")
+    base.addProperty("name", "str")
+    s.addType("default", base)
+
+    let child = newType("Child")
+    child.setBases(@["Base"])
+    child.addProperty("name", "text")  # override
+    s.addType("default", child)
+
+    let resolved = s.resolveInheritance(child)
+    check resolved.properties["name"].typeName == "text"
+
+  test "isSubtype":
+    var s = newSchema()
+    let a = newType("A")
+    s.addType("default", a)
+    let b = newType("B")
+    b.setBases(@["A"])
+    s.addType("default", b)
+    let c = newType("C")
+    c.setBases(@["B"])
+    s.addType("default", c)
+
+    check s.isSubtype("C", "A")
+    check s.isSubtype("C", "B")
+    check s.isSubtype("B", "A")
+    check not s.isSubtype("A", "C")
+
+  test "Computed property":
+    let t = newType("Person")
+    t.addProperty("firstName", "str")
+    t.addProperty("lastName", "str")
+    t.addComputedProperty("fullName", "str", "firstName ++ ' ' ++ lastName")
+    check t.properties["fullName"].computed
+    check t.properties["fullName"].expr == "firstName ++ ' ' ++ lastName"
+
+suite "Codegen":
+  test "Codegen scan":
+    let plan = IRPlan(kind: irpkScan, scanTable: "users", scanAlias: "u")
+    let op = codegenPlan(plan)
+    check op.kind == sokScan
+    check op.table == "users"
+
+  test "Codegen filter with point read optimization":
+    let filterExpr = IRExpr(kind: irekBinary, binOp: irEq,
+      binLeft: IRExpr(kind: irekField, fieldPath: @["id"]),
+      binRight: IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkInt64, int64Val: 42)))
+    let scan = IRPlan(kind: irpkScan, scanTable: "users", scanAlias: "u")
+    let plan = IRPlan(kind: irpkFilter, filterSource: scan, filterCond: filterExpr)
+    let op = codegenPlan(plan)
+    # Should optimize to point read
+    check op.kind == sokPointRead
+
+  test "Codegen limit":
+    let scan = IRPlan(kind: irpkScan, scanTable: "t", scanAlias: "t")
+    let plan = IRPlan(kind: irpkLimit, limitSource: scan, limitCount: 10, limitOffset: 5)
+    let op = codegenPlan(plan)
+    check op.limit == 10
+    check op.offset == 5
+
+  test "Cost estimation":
+    let scan = newStorageOp(sokScan)
+    check estimateCost(scan) == 1000.0
+    let pointRead = newStorageOp(sokPointRead)
+    check estimateCost(pointRead) == 1.0
+
+  test "Explain plan":
+    let scan = newStorageOp(sokScan)
+    scan.table = "users"
+    let explanation = scan.explain()
+    check "sokScan" in explanation
+    check "users" in explanation
+
+suite "Replication":
+  test "Create replication manager":
+    var rm = newReplicationManager(rmAsync)
+    check rm.totalReplicaCount == 0
+    check rm.connectedReplicaCount == 0
+
+  test "Add and connect replicas":
+    var rm = newReplicationManager(rmAsync)
+    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+    rm.addReplica(newReplica("r2", "10.0.0.2", 5432))
+    check rm.totalReplicaCount == 2
+
+    rm.connectReplica("r1")
+    check rm.connectedReplicaCount == 1
+
+  test "Async replication — write returns immediately":
+    var rm = newReplicationManager(rmAsync)
+    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+    rm.connectReplica("r1")
+
+    let lsn = rm.writeLsn(@[1'u8, 2, 3])
+    check lsn == 1
+    # Async doesn't wait — already "acked"
+    check rm.isFullyAcked(lsn)
+
+  test "Sync replication — wait for ack":
+    var rm = newReplicationManager(rmSync)
+    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+    rm.connectReplica("r1")
+
+    let lsn = rm.writeLsn(@[1'u8, 2, 3])
+    check not rm.isFullyAcked(lsn)
+
+    rm.ackLsn("r1", lsn)
+    check rm.isFullyAcked(lsn)
+
+  test "Semi-sync replication":
+    var rm = newReplicationManager(rmSemiSync, syncCount = 2)
+    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+    rm.addReplica(newReplica("r2", "10.0.0.2", 5432))
+    rm.addReplica(newReplica("r3", "10.0.0.3", 5432))
+    rm.connectReplica("r1")
+    rm.connectReplica("r2")
+    rm.connectReplica("r3")
+
+    let lsn = rm.writeLsn(@[1'u8])
+    check not rm.isFullyAcked(lsn)  # needs 2 acks
+
+    rm.ackLsn("r1", lsn)
+    check not rm.isFullyAcked(lsn)  # still needs 1 more
+
+    rm.ackLsn("r2", lsn)
+    check rm.isFullyAcked(lsn)  # 2 acks received
+
+  test "Replica status":
+    var rm = newReplicationManager(rmAsync)
+    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+    rm.connectReplica("r1")
+    let status = rm.replicaStatus()
+    check status.len == 1
+    check status[0][1] == rsStreaming

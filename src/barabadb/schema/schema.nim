@@ -162,6 +162,17 @@ proc addConstraint*(t: SchemaType, name: string, expr: string) =
 proc addIndex*(t: SchemaType, name: string, expr: string, kind: string = "btree") =
   t.indexes.add(SchemaIndex(name: name, expr: expr, kind: kind))
 
+proc addComputedProperty*(t: SchemaType, name: string, typeName: string, expr: string) =
+  t.properties[name] = SchemaProperty(
+    name: name,
+    typeName: typeName,
+    computed: true,
+    expr: expr,
+  )
+
+proc setBases*(t: SchemaType, bases: seq[string]) =
+  t.bases = bases
+
 proc addType*(s: Schema, module: string, t: SchemaType) =
   if module notin s.modules:
     s.modules[module] = newModule(module)
@@ -178,6 +189,47 @@ proc getAllTypes*(s: Schema): seq[SchemaType] =
   for moduleName, module in s.modules:
     for typeName, t in module.types:
       result.add(t)
+
+proc resolveInheritance*(s: Schema, t: SchemaType): SchemaType =
+  result = SchemaType(
+    name: t.name, module: t.module, bases: t.bases,
+    properties: initTable[string, SchemaProperty](),
+    links: initTable[string, SchemaLink](),
+    constraints: @[], indexes: @[],
+    isAbstract: t.isAbstract, isFinal: t.isFinal,
+  )
+  for baseName in t.bases:
+    let baseType = s.getType(baseName)
+    if baseType != nil:
+      let resolved = s.resolveInheritance(baseType)
+      for pname, prop in resolved.properties:
+        if pname notin result.properties:
+          result.properties[pname] = prop
+      for lname, link in resolved.links:
+        if lname notin result.links:
+          result.links[lname] = link
+  for pname, prop in t.properties:
+    result.properties[pname] = prop
+  for lname, link in t.links:
+    result.links[lname] = link
+
+proc isSubtype*(s: Schema, child, ancestor: string): bool =
+  if child == ancestor:
+    return true
+  let t = s.getType(child)
+  if t == nil:
+    return false
+  for base in t.bases:
+    if s.isSubtype(base, ancestor):
+      return true
+  return false
+
+proc getSubtypes*(s: Schema, typeName: string): seq[SchemaType] =
+  result = @[]
+  for t in s.getAllTypes():
+    if typeName in t.bases:
+      result.add(t)
+      result.add(s.getSubtypes(t.name))
 
 proc diff*(oldSchema, newSchema: Schema): SchemaDiff =
   var diff = SchemaDiff()

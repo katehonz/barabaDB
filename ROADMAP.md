@@ -83,7 +83,7 @@
 - [x] JOIN (inner, left, right, full, cross)
 - [x] CTE (WITH)
 - [x] Агрегатни функции (count, sum, avg, min, max)
-- [ ] Codegen → storage операции
+- [x] Codegen — IR → storage операции (predicate pushdown, cost estimation)
 - [ ] Потребителски функции (UDF)
 
 ### Фаза 3: Мултимодален storage 🟡
@@ -117,9 +117,9 @@
 - [x] Декларативна schema (SDL)
 - [x] Object types с properties
 - [x] Links между типове (1:1, 1:N, N:M)
-- [ ] Наследоване и mixins
+- [x] Наследоване и mixins
 - [x] Constraints (unique, check, required)
-- [ ] Computed properties
+- [x] Computed properties
 - [x] Автоматични миграции (schema diff)
 - [x] Версиониране на schema
 
@@ -173,7 +173,7 @@
 ### Фаза 11: Кластеризация и разпределение 🟡
 - [x] Raft консенсус протокол (leader election + log replication)
 - [x] Sharding (hash-based, range-based, consistent hashing)
-- [ ] Replication (sync, async)
+- [x] Replication (sync, async, semi-sync)
 - [ ] Leader election за multi-node
 - [ ] Gossip protocol за membership
 - [ ] Distributed transactions
@@ -196,16 +196,16 @@
 | Фаза | Статус | Напредък |
 |------|--------|----------|
 | 1. Ядро | ✅ Завършена | 95% |
-| 2. BaraQL | ✅ Основно завършена | 85% |
+| 2. BaraQL | ✅ Завършена | 95% |
 | 3. Мултимодален storage | 🟡 В процес | 75% |
 | 4. Транзакции | ✅ Основно завършена | 85% |
-| 5. Протокол | ✅ Основно завършена | 85% |
-| 6. Schema | ✅ Основно завършена | 75% |
+| 5. Протокол | ✅ Завършена | 85% |
+| 6. Schema | ✅ Завършена | 95% |
 | 7. Векторен engine | ✅ Завършена | 95% |
 | 8. Graph engine | ✅ Завършена | 90% |
 | 9. FTS | ✅ Завършена | 85% |
 | 10. Клиенти и CLI | 🟡 В процес | 50% |
-| 11. Кластер | 🟡 В процес | 30% |
+| 11. Кластер | ✅ Основно завършена | 60% |
 | 12. Оптимизации | ⬜ Не стартирана | 0% |
 
 **Легенда:** ⬜ Не стартирана | 🟡 В процес | ✅ Завършена
