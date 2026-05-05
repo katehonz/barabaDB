@@ -2,6 +2,7 @@
 import std/unittest
 import std/tables
 import std/strutils
+import std/os
 
 import barabadb/core/types
 import barabadb/core/mvcc
@@ -35,6 +36,7 @@ import barabadb/graph/cypher
 import barabadb/vector/quant as vquant
 import barabadb/storage/recovery
 import barabadb/cli/shell
+import barabadb/protocol/ssl
 import barabadb/graph/engine as gengine
 import barabadb/graph/community as gcomm
 import barabadb/fts/engine as fts
@@ -1838,3 +1840,32 @@ suite "CLI Autocomplete":
   test "Autocomplete empty":
     let res = autocomplete("")
     check res.len == 0
+
+suite "TLS/SSL":
+  test "Create TLS config":
+    let config = newTLSConfig("cert.pem", "key.pem", "ca.pem", verifyPeer = true)
+    check config.certFile == "cert.pem"
+    check config.verifyPeer == true
+
+  test "Validate cert — missing file":
+    let errors = validateCert("nonexistent.pem")
+    check errors.len > 0
+
+  test "Certificate info parsing":
+    # Write a dummy PEM cert
+    let testCert = "/tmp/baradb_test_cert.pem"
+    writeFile(testCert, "Subject: CN=localhost\nIssuer: CN=localhost\n")
+    let info = parseCertInfo(testCert)
+    check info.subject.len > 0
+    check info.isSelfSigned  # subject == issuer
+
+  test "TLS socket connect — missing cert":
+    var sock = newTLSSocket(newTLSConfig("nonexistent.pem", "nonexistent.key"))
+    check not sock.connect("localhost", 443)
+
+  test "Generate self-signed cert":
+    let (certPath, keyPath) = generateSelfSignedCert("/tmp/baradb_test_tls", "test.local")
+    # May fail if openssl not installed
+    if certPath.len > 0:
+      check fileExists(certPath)
+      check fileExists(keyPath)
