@@ -107,6 +107,7 @@ type
     tkAssign
     tkArrow
     tkDoubleColon
+    tkColon
     tkDot
     tkComma
     tkSemicolon
@@ -351,7 +352,7 @@ proc nextToken*(l: var Lexer): Token =
       discard l.advance()
       return Token(kind: tkEq, value: "==", line: startLine, col: startCol)
     discard l.advance()
-    return Token(kind: tkAssign, value: ":=", line: startLine, col: startCol)
+    return Token(kind: tkEq, value: "=", line: startLine, col: startCol)
   of ':':
     if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '=':
       discard l.advance()
@@ -362,7 +363,7 @@ proc nextToken*(l: var Lexer): Token =
       discard l.advance()
       return Token(kind: tkDoubleColon, value: "::", line: startLine, col: startCol)
     discard l.advance()
-    return Token(kind: tkInvalid, value: ":", line: startLine, col: startCol)
+    return Token(kind: tkColon, value: ":", line: startLine, col: startCol)
   of '!':
     if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '=':
       discard l.advance()

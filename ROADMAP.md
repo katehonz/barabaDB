@@ -78,12 +78,12 @@
 - [x] Array литерали
 - [x] Типов анализатор (type checker)
 - [x] IR (Intermediate Representation)
-- [ ] Оптимизатор на заявки (predicate pushdown, projection pushdown)
+- [x] Оптимизатор на заявки (predicate pushdown, projection pushdown)
+- [x] GROUP BY, HAVING
+- [x] JOIN (inner, left, right, full, cross)
+- [x] CTE (WITH)
+- [x] Агрегатни функции (count, sum, avg, min, max)
 - [ ] Codegen → storage операции
-- [ ] GROUP BY, HAVING
-- [ ] JOIN (inner, left, right, full)
-- [ ] CTE (WITH)
-- [ ] Агрегатни функции (count, sum, avg, min, max)
 - [ ] Потребителски функции (UDF)
 
 ### Фаза 3: Мултимодален storage 🟡
@@ -170,11 +170,11 @@
 - [ ] Interactive query editor с autocomplete
 - [ ] Import/Export (JSON, CSV, Parquet)
 
-### Фаза 11: Кластеризация и разпределение ⬜
-- [ ] Raft консенсус протокол
-- [ ] Sharding (hash-based, range-based)
+### Фаза 11: Кластеризация и разпределение 🟡
+- [x] Raft консенсус протокол (leader election + log replication)
+- [x] Sharding (hash-based, range-based, consistent hashing)
 - [ ] Replication (sync, async)
-- [ ] Leader election
+- [ ] Leader election за multi-node
 - [ ] Gossip protocol за membership
 - [ ] Distributed transactions
 - [ ] Auto-rebalancing
@@ -196,16 +196,16 @@
 | Фаза | Статус | Напредък |
 |------|--------|----------|
 | 1. Ядро | ✅ Завършена | 95% |
-| 2. BaraQL | 🟡 В процес | 60% |
+| 2. BaraQL | ✅ Основно завършена | 85% |
 | 3. Мултимодален storage | 🟡 В процес | 75% |
 | 4. Транзакции | ✅ Основно завършена | 85% |
-| 5. Протокол | 🟡 В процес | 85% |
+| 5. Протокол | ✅ Основно завършена | 85% |
 | 6. Schema | ✅ Основно завършена | 75% |
 | 7. Векторен engine | ✅ Завършена | 95% |
 | 8. Graph engine | ✅ Завършена | 90% |
 | 9. FTS | ✅ Завършена | 85% |
 | 10. Клиенти и CLI | 🟡 В процес | 50% |
-| 11. Кластер | ⬜ Не стартирана | 0% |
+| 11. Кластер | 🟡 В процес | 30% |
 | 12. Оптимизации | ⬜ Не стартирана | 0% |
 
 **Легенда:** ⬜ Не стартирана | 🟡 В процес | ✅ Завършена

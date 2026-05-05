@@ -120,7 +120,7 @@ type
     case kind*: NodeKind
     of nkSelect:
       selDistinct*: bool
-      selWith*: seq[Node]
+      selWith*: seq[(string, Node)]
       selResult*: seq[Node]
       selFrom*: Node
       selJoins*: seq[Node]

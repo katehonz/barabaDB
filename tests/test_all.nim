@@ -7,6 +7,8 @@ import barabadb/core/types
 import barabadb/core/mvcc
 import barabadb/core/deadlock
 import barabadb/core/columnar
+import barabadb/core/raft
+import barabadb/core/sharding
 import barabadb/storage/bloom
 import barabadb/storage/wal
 import barabadb/storage/lsm
@@ -782,3 +784,173 @@ suite "Vector Metadata Filtering":
     let results = vengine.searchWithFilter(idx, @[1.0'f32, 0.0'f32, 0.0'f32], 10,
                                            filter = filterA)
     check results.len == 2  # only category A entries
+
+suite "BaraQL Parser — Extended":
+  test "Parse GROUP BY":
+    let ast = parse("SELECT dept, count(*) FROM employees GROUP BY dept")
+    check ast.stmts.len == 1
+    check ast.stmts[0].selGroupBy.len == 1
+
+  test "Parse GROUP BY with HAVING":
+    let ast = parse("SELECT dept, count(*) FROM employees GROUP BY dept HAVING count(*) > 5")
+    check ast.stmts[0].selHaving != nil
+
+  test "Parse ORDER BY with direction":
+    let ast = parse("SELECT name FROM users ORDER BY age DESC")
+    check ast.stmts[0].selOrderBy.len == 1
+    check ast.stmts[0].selOrderBy[0].orderByDir == sdDesc
+
+  test "Parse ORDER BY multiple columns":
+    let ast = parse("SELECT * FROM t ORDER BY a ASC, b DESC")
+    check ast.stmts[0].selOrderBy.len == 2
+
+  test "Parse INNER JOIN":
+    let ast = parse("SELECT u.name, o.total FROM users u INNER JOIN orders o ON u.id = o.user_id")
+    check ast.stmts[0].selJoins.len == 1
+    check ast.stmts[0].selJoins[0].joinKind == jkInner
+
+  test "Parse LEFT JOIN":
+    let ast = parse("SELECT u.name FROM users u LEFT JOIN orders o ON u.id = o.user_id")
+    check ast.stmts[0].selJoins.len == 1
+    check ast.stmts[0].selJoins[0].joinKind == jkLeft
+
+  test "Parse multiple JOINs":
+    let ast = parse("SELECT * FROM a JOIN b ON a.id = b.aid JOIN c ON b.id = c.bid")
+    check ast.stmts[0].selJoins.len == 2
+
+  test "Parse CTE (WITH)":
+    let ast = parse("WITH active AS (SELECT * FROM users WHERE active = true) SELECT * FROM active")
+    check ast.stmts[0].selWith.len == 1
+    check ast.stmts[0].selWith[0][0] == "active"
+
+  test "Parse multiple CTEs":
+    let ast = parse("WITH a AS (SELECT id FROM t1), b AS (SELECT id FROM t2) SELECT * FROM a")
+    check ast.stmts[0].selWith.len == 2
+
+  test "Parse aggregate functions in SELECT":
+    let ast = parse("SELECT count(*), sum(amount), avg(price), min(age), max(score) FROM orders")
+    check ast.stmts[0].selResult.len == 5
+
+  test "Parse CASE expression":
+    let ast = parse("SELECT CASE WHEN age > 18 THEN 'adult' ELSE 'minor' END FROM users")
+    check ast.stmts[0].selResult.len == 1
+
+  test "Parse BETWEEN":
+    let ast = parse("SELECT * FROM products WHERE price BETWEEN 10 AND 100")
+    check ast.stmts[0].selWhere != nil
+
+  test "Parse subquery in FROM":
+    let ast = parse("SELECT * FROM (SELECT id FROM users) AS sub")
+    check ast.stmts[0].selFrom != nil
+
+  test "Parse UPDATE SET WHERE":
+    let ast = parse("UPDATE users SET name = 'Alice' WHERE id = 1")
+    check ast.stmts[0].updSet.len == 1
+
+  test "Parse DELETE WHERE":
+    let ast = parse("DELETE FROM users WHERE id = 1")
+    check ast.stmts[0].delWhere != nil
+
+  test "Parse CREATE TYPE with properties":
+    let ast = parse("CREATE TYPE Person { name: str, age: int32 }")
+    check ast.stmts[0].ctName == "Person"
+    check ast.stmts[0].ctProperties.len == 2
+
+suite "Raft Consensus":
+  test "Create cluster with nodes":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    cluster.addNode("n2")
+    cluster.addNode("n3")
+    check cluster.nodes.len == 3
+    check cluster.nodes["n1"].peers.len == 2
+
+  test "Initial state is follower":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    check cluster.nodes["n1"].state == rsFollower
+
+  test "Election — single node becomes leader":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    let node = cluster.nodes["n1"]
+    node.becomeCandidate()
+    node.becomeLeader()
+    check node.isLeader
+    check node.leaderId == "n1"
+
+  test "Log replication":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    let node = cluster.nodes["n1"]
+    node.becomeCandidate()
+    node.becomeLeader()
+    let entry = node.appendLog("SET key1 value1")
+    check entry.index == 1
+    check node.logLen == 1
+    let entry2 = node.appendLog("SET key2 value2")
+    check entry2.index == 2
+    check node.logLen == 2
+
+  test "RequestVote handling":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    cluster.addNode("n2")
+    let n1 = cluster.nodes["n1"]
+    let n2 = cluster.nodes["n2"]
+    let req = RaftMessage(kind: rmkRequestVote, term: 1, senderId: "n2",
+                          lastLogIndex: 0, lastLogTerm: 0)
+    let reply = n1.handleRequestVote(req)
+    check reply.success
+    check n1.votedFor == "n2"
+
+  test "AppendEntries handling":
+    var cluster = newRaftCluster()
+    cluster.addNode("n1")
+    cluster.addNode("n2")
+    let n2 = cluster.nodes["n2"]
+    let msg = RaftMessage(kind: rmkAppendEntries, term: 1, senderId: "n1",
+                          prevLogIndex: 0, prevLogTerm: 0,
+                          entries: @[LogEntry(term: 1, index: 1, command: "SET x 1")],
+                          leaderCommit: 0)
+    let reply = n2.handleAppendEntries(msg)
+    check reply.success
+    check n2.logLen == 1
+
+suite "Sharding":
+  test "Hash-based sharding":
+    var router = newShardRouter(ShardConfig(numShards: 4, strategy: ssHash))
+    check router.shardCount == 4
+    let s1 = router.getShard("user_1")
+    let s2 = router.getShard("user_2")
+    check s1 >= 0 and s1 < 4
+    check s2 >= 0 and s2 < 4
+
+  test "Consistent hashing":
+    var router = newShardRouter(ShardConfig(numShards: 4, strategy: ssConsistent))
+    router.addVirtualNodes(50)
+    let s = router.getShard("some_key")
+    check s >= 0 and s < 4
+
+  test "Range-based sharding":
+    var router = newShardRouter(ShardConfig(numShards: 3, strategy: ssRange))
+    router.setRangeBounds(@[("a", "f"), ("g", "n"), ("o", "z")])
+    check router.getShardRange("apple") == 0
+    check router.getShardRange("hello") == 1
+    check router.getShardRange("top") == 2
+
+  test "Rebalance assigns nodes":
+    var router = newShardRouter(ShardConfig(numShards: 3, replicas: 2, strategy: ssHash))
+    router.rebalance(@["node1", "node2", "node3"])
+    for shard in router.shards:
+      check shard.nodeIds.len == 2  # 2 replicas
+
+  test "Replicas of key":
+    var router = newShardRouter(ShardConfig(numShards: 2, replicas: 1, strategy: ssHash))
+    router.rebalance(@["n1", "n2"])
+    let replicas = router.replicasOf("test_key")
+    check replicas.len == 1
+
+  test "Active shard count":
+    var router = newShardRouter()
+    check router.activeShardCount == 4
