@@ -20,6 +20,8 @@ import barabadb/query/ast
 import barabadb/query/parser
 import barabadb/query/ir as qir
 import barabadb/query/codegen
+import barabadb/query/udf
+import barabadb/vector/simd
 import barabadb/vector/engine as vengine
 import barabadb/vector/quant as vquant
 import barabadb/graph/engine as gengine
@@ -1131,3 +1133,124 @@ suite "Replication":
     let status = rm.replicaStatus()
     check status.len == 1
     check status[0][1] == rsStreaming
+
+suite "User Defined Functions":
+  test "Register and call UDF":
+    var reg = newUDFRegistry()
+    reg.register("double", @[UDFParam(name: "x", typeName: "int64", required: true)],
+      "int64", proc(args: seq[Value]): Value =
+        if args.len > 0 and args[0].kind == vkInt64:
+          return Value(kind: vkInt64, int64Val: args[0].int64Val * 2)
+        return Value(kind: vkNull))
+
+    check reg.hasFunction("double")
+    let result = reg.call("double", @[Value(kind: vkInt64, int64Val: 21)])
+    check result.kind == vkInt64
+    check result.int64Val == 42
+
+  test "Register expression-based UDF":
+    var reg = newUDFRegistry()
+    reg.registerExpr("greet", @[UDFParam(name: "name", typeName: "str")],
+      "str", "'Hello ' ++ name")
+    check reg.hasFunction("greet")
+    check reg.getFunction("greet").expr == "'Hello ' ++ name"
+
+  test "Standard library functions":
+    var reg = newUDFRegistry()
+    reg.registerStdlib()
+
+    # lower
+    let r1 = reg.call("lower", @[Value(kind: vkString, strVal: "HELLO")])
+    check r1.strVal == "hello"
+
+    # upper
+    let r2 = reg.call("upper", @[Value(kind: vkString, strVal: "hello")])
+    check r2.strVal == "HELLO"
+
+    # len
+    let r3 = reg.call("len", @[Value(kind: vkString, strVal: "test")])
+    check r3.int64Val == 4
+
+    # trim
+    let r4 = reg.call("trim", @[Value(kind: vkString, strVal: "  hello  ")])
+    check r4.strVal == "hello"
+
+    # toString
+    let r5 = reg.call("toString", @[Value(kind: vkInt64, int64Val: 42)])
+    check r5.strVal == "42"
+
+  test "Deregister function":
+    var reg = newUDFRegistry()
+    reg.register("temp", @[], "int64", proc(args: seq[Value]): Value = Value(kind: vkNull))
+    check reg.hasFunction("temp")
+    reg.deregister("temp")
+    check not reg.hasFunction("temp")
+
+  test "Function count":
+    var reg = newUDFRegistry()
+    reg.registerStdlib()
+    check reg.functionCount > 10
+
+suite "Vector SIMD":
+  test "Dot product":
+    let a = @[1.0'f32, 2.0'f32, 3.0'f32]
+    let b = @[4.0'f32, 5.0'f32, 6.0'f32]
+    let result = dotProductSimd(a, b)
+    check abs(result - 32.0) < 0.001
+
+  test "L2 distance":
+    let a = @[0.0'f32, 0.0'f32]
+    let b = @[3.0'f32, 4.0'f32]
+    let result = l2NormSimd(a, b)
+    check abs(result - 5.0) < 0.001
+
+  test "Cosine distance":
+    let a = @[1.0'f32, 0.0'f32, 0.0'f32]
+    let b = @[0.0'f32, 1.0'f32, 0.0'f32]
+    let result = cosineSimd(a, b)
+    check abs(result - 1.0) < 0.001  # orthogonal = 1.0
+
+    let c = @[1.0'f32, 0.0'f32, 0.0'f32]
+    let d = @[1.0'f32, 0.0'f32, 0.0'f32]
+    check cosineSimd(c, d) < 0.001  # same direction = 0.0
+
+  test "Manhattan distance":
+    let a = @[1.0'f32, 2.0'f32]
+    let b = @[4.0'f32, 6.0'f32]
+    let result = manhattanSimd(a, b)
+    check abs(result - 7.0) < 0.001
+
+  test "Normalize vector":
+    let v = @[3.0'f32, 4.0'f32]
+    let n = normalize(v)
+    check abs(n[0] - 0.6) < 0.001
+    check abs(n[1] - 0.8) < 0.001
+
+  test "Add vectors":
+    let a = @[1.0'f32, 2.0'f32]
+    let b = @[3.0'f32, 4.0'f32]
+    let c = addVectors(a, b)
+    check c[0] == 4.0
+    check c[1] == 6.0
+
+  test "Scale vector":
+    let v = @[1.0'f32, 2.0'f32, 3.0'f32]
+    let s = scaleVector(v, 2.0)
+    check s[0] == 2.0
+    check s[1] == 4.0
+    check s[2] == 6.0
+
+  test "TopK":
+    let distances = @[5.0'f32, 1.0'f32, 3.0'f32, 2.0'f32, 4.0'f32]
+    let top = topK(distances, 3)
+    check top.len == 3
+    check top[0][0] == 1  # index 1, value 1.0
+    check top[1][0] == 3  # index 3, value 2.0
+    check top[2][0] == 2  # index 2, value 3.0
+
+  test "Batch distance":
+    let queries = @[@[1.0'f32, 0.0'f32], @[0.0'f32, 1.0'f32]]
+    let corpus = @[@[1.0'f32, 0.0'f32], @[0.0'f32, 1.0'f32], @[1.0'f32, 1.0'f32]]
+    let results = batchDistance(queries, corpus, "cosine")
+    check results.len == 2
+    check results[0].len == 3

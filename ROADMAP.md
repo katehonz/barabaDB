@@ -84,7 +84,7 @@
 - [x] CTE (WITH)
 - [x] Агрегатни функции (count, sum, avg, min, max)
 - [x] Codegen — IR → storage операции (predicate pushdown, cost estimation)
-- [ ] Потребителски функции (UDF)
+- [x] Потребителски функции (UDF) — stdlib + custom
 
 ### Фаза 3: Мултимодален storage 🟡
 - [x] Документен engine — вложени JSON документи, масиви, вложени обекти
@@ -180,8 +180,8 @@
 - [ ] Auto-rebalancing
 
 ### Фаза 12: Оптимизации, бенчмаркове, документация ⬜
-- [ ] SIMD оптимизации за vector operations
-- [ ] Memory-mapped I/O
+- [x] SIMD оптимизации за vector operations (unrolled loops, batch distance)
+- [x] Memory-mapped I/O (mmap + madvise hints)
 - [ ] Zero-copy serialization
 - [ ] Adaptive query execution
 - [ ] Бенчмаркове vs GEL, PostgreSQL, MongoDB, Redis
@@ -196,7 +196,7 @@
 | Фаза | Статус | Напредък |
 |------|--------|----------|
 | 1. Ядро | ✅ Завършена | 95% |
-| 2. BaraQL | ✅ Завършена | 95% |
+| 2. BaraQL | ✅ Завършена | 100% |
 | 3. Мултимодален storage | 🟡 В процес | 75% |
 | 4. Транзакции | ✅ Основно завършена | 85% |
 | 5. Протокол | ✅ Завършена | 85% |
@@ -206,6 +206,6 @@
 | 9. FTS | ✅ Завършена | 85% |
 | 10. Клиенти и CLI | 🟡 В процес | 50% |
 | 11. Кластер | ✅ Основно завършена | 60% |
-| 12. Оптимизации | ⬜ Не стартирана | 0% |
+| 12. Оптимизации | 🟡 В процес | 40% |
 
 **Легенда:** ⬜ Не стартирана | 🟡 В процес | ✅ Завършена
