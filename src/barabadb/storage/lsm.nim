@@ -2,13 +2,17 @@
 import std/algorithm
 import std/os
 import std/hashes
+import std/strutils
 import std/tables
 import std/monotimes
+import std/streams
 import bloom
 import wal
+import mmap
 
 const
   SSTableMagic* = 0x53535442'u32  # "SSTB"
+  SSTableVersion* = 1'u32
   DefaultMemTableSize* = 4 * 1024 * 1024  # 4MB
   DefaultBloomFpRate* = 0.01
 
@@ -26,12 +30,13 @@ type
 
   SSTable* = object
     path*: string
-    index: Table[string, int64]  # key -> file offset
+    index: Table[string, int64]  # key -> file offset in data block
     bloom: BloomFilter
     level: int
     minKey: string
     maxKey: string
     entryCount: int
+    mmapFile: MmapFile
 
   LSMTree* = object
     dir: string
@@ -42,6 +47,7 @@ type
     memMaxSize: int
     currentSeq: uint64
     readLocks: int
+    nextSSTableId: int
 
 proc newMemTable(maxSize: int = DefaultMemTableSize): MemTable =
   MemTable(entries: @[], size: 0, maxSize: maxSize)
@@ -64,15 +70,14 @@ proc put*(mt: var MemTable, key: string, value: seq[byte], timestamp: uint64, de
 proc get*(mt: MemTable, key: string): (bool, Entry) =
   if mt.entries.len == 0:
     return (false, Entry())
-  # Binary search since entries are kept sorted by key
   var lo = 0
   var hi = mt.entries.len - 1
   while lo <= hi:
     let mid = (lo + hi) div 2
-    let cmp = cmp(mt.entries[mid].key, key)
-    if cmp == 0:
+    let c = cmp(mt.entries[mid].key, key)
+    if c == 0:
       return (true, mt.entries[mid])
-    elif cmp < 0:
+    elif c < 0:
       lo = mid + 1
     else:
       hi = mid - 1
@@ -88,18 +93,235 @@ proc clear*(mt: var MemTable) =
   mt.entries.setLen(0)
   mt.size = 0
 
+# ----------------------------------------------------------------------
+# SSTable serialization format (native endianness):
+# [Header] 28 bytes
+#   magic: uint32
+#   version: uint32
+#   entryCount: uint32
+#   indexOffset: uint64
+#   bloomOffset: uint64
+#
+# [Data Block]
+#   For each entry:
+#     keyLen: uint32
+#     key: bytes[keyLen]
+#     valueLen: uint32
+#     value: bytes[valueLen]
+#     timestamp: uint64
+#     deleted: uint8
+#
+# [Index Block]
+#   For each entry:
+#     keyLen: uint32
+#     key: bytes[keyLen]
+#     dataOffset: uint64   # offset of this entry in data block
+#
+# [Bloom Filter Block]
+#   bloomSize: uint32
+#   bloomData: bytes[bloomSize]
+# ----------------------------------------------------------------------
+
+proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
+  let s = newFileStream(path, fmWrite)
+  if s.isNil:
+    raise newException(IOError, "Cannot create SSTable file: " & path)
+
+  # Write header
+  s.write(SSTableMagic)
+  s.write(SSTableVersion)
+  s.write(uint32(entries.len))
+  let indexOffsetPos = s.getPosition()
+  s.write(0'u64)  # indexOffset placeholder
+  let bloomOffsetPos = s.getPosition()
+  s.write(0'u64)  # bloomOffset placeholder
+
+  # Write data block
+  var offsets = newSeq[(string, int64)](entries.len)
+  for i, entry in entries:
+    offsets[i] = (entry.key, int64(s.getPosition()))
+    s.write(uint32(entry.key.len))
+    s.write(entry.key)
+    s.write(uint32(entry.value.len))
+    if entry.value.len > 0:
+      s.writeData(addr entry.value[0], entry.value.len)
+    s.write(entry.timestamp)
+    s.write(if entry.deleted: 1'u8 else: 0'u8)
+
+  let indexOffset = uint64(s.getPosition())
+
+  # Write index block
+  for i, entry in entries:
+    s.write(uint32(entry.key.len))
+    s.write(entry.key)
+    s.write(uint64(offsets[i][1]))
+
+  let bloomOffset = uint64(s.getPosition())
+
+  # Write bloom filter
+  var bloom = newBloomFilter(max(entries.len * 10, 1000), DefaultBloomFpRate)
+  for entry in entries:
+    bloom.add(cast[seq[byte]](entry.key))
+  let bloomData = bloom.serialize()
+  s.write(uint32(bloomData.len))
+  if bloomData.len > 0:
+    s.writeData(addr bloomData[0], bloomData.len)
+
+  # Patch header with correct offsets before closing
+  s.setPosition(int(indexOffsetPos))
+  s.write(indexOffset)
+  s.setPosition(int(bloomOffsetPos))
+  s.write(bloomOffset)
+  s.close()
+
+  # Build in-memory index
+  var idxTable = initTable[string, int64]()
+  var minK = ""
+  var maxK = ""
+  for i, entry in entries:
+    idxTable[entry.key] = offsets[i][1]
+    if minK == "" or entry.key < minK: minK = entry.key
+    if maxK == "" or entry.key > maxK: maxK = entry.key
+
+  result = SSTable(
+    path: path,
+    index: idxTable,
+    bloom: bloom,
+    level: level,
+    minKey: minK,
+    maxKey: maxK,
+    entryCount: entries.len,
+    mmapFile: openMmap(path),
+  )
+
+proc loadSSTable*(path: string): SSTable =
+  let mf = openMmap(path)
+  if mf.regions.len == 0:
+    raise newException(IOError, "Cannot mmap SSTable: " & path)
+
+  if mf.readUint32(0) != SSTableMagic:
+    raise newException(ValueError, "Invalid SSTable magic")
+  if mf.readUint32(4) != SSTableVersion:
+    raise newException(ValueError, "Unsupported SSTable version")
+
+  let entryCount = int(mf.readUint32(8))
+  let indexOffset = int(mf.readUint64(12))
+  let bloomOffset = int(mf.readUint64(20))
+
+  var idxTable = initTable[string, int64]()
+  var minK = ""
+  var maxK = ""
+
+  # Parse index block
+  var pos = indexOffset
+  for i in 0..<entryCount:
+    let keyLen = int(mf.readUint32(pos))
+    pos += 4
+    let key = mf.readString(pos, keyLen)
+    pos += keyLen
+    let dataOffset = int64(mf.readUint64(pos))
+    pos += 8
+    idxTable[key] = dataOffset
+    if minK == "" or key < minK: minK = key
+    if maxK == "" or key > maxK: maxK = key
+
+  # Parse bloom filter
+  var bloom = newBloomFilter(max(entryCount * 10, 1000), DefaultBloomFpRate)
+  pos = bloomOffset
+  let bloomSize = int(mf.readUint32(pos))
+  pos += 4
+  if bloomSize > 0 and pos + bloomSize <= mf.totalSize:
+    var bloomData = newSeq[byte](bloomSize)
+    copyMem(addr bloomData[0], unsafeAddr mf.regions[0].data[pos], bloomSize)
+    bloom.deserialize(bloomData)
+
+  result = SSTable(
+    path: path,
+    index: idxTable,
+    bloom: bloom,
+    level: 0,
+    minKey: minK,
+    maxKey: maxK,
+    entryCount: entryCount,
+    mmapFile: mf,
+  )
+
+proc readSSTableEntry*(sst: SSTable, key: string): (bool, Entry) =
+  if key notin sst.index:
+    return (false, Entry())
+
+  let offset = int(sst.index[key])
+  let mf = sst.mmapFile
+  if mf.regions.len == 0:
+    return (false, Entry())
+
+  var pos = offset
+  if pos + 4 > mf.totalSize:
+    return (false, Entry())
+  let keyLen = int(mf.readUint32(pos))
+  pos += 4
+  if pos + keyLen > mf.totalSize:
+    return (false, Entry())
+  let readKey = mf.readString(pos, keyLen)
+  pos += keyLen
+  if readKey != key:
+    return (false, Entry())
+
+  if pos + 4 > mf.totalSize:
+    return (false, Entry())
+  let valueLen = int(mf.readUint32(pos))
+  pos += 4
+  if pos + valueLen + 8 + 1 > mf.totalSize:
+    return (false, Entry())
+
+  var value = newSeq[byte](valueLen)
+  if valueLen > 0:
+    copyMem(addr value[0], unsafeAddr mf.regions[0].data[pos], valueLen)
+  pos += valueLen
+
+  let timestamp = mf.readUint64(pos)
+  pos += 8
+  let deleted = mf.readByte(pos) != 0
+
+  return (true, Entry(key: key, value: value, timestamp: timestamp, deleted: deleted))
+
+proc close*(sst: var SSTable) =
+  sst.mmapFile.close()
+
+# ----------------------------------------------------------------------
+# LSMTree API
+# ----------------------------------------------------------------------
+
 proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
   createDir(dir)
   createDir(dir / "sstables")
+
+  var sstables: seq[SSTable] = @[]
+  var nextId = 1
+
+  # Load existing SSTables
+  for kind, path in walkDir(dir / "sstables"):
+    if kind == pcFile and path.endsWith(".sst"):
+      try:
+        var sst = loadSSTable(path)
+        sstables.add(sst)
+        let name = splitFile(path).name
+        nextId = max(nextId, parseInt(name) + 1)
+      except:
+        discard  # skip corrupt SSTables
+
+  sstables.sort(proc(a, b: SSTable): int = cmp(a.minKey, b.minKey))
+
   LSMTree(
     dir: dir,
     memTable: newMemTable(memMaxSize),
     immutableMem: newMemTable(0),
-    sstables: @[],
+    sstables: sstables,
     wal: newWriteAheadLog(dir / "wal"),
     memMaxSize: memMaxSize,
     currentSeq: 0,
     readLocks: 0,
+    nextSSTableId: nextId,
   )
 
 proc put*(db: var LSMTree, key: string, value: seq[byte]) =
@@ -128,9 +350,18 @@ proc get*(db: LSMTree, key: string): (bool, seq[byte]) =
       return (false, @[])
     return (true, entry2.value)
 
-  for sst in db.sstables:
-    if key in sst.index:
-      return (true, @[])  # placeholder for SSTable read
+  # Search SSTables from newest to oldest
+  for i in countdown(db.sstables.high, db.sstables.low):
+    let sst = db.sstables[i]
+    if key < sst.minKey or key > sst.maxKey:
+      continue
+    if not sst.bloom.contains(cast[seq[byte]](key)):
+      continue
+    let (found3, entry3) = readSSTableEntry(sst, key)
+    if found3:
+      if entry3.deleted:
+        return (false, @[])
+      return (true, entry3.value)
 
   return (false, @[])
 
@@ -139,15 +370,34 @@ proc contains*(db: LSMTree, key: string): bool =
   return found
 
 proc flush*(db: var LSMTree) =
-  if db.memTable.len == 0:
+  if db.immutableMem.len == 0 and db.memTable.len == 0:
     return
-  db.immutableMem = db.memTable
-  db.memTable = newMemTable(db.memMaxSize)
+
+  # Flush immutable memtable if present, otherwise flush current memtable
+  var toFlush = db.immutableMem
+  if toFlush.len == 0:
+    toFlush = db.memTable
+    db.memTable = newMemTable(db.memMaxSize)
+  else:
+    db.immutableMem = newMemTable(0)
+
+  if toFlush.len == 0:
+    return
+
+  let path = db.dir / "sstables" / ($db.nextSSTableId & ".sst")
+  inc db.nextSSTableId
+
+  var sst = writeSSTable(toFlush.entries, path, level = 0)
+  db.sstables.add(sst)
+  db.sstables.sort(proc(a, b: SSTable): int = cmp(a.minKey, b.minKey))
+
   db.wal.writeCommit(uint64(getMonoTime().ticks()))
   db.wal.sync()
 
 proc close*(db: var LSMTree) =
   db.flush()
+  for sst in db.sstables.mitems:
+    sst.close()
   db.wal.close()
 
 proc memTableSize*(db: LSMTree): int = db.memTable.len

@@ -6,6 +6,11 @@ BaraDB combines document, graph, vector, columnar, and full-text search storage
 in a single engine with a unified query language (BaraQL). It compiles to a
 single 286KB binary with no runtime dependencies.
 
+> **Current Status:** BaraDB is an active development project and educational
+> proof-of-concept. Many core algorithms are implemented and tested, but several
+> critical production features are still placeholders or incomplete. See
+> [Limitations](#current-limitations) below for details.
+
 ## Why BaraDB?
 
 | Feature | GEL/EdgeDB | BaraDB |
@@ -524,6 +529,22 @@ nim c -d:release -r benchmarks/bench_all.nim
 | CLI shell | 🟡 | 50% |
 | Cluster (Raft + sharding + replication) | ✅ | 60% |
 | Optimizations (SIMD + mmap done) | 🟡 | 40% |
+
+## Current Limitations
+
+While BaraDB demonstrates a wide range of database concepts with passing tests,
+several components are simplified or incomplete for production use:
+
+| Component | Status | Note |
+|-----------|--------|------|
+| LSM-Tree SSTable reads | 🟡 Placeholder | `get()` finds the key in the SSTable index but returns an empty value. Real disk I/O is pending. |
+| HNSW vector search | 🟡 Linear scan | `search()` scans all vectors (O(N)). True hierarchical graph navigation is not yet implemented. |
+| TCP server execution | 🟡 Stub | The async server accepts connections and echoes `"OK\n"`. It does not parse the wire protocol or execute queries. |
+| Raft consensus | 🟡 In-memory only | Raft algorithm logic is implemented and tested, but there is no network transport between nodes. |
+| Graph / FTS / Columnar | 🟡 In-memory only | These engines store data in RAM. Persistence to disk is not yet implemented. |
+| Query codegen | 🟡 Partial | IR plans are generated, but execution against storage engines is limited. |
+
+We are actively working to close these gaps. See the [Roadmap](#roadmap-progress) above for per-phase progress.
 
 ## License
 

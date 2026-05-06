@@ -1,5 +1,6 @@
 ## Memory-mapped I/O — mmap-based file access for SSTables
 import std/os
+import std/posix
 
 const
   PageSize* = 4096
@@ -47,13 +48,13 @@ proc openMmap*(path: string, mode: MmapMode = mmReadOnly): MmapFile =
   if fileSize == 0:
     return MmapFile(path: path, regions: @[], totalSize: 0, pageSize: PageSize)
 
-  let fd = open(path, if mode == mmReadOnly: fmRead else: fmReadWrite)
+  let fd = posix.open(path, if mode == mmReadOnly: O_RDONLY else: O_RDWR)
   let prot = if mode == mmReadOnly: PROT_READ else: PROT_READ or PROT_WRITE
   let flags = if mode == mmPrivate: MAP_PRIVATE else: MAP_SHARED
 
   let mapped = mmap(nil, fileSize, prot, flags, fd, 0)
   if mapped == MAP_FAILED:
-    close(fd)
+    discard close(fd)
     return MmapFile(path: path, regions: @[], totalSize: 0, pageSize: PageSize)
 
   let region = MmapRegion(
@@ -124,7 +125,7 @@ proc adviseDontNeed*(mf: MmapFile, offset: int, size: int) =
 proc close*(mf: MmapFile) =
   for region in mf.regions:
     discard munmap(region.data, region.size)
-    close(region.fd)
+    discard close(cint(region.fd))
   mf.regions.setLen(0)
 
 proc size*(mf: MmapFile): int = mf.totalSize

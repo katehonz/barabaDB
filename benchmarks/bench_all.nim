@@ -1,5 +1,6 @@
 ## BaraDB Benchmarks — performance tests for all engines
 import std/monotimes
+import std/times
 import std/tables
 import std/random
 import std/strutils
@@ -11,7 +12,7 @@ import ../src/barabadb/fts/engine as fts
 import ../src/barabadb/graph/engine as gengine
 
 proc elapsed(start: MonoTime): float64 =
-  let ns = float64((getMonoTime() - start).ticks)
+  let ns = float64((getMonoTime() - start).inNanoseconds)
   return ns / 1_000_000_000.0
 
 proc formatOps(ops: int, secs: float64): string =
