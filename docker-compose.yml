@@ -1,0 +1,23 @@
+version: "3.9"
+services:
+  baradb:
+    build: .
+    ports:
+      - "9000:9000"
+      - "8080:8080"
+      - "8081:8081"
+    volumes:
+      - baradb_data:/data
+    environment:
+      - BARADB_PORT=9000
+      - BARADB_DATA_DIR=/data
+      - BARADB_HTTP_PORT=8080
+      - BARADB_WS_PORT=8081
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  baradb_data:
