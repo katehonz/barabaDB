@@ -103,18 +103,31 @@ proc handleRequest(server: HttpServer, req: Request) {.async, gcsafe.} =
                           newHttpHeaders([("Content-Type", "application/json")]))
         return
 
-      let (success, errMsg, affectedRows) = executor.executeQuery(reqCtx, astNode)
+      let result = executor.executeQuery(reqCtx, astNode)
 
-      if success:
+      if result.success:
         inc server.metrics.selectCount
+        var jsonRows = newJArray()
+        for row in result.rows:
+          var jsonRow = newJObject()
+          for col, val in row:
+            jsonRow[col] = %val
+          jsonRows.add(jsonRow)
+        var jsonCols = newJArray()
+        for c in result.columns:
+          jsonCols.add(%c)
+        var msg: JsonNode = nil
+        if result.message.len > 0:
+          msg = %result.message
         await req.respond(Http200, $ %* {
-          "rows": newJArray(),
-          "affectedRows": affectedRows,
-          "columns": newJArray()
+          "rows": jsonRows,
+          "affectedRows": result.affectedRows,
+          "columns": jsonCols,
+          "message": if result.message.len > 0: %result.message else: newJNull()
         }, newHttpHeaders([("Content-Type", "application/json")]))
       else:
         inc server.metrics.queryErrors
-        await req.respond(Http400, $jsonError(400, errMsg),
+        await req.respond(Http400, $jsonError(400, result.message),
                           newHttpHeaders([("Content-Type", "application/json")]))
 
     of "/health":

@@ -70,21 +70,22 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string): (bool, Que
     if astNode.stmts.len == 0:
       return (true, QueryResult(), "")
 
-    let stmt = astNode.stmts[0]
-    case stmt.kind
-    of nkSelect, nkInsert, nkUpdate, nkDelete, nkCreateTable, nkDropTable,
-       nkCreateType, nkBeginTxn, nkCommitTxn, nkRollbackTxn, nkExplainStmt:
-      let (success, errMsg, affectedRows) = executor.executeQuery(ctx, astNode)
-      if success:
-        var qr = QueryResult(affectedRows: affectedRows, rowCount: affectedRows)
-        if stmt.kind == nkSelect:
-          qr.columns = @["key", "value"]
-          qr.rows = @[]
-        return (true, qr, "")
-      else:
-        return (false, QueryResult(), errMsg)
+    let result = executor.executeQuery(ctx, astNode)
+    if result.success:
+      var qr = QueryResult(affectedRows: result.affectedRows, rowCount: result.rows.len)
+      qr.columns = result.columns
+      qr.rows = @[]
+      for row in result.rows:
+        var wireRow: seq[WireValue] = @[]
+        for col in result.columns:
+          if col in row:
+            wireRow.add(WireValue(kind: fkString, strVal: row[col]))
+          else:
+            wireRow.add(WireValue(kind: fkString, strVal: ""))
+        qr.rows.add(wireRow)
+      return (true, qr, result.message)
     else:
-      return (false, QueryResult(), "Unsupported statement type: " & $stmt.kind)
+      return (false, QueryResult(), result.message)
   except Exception as e:
     return (false, QueryResult(), e.msg)
 

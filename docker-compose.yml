@@ -14,7 +14,7 @@ services:
       - BARADB_HTTP_PORT=8080
       - BARADB_WS_PORT=8081
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 3

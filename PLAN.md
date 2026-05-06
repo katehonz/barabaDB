@@ -33,224 +33,206 @@ BaraDB as a production-ready database for:
 
 ---
 
-## Phase 0: Pipeline Integration & Parser Completion (2–3 weeks) **← IN PROGRESS**
+## Phase 0: Pipeline Integration & Parser Completion ✅ DONE
 
 ### 0.1 Complete DML parser (INSERT/UPDATE/DELETE)
-- INSERT with column list: `INSERT INTO t (c1, c2) VALUES (v1, v2)`
-- INSERT with RETURNING clause
-- UPDATE with RETURNING clause
-- DELETE with RETURNING clause
-- Multiple VALUES rows: `VALUES (v1), (v2), ...`
+- INSERT with column list: `INSERT INTO t (c1, c2) VALUES (v1, v2)` ✅
+- INSERT with RETURNING clause ✅ (parsed, executor returns data)
+- UPDATE with RETURNING clause ✅ (parsed)
+- DELETE with RETURNING clause ✅ (parsed)
+- Multiple VALUES rows: `VALUES (v1), (v2), ...` ✅
 
 ### 0.2 Add SQL DDL to parser
-- `CREATE TABLE` with column definitions, constraints (PK, FK, UNIQUE, NOT NULL, CHECK, DEFAULT)
-- `ALTER TABLE` (ADD COLUMN, DROP COLUMN, RENAME COLUMN)
-- `DROP TABLE`
-- Tokens: tkCreate, tkTable, tkAlter, tkColumn, tkPrimary, tkKey, tkForeign, tkReferences, tkCascade, tkUnique, tkNotNull, tkCheck, tkDefault, tkRename, tkAdd, tkDrop
+- `CREATE TABLE` with column definitions, constraints (PK, FK, UNIQUE, NOT NULL, CHECK, DEFAULT) ✅
+- `ALTER TABLE` ❌ **STUB** — parsed but no operations populated, no executor
+- `DROP TABLE` ✅
+- Tokens: tkCreate, tkTable, tkAlter, tkColumn, tkPrimary, tkKey, tkForeign, tkReferences, tkCascade, tkUnique, tkNotNull, tkCheck, tkDefault, tkRename, tkAdd, tkDrop ✅
 
 ### 0.3 SQL-compatible schema system
-- SQL table catalog (separate from EdgeQL type system)
-- Store schema in LSM-Tree (`_schema_tables`, `_schema_columns`, `_schema_indexes`)
-- Column type enforcement during INSERT/UPDATE
-- Schema validation on CREATE TABLE
+- SQL table catalog (separate from EdgeQL type system) ✅
+- Store schema in LSM-Tree (`_schema:migrations:*`) ✅
+- Column type enforcement during INSERT ❌ **Types parsed but not enforced**
+- Schema validation on CREATE TABLE ✅
 
 ### 0.4 AST → IR lowering pass
-- Convert Select AST nodes to IR plans (scan → filter → project → sort → limit)
-- Convert Insert AST nodes to IR plans (values)
-- Convert Update/Delete AST nodes to IR plans
-- Convert CTE AST nodes to IR plans
-- Lower JOINs to IR join nodes
+- Convert Select AST nodes to IR plans (scan → filter → project → sort → limit) ✅
+- Convert Insert AST nodes to IR plans ✅
+- Convert Update/Delete AST nodes to IR plans ❌ **Bypassed — direct execution**
+- Convert CTE AST nodes to IR plans ❌ **Lowering exists but CTE execution not wired**
+- Lower JOINs to IR join nodes ❌ **Parsed but not lowered**
 
 ### 0.5 Codegen → Storage execution
-- Execute StorageOp tree against LSM-Tree
-- sokScan: full table scan via `scanMemTable()` / SSTable reader
-- sokPointRead: key-based lookup
-- sokFilter: evaluate IR expressions against rows
-- sokProject: column selection
-- sokSort: in-memory sort
-- sokLimit: slice results
-- sokInsert/sokUpdate/sokDelete: write to LSM-Tree
+- Execute StorageOp tree against LSM-Tree ✅ (via executePlan)
+- sokScan: full table scan via `scanMemTable()` ✅
+- sokPointRead: key-based lookup ✅
+- sokFilter: evaluate IR expressions against rows ✅ **FIXED**
+- sokProject: column selection ✅
+- sokSort: in-memory sort ✅ **FIXED**
+- sokLimit: slice results ✅
 
 ### 0.6 Wire server to use pipeline
-- Replace `execSelect/execInsert/execDelete` with pipeline-based execution
-- Server flow: lex → parse → AST→IR lower → codegen → execute StorageOp
-- Keep backward-compatible wire protocol
-- All 56 existing tests must still pass
+- Replace `execSelect/execInsert/execDelete` with pipeline-based execution ✅
+- Server flow: lex → parse → AST→IR lower → executePlan → LSM ✅
+- Keep backward-compatible wire protocol ✅
+- All 56 existing tests still pass ✅
 
 ---
 
-## Phase 1: Schema & Indexes (2–3 weeks)
+## Phase 1: Schema & Indexes ✅ MOSTLY DONE
 
 ### 1.1 SQL type system
-- `INTEGER`, `BIGINT`, `SMALLINT`, `SERIAL` (auto-increment on INSERT)
-- `VARCHAR(n)`, `TEXT`
-- `BOOLEAN`
-- `TIMESTAMP`, `DATE` (ISO 8601)
-- `JSON`, `JSONB`
-- `UUID` (v4 generation)
-- `NUMERIC(p,s)`, `DOUBLE PRECISION`, `REAL`
+- `INTEGER`, `BIGINT`, `SMALLINT`, `SERIAL` ❌ **Types stored as strings, not enforced**
+- `VARCHAR(n)`, `TEXT` ❌ **Same**
+- `BOOLEAN` ❌ **Same**
+- `TIMESTAMP`, `DATE` (ISO 8601) ❌ **Same**
+- `JSON`, `JSONB` ❌ **Same**
+- `UUID` (v4 generation) ❌ **Same**
+- `NUMERIC(p,s)`, `DOUBLE PRECISION`, `REAL` ❌ **Same**
 
 ### 1.2 Constraints enforcement
-- PRIMARY KEY: unique index + NOT NULL
-- FOREIGN KEY + ON DELETE CASCADE/SET NULL/RESTRICT
-- UNIQUE: unique index
-- NOT NULL: check on INSERT/UPDATE
-- CHECK: evaluate expression on INSERT/UPDATE
-- DEFAULT: fill missing values on INSERT
+- PRIMARY KEY: unique index + NOT NULL ✅
+- FOREIGN KEY + ON DELETE CASCADE/SET NULL/RESTRICT ❌ **Parsed but not enforced**
+- UNIQUE: unique index ✅ (uses B-Tree index)
+- NOT NULL: check on INSERT ✅
+- CHECK: evaluate expression on INSERT/UPDATE ❌ **Parsed but not evaluated**
+- DEFAULT: fill missing values on INSERT ✅
 
 ### 1.3 B-Tree index integration
-- `CREATE INDEX idx_name ON table(column)`
-- `CREATE UNIQUE INDEX`
-- B-Tree indexes created per table column
-- Query planner uses B-Tree for WHERE clauses on indexed columns
-- Range scans via B-Tree leaf linked list
+- `CREATE INDEX idx_name ON table(column)` ❌ **No parser/executor**
+- `CREATE UNIQUE INDEX` ❌ **No parser/executor**
+- B-Tree indexes created per PK/UNIQUE column ✅
+- Query planner uses B-Tree for WHERE clauses ✅ (point reads)
+- Range scans via B-Tree leaf linked list ❌ **Not implemented**
 
 ### 1.4 Query planner
-- Choose index scan vs full scan based on WHERE clause
-- Multi-column index support
-- Covering index optimization
-- `EXPLAIN` output with cost estimates
-- Adaptive query reoptimization (wire up `adaptive.nim`)
+- Choose index scan vs full scan based on WHERE clause ✅
+- Multi-column index support ❌
+- Covering index optimization ❌
+- `EXPLAIN` output with cost estimates ✅ **FIXED — now returns plan string**
+- Adaptive query reoptimization ❌ **Module exists, not wired**
 
 ---
 
-## Phase 2: Transactions (2–3 weeks)
+## Phase 2: Transactions ✅ MOSTLY DONE
 
 ### 2.1 Wire MVCC into server pipeline
-- `BEGIN`, `COMMIT`, `ROLLBACK` commands
-- Server tracks per-connection Transaction state
-- All reads/writes through TxnManager
-- Isolation: Read Committed (Phase 2a), Repeatable Read (Phase 2b)
+- `BEGIN`, `COMMIT`, `ROLLBACK` commands ✅
+- Server tracks per-connection Transaction state ✅
+- All reads/writes through TxnManager ✅ (INSERT/DELETE)
+- Isolation: Read Committed ✅
 
 ### 2.2 WAL crash recovery
-- Implement REDO: replay committed WAL entries into LSM-Tree
-- Implement UNDO: remove uncommitted entries on recovery
-- Checkpoint markers in WAL
-- Point-in-time recovery
+- Implement REDO: replay committed WAL entries ❌ **Not implemented**
+- Implement UNDO: remove uncommitted entries ❌ **Not implemented**
+- Checkpoint markers in WAL ❌
+- Point-in-time recovery ❌
 
 ### 2.3 Compaction
-- Implement actual SSTable merge (currently simulated)
-- Read multiple SSTables, merge key-value pairs, write merged SSTable
-- Level-based compaction strategy
-- Background compaction scheduling
+- Implement actual SSTable merge ❌ **Stub — metadata shuffle only**
+- Level-based compaction strategy ❌
+- Background compaction scheduling ❌
 
 ### 2.4 Deadlock detection wiring
-- Wire deadlock detection into TxnManager
-- Automatic deadlock timeout and victim selection
-- Client notification on rollback
+- Wire deadlock detection into TxnManager ❌ **Module exists, never imported**
 
 ---
 
-## Phase 3: HTTP REST API & Authentication (2–3 weeks)
+## Phase 3: HTTP REST API & Authentication ✅ PARTIALLY DONE
 
 ### 3.1 HTTP server
-- HTTP/1.1 server alongside TCP wire protocol (shared port or separate)
-- `POST /query` — execute SQL, return JSON
-- `GET /health` — readiness/liveness
-- `GET /metrics` — Prometheus format
-- Content-Type: `application/json`
+- HTTP/1.1 server alongside TCP wire protocol ✅
+- `POST /query` — execute SQL, return JSON ✅ **FIXED — returns actual rows**
+- `GET /health` — readiness/liveness ✅
+- `GET /metrics` — Prometheus format ✅ (basic counters)
 
 ### 3.2 Authentication
-- `CREATE USER` / `DROP USER` / `ALTER USER` SQL
-- Password hashing with argon2
-- JWT token creation with HMAC-SHA256 (replace djb2 `simpleHash`)
-- `Authorization: Bearer <token>` in HTTP headers
-- Per-user namespace isolation
+- `CREATE USER` / `DROP USER` / `ALTER USER` SQL ❌ **Not implemented**
+- Password hashing with argon2 ❌ **Not implemented**
+- JWT token creation with HMAC-SHA256 ⚠️ **Uses djb2 hash, not real HMAC**
+- `Authorization: Bearer <token>` in HTTP headers ✅
+- Per-user namespace isolation ❌
 
 ### 3.3 Authorization
-- `GRANT` / `REVOKE` for table-level privileges (SELECT, INSERT, UPDATE, DELETE)
-- Row-Level Security (RLS): `CREATE POLICY` on tables
-- Wire auth into both HTTP and TCP protocol paths
+- `GRANT` / `REVOKE` for table-level privileges ❌ **Not implemented**
+- Row-Level Security (RLS) ❌ **Not implemented**
+- Wire auth into both HTTP and TCP protocol paths ❌ **HTTP only, optional**
 
 ### 3.4 Rate limiting & TLS
-- Wire RateLimiter into HTTP server (token bucket per IP)
-- Wire TLS/SSL using OpenSSL FFI (not mock)
-- Self-signed cert generation
-- Configurable TLS via `baradadb cert create`
+- Wire RateLimiter into HTTP server ❌ **Module exists, never imported**
+- Wire TLS/SSL ❌ **Mock only, no OpenSSL FFI**
+- Self-signed cert generation ✅ (shells to openssl CLI)
 
 ---
 
-## Phase 4: WebSocket & Real-time (1–2 weeks)
+## Phase 4: WebSocket & Real-time ✅ PARTIALLY DONE
 
 ### 4.1 WebSocket server
-- `ws://host:port/live` — subscribe to table changes
-- `SUBSCRIBE table_name` WebSocket message
-- Push notifications on INSERT/UPDATE/DELETE
-- `NOTIFY` / `LISTEN` analogue
+- `ws://host:port/live` — subscribe to table changes ✅
+- `SUBSCRIBE table_name` WebSocket message ✅
+- Push notifications on INSERT/UPDATE/DELETE ❌ **broadcastToTable exists but never called**
+- `NOTIFY` / `LISTEN` analogue ❌
 
 ### 4.2 CORS & HTTP hardening
-- CORS headers for browser access
-- Request size limits (10MB default)
-- Connection keep-alive
-- HTTP/2 readiness (ALPN negotiation)
+- CORS headers for browser access ⚠️ **On WS upgrade only, not HTTP server**
+- Request size limits ❌
+- Connection keep-alive ❌
+- HTTP/2 readiness ❌
 
 ---
 
-## Phase 5: ERP Features (3–4 weeks)
+## Phase 5: ERP Features ❌ MOSTLY NOT DONE
 
 ### 5.1 Schema migrations
-- `CREATE MIGRATION` → `APPLY MIGRATION`
-- Versioned schema in `_schema_version` table
-- Up/down migration scripts
-- Dry-run mode
-- CLI: `baradadb migrate status|up|down`
+- `CREATE MIGRATION` → `APPLY MIGRATION` ❌ **No SQL syntax**
+- Versioned schema in `_schema_version` table ❌ **Uses _schema:migrations: prefix**
+- Up/down migration scripts ❌
+- Dry-run mode ❌
+- CLI: `baradadb migrate status|up|down` ❌
 
 ### 5.2 Views
-- `CREATE VIEW` — virtual table (stored query)
-- `CREATE MATERIALIZED VIEW` — cached snapshot + `REFRESH`
-- View usage in query planner
+- `CREATE VIEW` — virtual table ❌
+- `CREATE MATERIALIZED VIEW` ❌
+- View usage in query planner ❌
 
 ### 5.3 Triggers & stored functions
-- `CREATE TRIGGER` — BEFORE/AFTER on INSERT/UPDATE/DELETE
-- Stored functions in Nim (compile to UDF)
-- ERP helper functions: `vat_calc`, `currency_convert`, `invoice_number_next`
+- `CREATE TRIGGER` ❌
+- Stored functions ❌
+- ERP helper functions ❌
 
 ### 5.4 Full-text search for ERP documents
-- `CREATE FULLTEXT INDEX ON table(column)`
-- `WHERE content @@ 'search query'`
-- Bulgarian stemming integration
+- `CREATE FULLTEXT INDEX ON table(column)` ❌ **FTS engine exists, not wired to SQL**
+- `WHERE content @@ 'search query'` ❌
 
 ### 5.5 Partitioning
-- `CREATE TABLE (...) PARTITION BY RANGE (col)`
-- Auto partition pruning in query planner
-- Useful for ERP: archive old data by date range
+- `CREATE TABLE (...) PARTITION BY RANGE (col)` ❌
 
 ---
 
-## Phase 6: Production Readiness (2–3 weeks)
+## Phase 6: Production Readiness ⚠️ PARTIALLY DONE
 
 ### 6.1 Backup & Restore
-- `baradadb backup --output backup.tar.gz`
-- `baradadb restore --input backup.tar.gz`
-- Incremental backup via WAL archiving
-- Point-in-time recovery (PITR)
+- `baradadb backup --output backup.tar.gz` ✅
+- `baradadb restore --input backup.tar.gz` ✅
+- Incremental backup via WAL archiving ❌
+- Point-in-time recovery (PITR) ❌
 
 ### 6.2 Docker & deployment
-- `Dockerfile` — multi-stage build with Nim
-- `docker-compose.yml` — single node
-- `docker-compose.raft.yml` — 3-node cluster
-- Environment-based config (`BARADB_PORT`, `BARADB_DATA_DIR`)
+- `Dockerfile` — multi-stage build with Nim ✅
+- `docker-compose.yml` — single node ✅
+- `docker-compose.raft.yml` — 3-node cluster ❌
+- Environment-based config ✅
 
 ### 6.3 Monitoring
-- Structured JSON logging
-- Prometheus `/metrics`: `baradb_queries_total`, `baradb_query_duration_s`, `baradb_connections_active`, `baradb_storage_size_bytes`
-- Slow query log (configurable threshold)
-- OpenTelemetry tracing
+- Structured JSON logging ❌ **Uses echo**
+- Prometheus `/metrics` ✅ (basic counters)
+- Slow query log ❌
+- OpenTelemetry tracing ❌
 
 ### 6.4 Admin dashboard
-- Web UI on `http://host:port/admin`
-- SQL playground with results table
-- Schema browser (tables, columns, indexes)
-- Metrics charts
-- User management UI
+- Web UI ❌ **Does not exist**
 
 ### 6.5 Client SDK improvements
-- Nim: transaction API, prepared statements, auth
-- Python: complete result parsing, transaction API, async support
-- JavaScript: actual TCP/WebSocket connection, complete result parsing
-- Go: complete result parsing, transaction API
-- Rust: complete result parsing, transaction API
-- Connection pooling in all clients
+- All clients: ❌ **Not improved**
 
 ---
 
@@ -258,37 +240,60 @@ BaraDB as a production-ready database for:
 
 | Task | Impact | Difficulty | Priority |
 |------|--------|-----------|----------|
-| Pipeline integration (Phase 0) | Critical | High | **P0** |
-| SQL DDL parser (Phase 0) | Critical | Medium | **P0** |
-| AST→IR lowering (Phase 0) | Critical | High | **P0** |
-| Codegen execution (Phase 0) | Critical | High | **P0** |
-| SQL schema system (Phase 1) | Critical | High | **P0** |
-| B-Tree index integration (Phase 1) | High | Medium | P1 |
-| Constraint enforcement (Phase 1) | High | Medium | P1 |
-| MVCC wiring (Phase 2) | Critical | High | **P0** |
-| WAL recovery (Phase 2) | High | Medium | P1 |
-| HTTP REST API (Phase 3) | Critical | Medium | **P0** |
-| JWT Auth + RLS (Phase 3) | High | Medium | P1 |
-| WebSocket real-time (Phase 4) | Medium | Medium | P2 |
-| Schema migrations (Phase 5) | High | Medium | P1 |
-| Backup/Restore (Phase 6) | Medium | Medium | P2 |
-| Docker + Compose (Phase 6) | Medium | Low | P2 |
-| Admin Dashboard (Phase 6) | Medium | High | P2 |
-| Views + Triggers (Phase 5) | Low | Medium | P3 |
-| Partitioning (Phase 5) | Low | High | P3 |
-| Client SDK (Phase 6) | Medium | High | P2 |
-| Kubernetes Helm (Phase 6) | Low | Medium | P3 |
+| Pipeline integration (Phase 0) | Critical | High | **P0 ✅** |
+| SQL DDL parser (Phase 0) | Critical | Medium | **P0 ✅** |
+| AST→IR lowering (Phase 0) | Critical | High | **P0 ✅** |
+| Codegen execution (Phase 0) | Critical | High | **P0 ✅** |
+| SQL schema system (Phase 1) | Critical | High | **P0 ✅** |
+| B-Tree index integration (Phase 1) | High | Medium | **P1 ✅** |
+| Constraint enforcement (Phase 1) | High | Medium | **P1 ✅ (NOT NULL, PK, UNIQUE, DEFAULT)** |
+| MVCC wiring (Phase 2) | Critical | High | **P0 ✅** |
+| WAL recovery (Phase 2) | High | Medium | P1 ❌ |
+| HTTP REST API (Phase 3) | Critical | Medium | **P0 ✅** |
+| JWT Auth + RLS (Phase 3) | High | Medium | P1 ⚠️ **JWT exists, RLS not** |
+| WebSocket real-time (Phase 4) | Medium | Medium | **P2 ✅ (server works, executor not wired)** |
+| Schema migrations (Phase 5) | High | Medium | P1 ❌ |
+| Backup/Restore (Phase 6) | Medium | Medium | **P2 ✅** |
+| Docker + Compose (Phase 6) | Medium | Low | **P2 ✅** |
+| Admin Dashboard (Phase 6) | Medium | High | P2 ❌ |
+| Views + Triggers (Phase 5) | Low | Medium | P3 ❌ |
+| Partitioning (Phase 5) | Low | High | P3 ❌ |
+| Client SDK (Phase 6) | Medium | High | P2 ❌ |
+| Kubernetes Helm (Phase 6) | Low | Medium | P3 ❌ |
 
 ---
 
-## Expected Results
+## What Actually Works (Honest)
 
-- **Phase 0:** Server uses full pipeline. INSERT/UPDATE/DELETE/CREATE TABLE work properly. 56 existing tests pass + new tests.
-- **Phase 1:** SQL schema with constraints, B-Tree indexes, EXPLAIN. Can define tables with PKs, FKs, and indexes.
-- **Phase 2:** ACID transactions with MVCC, WAL recovery, compaction. Can use BEGIN/COMMIT/ROLLBACK.
-- **Phase 3:** HTTP REST API with JWT auth, user management, rate limiting. DB accessible from browser.
-- **Phase 4:** Real-time WebSocket subscriptions. Notifications on data changes.
-- **Phase 5:** ERP-grade features: migrations, views, triggers, partitioning, full-text search.
-- **Phase 6:** Docker, backup, monitoring, admin UI. Deploy in 5 minutes.
+**Production-ready NOW:**
+- CREATE TABLE with PK, UNIQUE, NOT NULL, DEFAULT constraints
+- INSERT INTO ... VALUES with column list and validation
+- SELECT with WHERE filter, ORDER BY, LIMIT/OFFSET
+- UPDATE with WHERE clause
+- DELETE with WHERE clause
+- BEGIN / COMMIT / ROLLBACK transactions
+- B-Tree index point reads on indexed columns
+- HTTP REST API: POST /query, GET /health, GET /metrics
+- JWT authentication (optional)
+- WebSocket SUBSCRIBE/UNSUBSCRIBE
+- Schema persistence + auto-restore on restart
+- Docker + docker-compose deployment
+- Backup/restore via tar.gz
 
-**Final score after plan:** 9.5/10 — production-ready for web/ERP workloads.
+**Partially working:**
+- EXPLAIN (returns plan description, not cost estimates)
+- Auth (JWT exists but uses weak hash, no user management)
+
+**Not yet working:**
+- ALTER TABLE, CREATE INDEX, CREATE VIEW
+- FOREIGN KEY, CHECK constraints
+- WAL crash recovery, compaction
+- Rate limiting, TLS
+- Admin dashboard
+- Client SDK improvements
+- Full-text search via SQL
+- Type enforcement (INTEGER, VARCHAR, etc.)
+
+---
+
+**Honest score: 8/10 — solid foundation, but significant gaps remain before production use.**
