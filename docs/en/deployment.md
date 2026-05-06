@@ -8,9 +8,9 @@
 docker build -t baradb:latest .
 docker run -d \
   --name baradb \
-  -p 5432:5432 \
-  -p 8080:8080 \
-  -p 8081:8081 \
+  -p 9472:9472 \
+  -p 9470:9470 \
+  -p 9471:9471 \
   -v baradb_data:/data \
   -e BARADB_DATA_DIR=/data \
   baradb:latest
@@ -24,16 +24,16 @@ services:
   baradb:
     image: baradb:latest
     ports:
-      - "5432:5432"
-      - "8080:8080"
-      - "8081:8081"
+      - "9472:9472"
+      - "9470:9470"
+      - "9471:9471"
     volumes:
       - baradb_data:/data
       - ./certs:/certs:ro
     environment:
-      - BARADB_PORT=5432
-      - BARADB_HTTP_PORT=8080
-      - BARADB_WS_PORT=8081
+      - BARADB_PORT=9472
+      - BARADB_HTTP_PORT=9470
+      - BARADB_WS_PORT=9471
       - BARADB_DATA_DIR=/data
       - BARADB_TLS_ENABLED=true
       - BARADB_CERT_FILE=/certs/server.crt
@@ -42,7 +42,7 @@ services:
       - BARADB_MEMTABLE_SIZE_MB=256
       - BARADB_CACHE_SIZE_MB=512
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9470/health"]
       interval: 10s
       timeout: 5s
       retries: 3
@@ -84,8 +84,8 @@ ExecStart=/usr/local/bin/baradadb
 Restart=always
 RestartSec=5
 
-Environment=BARADB_PORT=5432
-Environment=BARADB_HTTP_PORT=8080
+Environment=BARADB_PORT=9472
+Environment=BARADB_HTTP_PORT=9470
 Environment=BARADB_DATA_DIR=/var/lib/baradb/data
 Environment=BARADB_LOG_LEVEL=info
 
@@ -137,11 +137,11 @@ spec:
       - name: baradb
         image: baradb:latest
         ports:
-        - containerPort: 5432
+        - containerPort: 9472
           name: binary
-        - containerPort: 8080
+        - containerPort: 9470
           name: http
-        - containerPort: 8081
+        - containerPort: 9471
           name: websocket
         env:
         - name: BARADB_DATA_DIR
@@ -170,11 +170,11 @@ spec:
   selector:
     app: baradb
   ports:
-  - port: 5432
+  - port: 9472
     name: binary
-  - port: 8080
+  - port: 9470
     name: http
-  - port: 8081
+  - port: 9471
     name: websocket
   clusterIP: None
 ```
@@ -183,11 +183,11 @@ spec:
 
 ```nginx
 upstream baradb_http {
-    server 127.0.0.1:8080;
+    server 127.0.0.1:9470;
 }
 
 upstream baradb_ws {
-    server 127.0.0.1:8081;
+    server 127.0.0.1:9471;
 }
 
 server {
@@ -277,7 +277,7 @@ systemctl enable --now baradb
 ```bash
 gcloud run deploy baradb \
   --image gcr.io/PROJECT/baradb \
-  --port 8080 \
+  --port 9470 \
   --memory 4Gi \
   --cpu 2 \
   --max-instances 10

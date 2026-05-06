@@ -60,9 +60,9 @@ BARADB_PORT=5433 ./build/baradadb
 **Solution 2:** Kill existing process:
 
 ```bash
-lsof -ti:5432 | xargs kill -9
+lsof -ti:9472 | xargs kill -9
 # or
-fuser -k 5432/tcp
+fuser -k 9472/tcp
 ```
 
 ### Permission Denied on Data Directory
@@ -108,7 +108,7 @@ Error: No space left on device
 df -h
 
 # Trigger compaction to reclaim space
-curl -X POST http://localhost:8080/api/admin/compact
+curl -X POST http://localhost:9470/api/admin/compact
 
 # Or manually
 ./build/baradadb --compact
@@ -184,7 +184,7 @@ SELECT * FROM users WHERE id = 123;
 ### Connection Refused
 
 ```
-Connection refused: localhost:5432
+Connection refused: localhost:9472
 ```
 
 **Solution:**
@@ -198,7 +198,7 @@ ps aux | grep baradadb
 
 # Check firewall
 sudo ufw status
-sudo ufw allow 5432
+sudo ufw allow 9472
 ```
 
 ### Authentication Failed
@@ -247,7 +247,7 @@ BARADB_KEY_FILE=/path/to/key.pem \
 
 ```bash
 # Check query plan
-curl -X POST http://localhost:8080/api/explain \
+curl -X POST http://localhost:9470/api/explain \
   -d '{"query": "SELECT * FROM large_table"}'
 ```
 
@@ -292,7 +292,7 @@ LIMIT 10;
 **Monitor:**
 
 ```bash
-curl http://localhost:8080/metrics | grep memory
+curl http://localhost:9470/metrics | grep memory
 ```
 
 **Solutions:**
@@ -347,7 +347,7 @@ Warning: Shard 3 has 2× data of others
 
 ```bash
 # Trigger rebalancing
-curl -X POST http://localhost:8080/api/admin/rebalance
+curl -X POST http://localhost:9470/api/admin/rebalance
 ```
 
 ## Data Corruption
@@ -399,7 +399,7 @@ BARADB_LOG_FILE=/tmp/baradb_debug.log \
 If the issue persists:
 
 1. Check logs: `tail -f /var/log/baradb/baradb.log`
-2. Check metrics: `curl http://localhost:8080/metrics`
+2. Check metrics: `curl http://localhost:9470/metrics`
 3. Run diagnostics: `./build/baradadb --diagnose`
 4. Open an issue with:
    - BaraDB version (`./build/baradadb --version`)

@@ -241,7 +241,7 @@ type
 
 proc defaultConfig*(): ClientConfig =
   ClientConfig(
-    host: "127.0.0.1", port: 5432, database: "default",
+    host: "127.0.0.1", port: 9472, database: "default",
     username: "admin", password: "", timeoutMs: 30000, maxRetries: 3,
   )
 

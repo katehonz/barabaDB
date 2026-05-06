@@ -220,9 +220,9 @@ docker pull barabadb/barabadb:latest
 
 # Run
 docker run -d \
-  -p 5432:5432 \
-  -p 8080:8080 \
-  -p 8081:8081 \
+  -p 9472:9472 \
+  -p 9470:9470 \
+  -p 9471:9471 \
   -v baradb_data:/data \
   barabadb/barabadb
 ```
@@ -260,10 +260,10 @@ db.close()
 
 # Expected output:
 # BaraDB v0.1.0 — Multimodal Database Engine
-# BaraDB TCP listening on 127.0.0.1:5432
+# BaraDB TCP listening on 127.0.0.1:9472
 
 # Test with HTTP API
-curl http://localhost:8080/health
+curl http://localhost:9470/health
 
 # Interactive shell
 ./build/baradadb --shell

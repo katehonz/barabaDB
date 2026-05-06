@@ -665,18 +665,18 @@ suite "Type Checker & IR":
 
 suite "Connection Pool":
   test "Create pool and acquire connection":
-    var pool = newConnectionPool("127.0.0.1", 5432)
+    var pool = newConnectionPool("127.0.0.1", 9472)
     let conn = pool.acquire()
     check conn != nil
     check conn.host == "127.0.0.1"
-    check conn.port == 5432
+    check conn.port == 9472
     pool.release(conn)
 
   test "Pool stats":
     var cfg = defaultPoolConfig()
     cfg.minConnections = 1
     cfg.maxConnections = 10
-    var pool = newConnectionPool("127.0.0.1", 5432, "default", cfg)
+    var pool = newConnectionPool("127.0.0.1", 9472, "default", cfg)
     let conn1 = pool.acquire()
     let (total, idle, inUse) = pool.stats()
     check inUse == 1
@@ -1166,8 +1166,8 @@ suite "Replication":
 
   test "Add and connect replicas":
     var rm = newReplicationManager(rmAsync)
-    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
-    rm.addReplica(newReplica("r2", "10.0.0.2", 5432))
+    rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
+    rm.addReplica(newReplica("r2", "10.0.0.2", 9472))
     check rm.totalReplicaCount == 2
 
     rm.connectReplica("r1")
@@ -1175,7 +1175,7 @@ suite "Replication":
 
   test "Async replication — write returns immediately":
     var rm = newReplicationManager(rmAsync)
-    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+    rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
     rm.connectReplica("r1")
 
     let lsn = rm.writeLsn(@[1'u8, 2, 3])
@@ -1185,7 +1185,7 @@ suite "Replication":
 
   test "Sync replication — wait for ack":
     var rm = newReplicationManager(rmSync)
-    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+    rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
     rm.connectReplica("r1")
 
     let lsn = rm.writeLsn(@[1'u8, 2, 3])
@@ -1196,9 +1196,9 @@ suite "Replication":
 
   test "Semi-sync replication":
     var rm = newReplicationManager(rmSemiSync, syncCount = 2)
-    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
-    rm.addReplica(newReplica("r2", "10.0.0.2", 5432))
-    rm.addReplica(newReplica("r3", "10.0.0.3", 5432))
+    rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
+    rm.addReplica(newReplica("r2", "10.0.0.2", 9472))
+    rm.addReplica(newReplica("r3", "10.0.0.3", 9472))
     rm.connectReplica("r1")
     rm.connectReplica("r2")
     rm.connectReplica("r3")
@@ -1214,7 +1214,7 @@ suite "Replication":
 
   test "Replica status":
     var rm = newReplicationManager(rmAsync)
-    rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+    rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
     rm.connectReplica("r1")
     let status = rm.replicaStatus()
     check status.len == 1
@@ -1454,16 +1454,16 @@ suite "Gossip Protocol":
 
 suite "Client Library":
   test "Connection string parser":
-    let config = parseConnectionString("host=localhost port=5432 dbname=test user=admin")
+    let config = parseConnectionString("host=localhost port=9472 dbname=test user=admin")
     check config.host == "localhost"
-    check config.port == 5432
+    check config.port == 9472
     check config.database == "test"
     check config.username == "admin"
 
   test "Client config defaults":
     let config = defaultClientConfig()
     check config.host == "127.0.0.1"
-    check config.port == 5432
+    check config.port == 9472
 
   test "Query builder":
     let client = newBaraClient()
@@ -1658,13 +1658,13 @@ suite "Adaptive Query Execution":
 suite "Distributed Transactions":
   test "Create distributed transaction":
     var txn = newDistributedTransaction("coordinator")
-    txn.addParticipant("node1", "10.0.0.1", 5432)
-    txn.addParticipant("node2", "10.0.0.2", 5432)
+    txn.addParticipant("node1", "10.0.0.1", 9472)
+    txn.addParticipant("node2", "10.0.0.2", 9472)
     check txn.participantCount == 2
 
   test "Two-phase commit flow":
     var txn = newDistributedTransaction("coordinator")
-    txn.addParticipant("n1", "10.0.0.1", 5432)
+    txn.addParticipant("n1", "10.0.0.1", 9472)
     check txn.prepare()
     check txn.state() == dtsPrepared
     check txn.commit()
@@ -1672,7 +1672,7 @@ suite "Distributed Transactions":
 
   test "Rollback dist transaction":
     var txn = newDistributedTransaction("coordinator")
-    txn.addParticipant("n1", "10.0.0.1", 5432)
+    txn.addParticipant("n1", "10.0.0.1", 9472)
     check txn.rollback()
     check txn.isAborted
 
@@ -1680,7 +1680,7 @@ suite "Distributed Transactions":
     var tm = newDistTxnManager()
     let txn = tm.beginTransaction("node1")
     check tm.activeCount == 1
-    txn.addParticipant("n2", "10.0.0.2", 5432)
+    txn.addParticipant("n2", "10.0.0.2", 9472)
     check txn.prepare()
     check txn.commit()
     tm.cleanupCompleted()

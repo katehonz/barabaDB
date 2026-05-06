@@ -5,13 +5,13 @@ Full-duplex streaming for real-time data feeds and push notifications.
 ## Connection
 
 ```
-ws://localhost:8081/ws
+ws://localhost:9471/ws
 ```
 
 ## Client Example
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8081/ws');
+const ws = new WebSocket('ws://localhost:9471/ws');
 
 ws.onopen = () => {
   console.log('Connected');

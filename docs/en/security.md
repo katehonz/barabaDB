@@ -40,7 +40,7 @@ BARADB_KEY_FILE=/etc/letsencrypt/live/db.example.com/privkey.pem \
 ```python
 from baradb import Client
 
-client = Client("localhost", 5432, tls=True, tls_verify=True)
+client = Client("localhost", 9472, tls=True, tls_verify=True)
 client.connect()
 ```
 
@@ -84,14 +84,14 @@ let token = am.createToken(JWTClaims(
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8080/api/query \
+  http://localhost:9470/api/query \
   -d '{"query": "SELECT * FROM users"}'
 ```
 
 ```python
 from baradb import Client
 
-client = Client("localhost", 5432)
+client = Client("localhost", 9472)
 client.connect()
 client.authenticate("eyJhbGciOiJIUzI1NiIs...")
 ```
@@ -143,11 +143,11 @@ BARADB_ADDRESS=10.0.0.5 ./build/baradadb
 
 ```bash
 # Allow only application servers
-sudo ufw allow from 10.0.0.0/8 to any port 5432
-sudo ufw allow from 10.0.0.0/8 to any port 8080
+sudo ufw allow from 10.0.0.0/8 to any port 9472
+sudo ufw allow from 10.0.0.0/8 to any port 9470
 
 # Block external access to management ports
-sudo ufw deny 8081  # WebSocket (internal use only)
+sudo ufw deny 9471  # WebSocket (internal use only)
 ```
 
 ## Data Encryption at Rest

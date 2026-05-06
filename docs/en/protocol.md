@@ -120,18 +120,18 @@ Every message starts with a 8-byte header:
 
 ```bash
 # Connect
-nc localhost 5432
+nc localhost 9472
 
 # Send: Auth request (token "mytoken")
 # Header: length=15, type=0x07, seq=1
 # Payload: token length=7, token="mytoken"
-printf '\x00\x00\x00\x0f\x07\x01\x00\x00\x00\x07mytoken' > /dev/tcp/localhost/5432
+printf '\x00\x00\x00\x0f\x07\x01\x00\x00\x00\x07mytoken' > /dev/tcp/localhost/9472
 
 # Receive: Auth_OK
 # \x00\x00\x00\x06\x83\x01
 
 # Send: Query "SELECT 1"
-printf '\x00\x00\x00\x12\x01\x02\x00\x00\x00\x00\x08SELECT 1' > /dev/tcp/localhost/5432
+printf '\x00\x00\x00\x12\x01\x02\x00\x00\x00\x00\x08SELECT 1' > /dev/tcp/localhost/9472
 
 # Receive: Data + Complete
 ```
@@ -140,7 +140,7 @@ printf '\x00\x00\x00\x12\x01\x02\x00\x00\x00\x00\x08SELECT 1' > /dev/tcp/localho
 
 ## HTTP/REST API
 
-Base URL: `http://localhost:8080/api/v1`
+Base URL: `http://localhost:9470/api/v1`
 
 ### Endpoints
 
@@ -304,7 +304,7 @@ POST /admin/check
 
 ## WebSocket Protocol
 
-URL: `ws://localhost:8081`
+URL: `ws://localhost:9471`
 
 ### Frame Format
 
@@ -334,7 +334,7 @@ WebSocket text frames contain JSON messages:
 ### Pub/Sub Example
 
 ```javascript
-const ws = new WebSocket('ws://localhost:8081');
+const ws = new WebSocket('ws://localhost:9471');
 
 ws.onopen = () => {
   // Subscribe to table changes
@@ -386,7 +386,7 @@ let error = makeErrorMessage(1, 42, "Syntax error")
 ```nim
 import barabadb/protocol/http
 
-var router = newHttpRouter(port = 8080)
+var router = newHttpRouter(port = 9470)
 
 router.get("/api/users", proc(req: Request): Future[JsonNode] {.async.} =
   return %*[
@@ -405,7 +405,7 @@ router.post("/api/users", proc(req: Request): Future[JsonNode] {.async.} =
 ```nim
 import barabadb/core/websocket
 
-var server = newWsServer(port = 8081)
+var server = newWsServer(port = 9471)
 server.onMessage = proc(ws: WebSocket, data: seq[byte]) {.gcsafe.} =
   echo "Received: ", cast[string](data)
   asyncCheck ws.send(cast[string](data))  # Echo

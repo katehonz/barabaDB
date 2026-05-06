@@ -283,7 +283,7 @@ proc handleConnection(server: WsServer, client: AsyncSocket) {.async.} =
   inc server.nextId
   asyncCheck server.handleWsClient(client, server.nextId)
 
-proc run*(server: WsServer, port: int = 8081) {.async.} =
+proc run*(server: WsServer, port: int = 9471) {.async.} =
   server.running = true
   let sock = newAsyncSocket()
   sock.setSockOpt(OptReuseAddr, true)

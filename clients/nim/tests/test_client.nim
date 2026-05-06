@@ -65,7 +65,7 @@ suite "Client Config":
   test "Default config":
     let config = defaultConfig()
     check config.host == "127.0.0.1"
-    check config.port == 5432
+    check config.port == 9472
     check config.database == "default"
 
   test "Custom config":

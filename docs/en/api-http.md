@@ -5,7 +5,7 @@ JSON-based REST API for web applications.
 ## Base URL
 
 ```
-http://localhost:8080/api
+http://localhost:9470/api
 ```
 
 ## Endpoints
@@ -15,7 +15,7 @@ http://localhost:8080/api
 List all users:
 
 ```bash
-curl http://localhost:8080/api/users
+curl http://localhost:9470/api/users
 ```
 
 Response:
@@ -31,7 +31,7 @@ Response:
 Get user by ID:
 
 ```bash
-curl http://localhost:8080/api/users/1
+curl http://localhost:9470/api/users/1
 ```
 
 ### POST /api/users
@@ -39,7 +39,7 @@ curl http://localhost:8080/api/users/1
 Create user:
 
 ```bash
-curl -X POST http://localhost:8080/api/users \
+curl -X POST http://localhost:9470/api/users \
   -H "Content-Type: application/json" \
   -d '{"name": "Charlie", "age": 35}'
 ```
@@ -49,7 +49,7 @@ curl -X POST http://localhost:8080/api/users \
 Update user:
 
 ```bash
-curl -X PUT http://localhost:8080/api/users/1 \
+curl -X PUT http://localhost:9470/api/users/1 \
   -H "Content-Type: application/json" \
   -d '{"name": "Alice", "age": 31}'
 ```
@@ -59,7 +59,7 @@ curl -X PUT http://localhost:8080/api/users/1 \
 Delete user:
 
 ```bash
-curl -X DELETE http://localhost:8080/api/users/1
+curl -X DELETE http://localhost:9470/api/users/1
 ```
 
 ## Query Endpoint
@@ -67,7 +67,7 @@ curl -X DELETE http://localhost:8080/api/users/1
 Execute BaraQL queries via HTTP:
 
 ```bash
-curl -X POST http://localhost:8080/api/query \
+curl -X POST http://localhost:9470/api/query \
   -H "Content-Type: application/json" \
   -d '{"sql": "SELECT * FROM users WHERE age > 18"}'
 ```
@@ -87,5 +87,5 @@ curl -X POST http://localhost:8080/api/query \
 
 ```bash
 curl -H "Authorization: Bearer <token>" \
-  http://localhost:8080/api/users
+  http://localhost:9470/api/users
 ```

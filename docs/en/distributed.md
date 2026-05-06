@@ -50,7 +50,7 @@ let shard = router.getShard("user_123")
 import barabadb/core/replication
 
 var rm = newReplicationManager(rmSync)
-rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
 rm.connectReplica("r1")
 let lsn = rm.writeLsn(@[1'u8, 2, 3])
 rm.ackLsn("r1", lsn)

@@ -441,7 +441,7 @@ setInterval(() => { if(document.querySelectorAll('.panel')[4].classList.contains
 </body></html>"""
     request.respond(200, @[("Content-Type", "text/html; charset=utf-8")], html)
 
-proc run*(server: HttpServer, port: int = 8080) =
+proc run*(server: HttpServer, port: int = 9470) =
   var router = newRouter()
   router.get("/admin", server.adminHandler())
   router.get("/", server.adminHandler())

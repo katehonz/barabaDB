@@ -159,9 +159,9 @@ sudo mkdir -p /var/lib/baradb
 ```bash
 docker pull barabadb/barabadb:latest
 docker run -d \
-  -p 5432:5432 \
-  -p 8080:8080 \
-  -p 8081:8081 \
+  -p 9472:9472 \
+  -p 9470:9470 \
+  -p 9471:9471 \
   -v baradb_data:/data \
   barabadb/barabadb
 ```
@@ -194,7 +194,7 @@ db.close()
 ./build/baradadb
 
 # Тестване на HTTP API
-curl http://localhost:8080/health
+curl http://localhost:9470/health
 
 # Интерактивна конзола
 ./build/baradadb --shell

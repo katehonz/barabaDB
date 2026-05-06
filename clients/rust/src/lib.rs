@@ -6,7 +6,7 @@
 //! ```no_run
 //! use baradb::Client;
 //!
-//! let mut client = Client::connect("localhost", 5432).unwrap();
+//! let mut client = Client::connect("localhost", 9472).unwrap();
 //! let result = client.query("SELECT name FROM users WHERE age > 18").unwrap();
 //! for row in result.rows() {
 //!     println!("{}", row["name"]);
@@ -54,7 +54,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             host: "127.0.0.1".to_string(),
-            port: 5432,
+            port: 9472,
             database: "default".to_string(),
             username: "admin".to_string(),
             password: String::new(),

@@ -8,7 +8,7 @@ After building BaraDB, start the server:
 ./build/baradadb
 ```
 
-The server will start on `localhost:8080` by default.
+The server will start on `localhost:9470` by default.
 
 ## Connecting via CLI
 
@@ -118,10 +118,10 @@ SELECT * FROM articles WHERE MATCH(title, body) AGAINST('database');
 
 ```bash
 # GET request
-curl http://localhost:8080/api/users
+curl http://localhost:9470/api/users
 
 # POST request
-curl -X POST http://localhost:8080/api/users \
+curl -X POST http://localhost:9470/api/users \
   -H "Content-Type: application/json" \
   -d '{"name": "Alice", "age": 30}'
 ```

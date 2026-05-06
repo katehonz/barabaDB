@@ -16,9 +16,9 @@ BaraDB can be configured via **environment variables**, a **config file**, or **
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `BARADB_ADDRESS` | `127.0.0.1` | Bind address |
-| `BARADB_PORT` | `5432` | TCP binary protocol port |
-| `BARADB_HTTP_PORT` | `8080` | HTTP/REST API port |
-| `BARADB_WS_PORT` | `8081` | WebSocket port |
+| `BARADB_PORT` | `9472` | TCP binary protocol port |
+| `BARADB_HTTP_PORT` | `9470` | HTTP/REST API port |
+| `BARADB_WS_PORT` | `9471` | WebSocket port |
 
 ### Storage
 
@@ -89,9 +89,9 @@ BaraDB can be configured via **environment variables**, a **config file**, or **
 ```ini
 [server]
 address = "0.0.0.0"
-port = 5432
-http_port = 8080
-ws_port = 8081
+port = 9472
+http_port = 9470
+ws_port = 9471
 
 [storage]
 data_dir = "/var/lib/baradb"
@@ -132,9 +132,9 @@ raft_peers = "node2:9001,node3:9001"
 {
   "server": {
     "address": "0.0.0.0",
-    "port": 5432,
-    "http_port": 8080,
-    "ws_port": 8081
+    "port": 9472,
+    "http_port": 9470,
+    "ws_port": 9471
   },
   "storage": {
     "data_dir": "/var/lib/baradb",
@@ -163,9 +163,9 @@ Usage:
 
 Options:
   -c, --config <file>       Config file path
-  -p, --port <port>         TCP binary port (default: 5432)
-  --http-port <port>        HTTP port (default: 8080)
-  --ws-port <port>          WebSocket port (default: 8081)
+  -p, --port <port>         TCP binary port (default: 9472)
+  --http-port <port>        HTTP port (default: 9470)
+  --ws-port <port>          WebSocket port (default: 9471)
   -d, --data-dir <dir>      Data directory (default: ./data)
   --tls-cert <file>         TLS certificate file
   --tls-key <file>          TLS private key file
@@ -208,7 +208,7 @@ BARADB_CACHE_SIZE_MB=1024 \
 ```bash
 # Node 1
 BARADB_ADDRESS=0.0.0.0 \
-BARADB_PORT=5432 \
+BARADB_PORT=9472 \
 BARADB_RAFT_NODE_ID=node1 \
 BARADB_RAFT_PEERS=node2:9001,node3:9001 \
 BARADB_SHARD_COUNT=4 \

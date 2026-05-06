@@ -23,7 +23,7 @@ bm.createSnapshot("/backup/baradb_2025-01-15")
 ### Via HTTP API
 
 ```bash
-curl -X POST http://localhost:8080/api/backup \
+curl -X POST http://localhost:9470/api/backup \
   -H "Content-Type: application/json" \
   -d '{"destination": "/backup/snapshot.db"}'
 ```
@@ -101,7 +101,7 @@ BARADB_REPLICATION_MODE=async \
 
 ```bash
 BARADB_REPLICATION_ENABLED=true \
-BARADB_REPLICATION_PRIMARY=primary:5432 \
+BARADB_REPLICATION_PRIMARY=primary:9472 \
 ./build/baradadb
 ```
 
@@ -130,7 +130,7 @@ cp /backup/snapshot.db ./data/
 ./build/baradadb --recover --wal-dir=/backup/wal
 
 # 3. Verify
-curl http://localhost:8080/health
+curl http://localhost:9470/health
 ```
 
 #### Scenario 3: Cluster Node Failure
@@ -155,7 +155,7 @@ Always verify backups:
   --data-dir=/tmp/verify_data
 
 # Run consistency check
-curl http://localhost:8080/api/admin/check
+curl http://localhost:9470/api/admin/check
 ```
 
 ## Storage Requirements

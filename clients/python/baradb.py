@@ -9,7 +9,7 @@ Install:
 
 Quick Start:
     from baradb import Client
-    client = Client("localhost", 5432)
+    client = Client("localhost", 9472)
     client.connect()
     result = client.query("SELECT name FROM users WHERE age > 18")
     for row in result:
@@ -106,7 +106,7 @@ class QueryResult:
 class Client:
     """BaraDB database client."""
 
-    def __init__(self, host: str = "localhost", port: int = 5432,
+    def __init__(self, host: str = "localhost", port: int = 9472,
                  database: str = "default", username: str = "admin",
                  password: str = "", timeout: int = 30):
         self.host = host

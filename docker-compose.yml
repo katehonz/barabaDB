@@ -4,17 +4,17 @@ services:
     build: .
     ports:
       - "9000:9000"
-      - "8080:8080"
-      - "8081:8081"
+      - "9470:9470"
+      - "9471:9471"
     volumes:
       - baradb_data:/data
     environment:
       - BARADB_PORT=9000
       - BARADB_DATA_DIR=/data
-      - BARADB_HTTP_PORT=8080
-      - BARADB_WS_PORT=8081
+      - BARADB_HTTP_PORT=9470
+      - BARADB_WS_PORT=9471
     healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9470/health"]
       interval: 10s
       timeout: 5s
       retries: 3

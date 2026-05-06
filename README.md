@@ -340,7 +340,7 @@ let error = makeErrorMessage(1, 42, "Syntax error")
 ```nim
 import barabadb/protocol/http
 
-var router = newHttpRouter(port = 8080)
+var router = newHttpRouter(port = 9470)
 router.get("/api/users", proc(req: Request): Future[JsonNode] {.async.} =
   return %*[{"id": 1, "name": "Alice"}])
 ```
@@ -350,7 +350,7 @@ router.get("/api/users", proc(req: Request): Future[JsonNode] {.async.} =
 ```nim
 import barabadb/protocol/websocket
 
-var server = newWsServer(port = 8081)
+var server = newWsServer(port = 9471)
 server.onMessage = proc(ws: WebSocket, data: seq[byte]) {.gcsafe.} =
   echo "Received: ", cast[string](data)
 asyncCheck server.run()
@@ -435,7 +435,7 @@ let shard = router.getShard("user_123")
 import barabadb/core/replication
 
 var rm = newReplicationManager(rmSync)
-rm.addReplica(newReplica("r1", "10.0.0.1", 5432))
+rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
 rm.connectReplica("r1")
 let lsn = rm.writeLsn(@[1'u8, 2, 3])
 rm.ackLsn("r1", lsn)  # blocks until acked
@@ -487,7 +487,7 @@ nim c -d:ssl -d:release -r benchmarks/bench_all.nim
 
 ```bash
 docker build -t baradb .
-docker run -p 5432:5432 -p 8080:8080 -p 8081:8081 -v baradb_data:/data baradb
+docker run -p 9472:9472 -p 9470:9470 -p 9471:9471 -v baradb_data:/data baradb
 ```
 
 ### Docker Compose
@@ -500,9 +500,9 @@ docker-compose up -d
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BARADB_PORT` | `5432` | TCP binary protocol port |
-| `BARADB_HTTP_PORT` | `8080` | HTTP/REST API port |
-| `BARADB_WS_PORT` | `8081` | WebSocket port |
+| `BARADB_PORT` | `9472` | TCP binary protocol port |
+| `BARADB_HTTP_PORT` | `9470` | HTTP/REST API port |
+| `BARADB_WS_PORT` | `9471` | WebSocket port |
 | `BARADB_DATA_DIR` | `./data` | Data directory |
 | `BARADB_TLS_ENABLED` | `false` | Enable TLS |
 | `BARADB_CERT_FILE` | — | TLS certificate path |
@@ -520,7 +520,7 @@ npm install baradb
 
 ```javascript
 import { Client } from 'baradb';
-const client = new Client('localhost', 5432);
+const client = new Client('localhost', 9472);
 await client.connect();
 const result = await client.query("SELECT name FROM users WHERE age > 18");
 console.log(result.rows);
@@ -535,7 +535,7 @@ pip install baradb
 
 ```python
 from baradb import Client
-client = Client("localhost", 5432)
+client = Client("localhost", 9472)
 client.connect()
 result = client.query("SELECT name FROM users WHERE age > 18")
 print(result.rows)
@@ -562,7 +562,7 @@ baradb = "0.1"
 
 ```rust
 use baradb::Client;
-let mut client = Client::connect("localhost:5432").await?;
+let mut client = Client::connect("localhost:9472").await?;
 let result = client.query("SELECT name FROM users").await?;
 ```
 
@@ -607,15 +607,15 @@ BaraDB can be configured via environment variables or a config file:
 
 ```bash
 # Environment variables
-export BARADB_PORT=5432
-export BARADB_HTTP_PORT=8080
+export BARADB_PORT=9472
+export BARADB_HTTP_PORT=9470
 export BARADB_DATA_DIR=/var/lib/baradb
 export BARADB_LOG_LEVEL=info
 export BARADB_COMPACTION_INTERVAL=60000
 
 # Or create baradb.conf
-port = 5432
-http_port = 8080
+port = 9472
+http_port = 9470
 data_dir = "/var/lib/baradb"
 log_level = "info"
 compaction_interval_ms = 60000
@@ -628,7 +628,7 @@ compaction_interval_ms = 60000
 BaraDB exposes operational metrics via the HTTP API:
 
 ```bash
-curl http://localhost:8080/metrics
+curl http://localhost:9470/metrics
 ```
 
 Example response:
@@ -650,7 +650,7 @@ Example response:
 ### Health Check
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:9470/health
 ```
 
 ### Logging
@@ -997,7 +997,7 @@ Error: unhandled exception: Address already in use
 ```bash
 BARADB_PORT=5433 ./build/baradadb
 # or
-lsof -ti:5432 | xargs kill -9
+lsof -ti:9472 | xargs kill -9
 ```
 
 ### SSL Compilation Error

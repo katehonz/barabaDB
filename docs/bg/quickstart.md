@@ -8,7 +8,7 @@
 ./build/baradadb
 ```
 
-Сървърът ще стартира на `localhost:8080` по подразбиране.
+Сървърът ще стартира на `localhost:9470` по подразбиране.
 
 ## Свързване чрез CLI
 
@@ -102,10 +102,10 @@ SELECT * FROM vectors ORDER BY cosine_distance(embedding, [0.1, 0.2, 0.3]) LIMIT
 
 ```bash
 # GET заявка
-curl http://localhost:8080/api/users
+curl http://localhost:9470/api/users
 
 # POST заявка
-curl -X POST http://localhost:8080/api/users \
+curl -X POST http://localhost:9470/api/users \
   -H "Content-Type: application/json" \
   -d '{"name": "Alice", "age": 30}'
 ```

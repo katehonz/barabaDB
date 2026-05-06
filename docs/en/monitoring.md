@@ -5,7 +5,7 @@
 ### HTTP Health Endpoint
 
 ```bash
-curl http://localhost:8080/health
+curl http://localhost:9470/health
 ```
 
 Response:
@@ -26,7 +26,7 @@ Response:
 ### Readiness Probe
 
 ```bash
-curl http://localhost:8080/ready
+curl http://localhost:9470/ready
 ```
 
 Returns `200 OK` when the server is ready to accept traffic, `503` during startup.
@@ -36,7 +36,7 @@ Returns `200 OK` when the server is ready to accept traffic, `503` during startu
 ### Prometheus-Compatible Metrics
 
 ```bash
-curl http://localhost:8080/metrics
+curl http://localhost:9470/metrics
 ```
 
 Example output:
@@ -80,7 +80,7 @@ baradb_txns_committed_total 89123
 ### JSON Metrics
 
 ```bash
-curl http://localhost:8080/metrics?format=json
+curl http://localhost:9470/metrics?format=json
 ```
 
 ## Logging
@@ -190,7 +190,7 @@ Key panels:
 For Raft clusters, monitor:
 
 ```bash
-curl http://node1:8080/metrics/cluster
+curl http://node1:9470/metrics/cluster
 ```
 
 ```json
@@ -213,19 +213,19 @@ curl http://node1:8080/metrics/cluster
 ### Built-in CPU Profiler
 
 ```bash
-curl -X POST http://localhost:8080/debug/pprof/cpu?seconds=30 > cpu.prof
+curl -X POST http://localhost:9470/debug/pprof/cpu?seconds=30 > cpu.prof
 ```
 
 ### Memory Profiler
 
 ```bash
-curl http://localhost:8080/debug/pprof/heap > heap.prof
+curl http://localhost:9470/debug/pprof/heap > heap.prof
 ```
 
 ### Trace
 
 ```bash
-curl -X POST http://localhost:8080/debug/pprof/trace?seconds=5 > trace.out
+curl -X POST http://localhost:9470/debug/pprof/trace?seconds=5 > trace.out
 ```
 
 ## Log Aggregation

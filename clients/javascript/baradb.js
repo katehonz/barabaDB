@@ -9,7 +9,7 @@
  *
  * Quick Start:
  *   import { Client } from 'baradb';
- *   const client = new Client('localhost', 5432);
+ *   const client = new Client('localhost', 9472);
  *   await client.connect();
  *   const result = await client.query('SELECT name FROM users WHERE age > 18');
  *   for (const row of result) {
@@ -87,7 +87,7 @@ class QueryResult {
 }
 
 class Client {
-  constructor(host = 'localhost', port = 5432, options = {}) {
+  constructor(host = 'localhost', port = 9472, options = {}) {
     this.host = host;
     this.port = port;
     this.database = options.database || 'default';

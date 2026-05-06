@@ -21,7 +21,7 @@ type
 proc defaultConfig*(): BaraConfig =
   BaraConfig(
     address: "127.0.0.1",
-    port: 5432,
+    port: 9472,
     dataDir: "./data",
     maxConnections: 1000,
     walEnabled: true,

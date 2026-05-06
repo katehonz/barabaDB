@@ -17,7 +17,7 @@ yarn add baradb
 ```typescript
 import { Client } from 'baradb';
 
-const client = new Client('localhost', 5432);
+const client = new Client('localhost', 9472);
 await client.connect();
 
 // Simple query
@@ -50,7 +50,7 @@ await client.close();
 ```typescript
 import { WebSocketClient } from 'baradb/ws';
 
-const ws = new WebSocketClient('ws://localhost:8081');
+const ws = new WebSocketClient('ws://localhost:9471');
 ws.onMessage = (data) => console.log(data);
 await ws.connect();
 await ws.send('SUBSCRIBE updates');
@@ -69,7 +69,7 @@ pip install baradb
 ```python
 from baradb import Client
 
-client = Client("localhost", 5432)
+client = Client("localhost", 9472)
 client.connect()
 
 # Simple query
@@ -90,7 +90,7 @@ client.batch([
 ])
 
 # Context manager (auto-close)
-with Client("localhost", 5432) as c:
+with Client("localhost", 9472) as c:
     result = c.query("SELECT count(*) FROM users")
     print(result[0]["count"])
 ```
@@ -102,7 +102,7 @@ import asyncio
 from baradb import AsyncClient
 
 async def main():
-    client = AsyncClient("localhost", 5432)
+    client = AsyncClient("localhost", 9472)
     await client.connect()
     result = await client.query("SELECT * FROM users")
     print(result.rows)
@@ -157,7 +157,7 @@ let path = g.shortestPath(alice, bob)
 ```nim
 import barabadb/client/client
 
-var c = newBaraClient("localhost", 5432)
+var c = newBaraClient("localhost", 9472)
 c.connect()
 let result = c.query("SELECT name FROM users")
 for row in result.rows:
@@ -182,7 +182,7 @@ use baradb::Client;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let mut client = Client::connect("localhost:5432").await?;
+    let mut client = Client::connect("localhost:9472").await?;
     
     let result = client
         .query("SELECT name, age FROM users WHERE age > 18")
@@ -203,24 +203,24 @@ All languages can use the HTTP/REST API directly:
 
 ```bash
 # Query
-curl -X POST http://localhost:8080/api/query \
+curl -X POST http://localhost:9470/api/query \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $TOKEN" \
   -d '{"query": "SELECT * FROM users WHERE age > 18"}'
 
 # Insert
-curl -X POST http://localhost:8080/api/query \
+curl -X POST http://localhost:9470/api/query \
   -H "Content-Type: application/json" \
   -d '{"query": "INSERT users { name := \"Alice\", age := 30 }"}'
 
 # Schema
-curl http://localhost:8080/api/schema
+curl http://localhost:9470/api/schema
 
 # Health
-curl http://localhost:8080/health
+curl http://localhost:9470/health
 
 # Metrics
-curl http://localhost:8080/metrics
+curl http://localhost:9470/metrics
 ```
 
 ## Connection Pooling
@@ -234,7 +234,7 @@ import { Pool } from 'baradb';
 
 const pool = new Pool({
   host: 'localhost',
-  port: 5432,
+  port: 9472,
   min: 5,
   max: 50,
   idleTimeout: 30000,
@@ -253,7 +253,7 @@ try {
 ```python
 from baradb import Pool
 
-pool = Pool("localhost", 5432, min_size=5, max_size=50)
+pool = Pool("localhost", 9472, min_size=5, max_size=50)
 with pool.connection() as conn:
     result = conn.query("SELECT 1")
 ```
