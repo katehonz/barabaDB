@@ -663,24 +663,188 @@ BARADB_LOG_LEVEL=debug ./build/baradadb
 
 ## Backup & Recovery
 
-### Online Backup
+BaraDB includes a built-in backup manager that creates compressed tar.gz
+snapshots of your data directory. The manager supports online backups
+(server does not need to stop), integrity verification, retention policies,
+and safe restore with automatic rollback protection.
 
-BaraDB supports online snapshots without stopping the server:
+### Quick Reference
+
+| Command | Purpose |
+|---------|---------|
+| `backup backup` | Create a new snapshot |
+| `backup restore` | Restore data from a snapshot |
+| `backup list` | Show all snapshots |
+| `backup verify` | Check archive integrity |
+| `backup cleanup` | Delete old snapshots |
+| `backup help` | Show full help text |
+
+### Build the Backup Tool
+
+```bash
+nim c -o:build/backup src/barabadb/core/backup.nim
+```
+
+### Creating Backups
+
+**Basic backup** — creates `backup_<timestamp>.tar.gz` in the current directory:
+
+```bash
+./build/backup backup
+```
+
+**Custom output path**:
+
+```bash
+./build/backup backup --output=/backups/prod_$(date +%F).tar.gz
+```
+
+**Maximum compression** (slower, smaller file):
+
+```bash
+./build/backup backup --level=9
+```
+
+**Exclude WAL logs and temporary files**:
+
+```bash
+./build/backup backup \
+  --exclude="*.log" \
+  --exclude="wal/*" \
+  --exclude="tmp/*"
+```
+
+**Verbose output** (shows tar command and progress):
+
+```bash
+./build/backup backup --verbose
+```
+
+### Listing Backups
+
+```bash
+./build/backup list
+```
+
+Example output:
+
+```
+Found 3 backup(s):
+--------------------------------------------------------------------------------
+#   Timestamp            Size        Path
+--------------------------------------------------------------------------------
+1   2026-05-06 23:04:56  12.45 MB    backup_1715011200.tar.gz
+2   2026-05-05 12:30:00  11.20 MB    backup_1714921800.tar.gz
+3   2026-05-04 08:15:22  10.89 MB    backup_1714834522.tar.gz
+--------------------------------------------------------------------------------
+```
+
+### Verifying Backups
+
+Always verify a snapshot before restoring, especially after transferring it
+over the network:
+
+```bash
+./build/backup verify --input=backup_1715011200.tar.gz
+```
+
+A valid archive prints:
+
+```
+Archive is valid: backup_1715011200.tar.gz (12.45 MB)
+```
+
+A corrupted archive prints an error and exits with code 1.
+
+### Restoring from Backup
+
+> ⚠️ **WARNING:** Restore replaces the existing data directory. The old data
+> is automatically moved to `data/server.old_<timestamp>` before extraction.
+
+```bash
+./build/backup restore --input=backup_1715011200.tar.gz
+```
+
+You will be prompted for confirmation:
+
+```
+WARNING: This will REPLACE the data in: data/server
+Continue? [y/N]
+```
+
+**Restore to a different data directory**:
+
+```bash
+./build/backup restore --input=backup.tar.gz --data-dir=data/recovered
+```
+
+**Skip confirmation (scripting)** — pipe `y`:
+
+```bash
+echo "y" | ./build/backup restore --input=backup.tar.gz
+```
+
+### Cleanup & Retention
+
+Delete old snapshots automatically, keeping only the N most recent:
+
+```bash
+# Keep last 5 snapshots (default)
+./build/backup cleanup
+
+# Keep last 3 snapshots
+./build/backup cleanup --keep=3
+
+# Verbose — shows which files are deleted
+./build/backup cleanup --keep=3 --verbose
+```
+
+### Full Option Reference
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--data-dir` | `-d` | `data/server` | Path to the data directory |
+| `--output` | `-o` | auto-generated | Destination path for new backup |
+| `--input` | `-i` | — | Source archive for restore/verify |
+| `--keep` | `-k` | `5` | Number of snapshots to retain |
+| `--exclude` | `-e` | — | Exclude pattern (repeatable) |
+| `--level` | `-l` | `6` | Gzip compression 0-9 |
+| `--verbose` | `-v` | off | Detailed progress output |
+| `--help` | `-h` | — | Show help text |
+
+### Nim API
+
+You can also use the backup module programmatically:
 
 ```nim
 import barabadb/core/backup
 
-var bm = newBackupManager()
-bm.createSnapshot("/backup/baradb_$(date)")
+# Create a snapshot
+let ok = backupDataDir("data/server", "snapshot.tar.gz")
+if not ok:
+  echo "Backup failed"
+
+# List existing snapshots
+let backups = listBackups("data/server")
+for b in backups:
+  echo b.path, " → ", formatBytes(b.size)
+
+# Verify without extracting
+let valid = verifyArchive("snapshot.tar.gz")
+
+# Restore (destructive!)
+let restored = restoreDataDir("snapshot.tar.gz", "data/server")
+
+# Cleanup retention
+cleanupOldBackups("data/server", keepLast = 5)
 ```
 
-### Point-in-Time Recovery
+### Point-in-Time Recovery (WAL)
 
-WAL-based point-in-time recovery:
+For fine-grained recovery, replay the WAL from a checkpoint:
 
 ```bash
-# Replay WAL from checkpoint
-./build/baradadb --recover --wal-dir=./wal --checkpoint=/backup/snapshot.db
+./build/baradadb --recover --wal-dir=./wal --checkpoint=/backup/snapshot.tar.gz
 ```
 
 ### Cross-Modal Queries
