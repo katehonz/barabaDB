@@ -4,6 +4,7 @@ import std/asyncnet
 import std/strutils
 import std/os
 import std/endians
+import std/tables
 import config
 import ../protocol/wire
 import ../query/lexer
@@ -11,6 +12,7 @@ import ../query/parser
 import ../query/ast
 import ../query/executor
 import ../storage/lsm
+import ../core/mvcc
 
 type
   Server* = ref object
@@ -18,15 +20,20 @@ type
     running: bool
     db: LSMTree
     ctx: ExecutionContext
+    txnManager: TxnManager
 
   ClientConnection = ref object
     socket: AsyncSocket
     id: int
+    currentTxn: Transaction
 
 proc newServer*(config: BaraConfig): Server =
   let dataDir = config.dataDir / "server"
   let db = newLSMTree(dataDir)
-  Server(config: config, running: false, db: db, ctx: newExecutionContext(db))
+  let ctx = newExecutionContext(db)
+  ctx.txnManager = newTxnManager()
+  Server(config: config, running: false, db: db, ctx: ctx,
+         txnManager: ctx.txnManager)
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
@@ -141,6 +148,7 @@ proc recvExact(client: AsyncSocket, size: int): Future[string] {.async.} =
 
 proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} =
   echo "Client ", clientId, " connected"
+  var connCtx = cloneForConnection(server.ctx)
   try:
     while true:
       # Read 12-byte header
@@ -166,7 +174,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         let queryStr = readString(cast[seq[byte]](payload), pos)
         echo "[", clientId, "] Query: ", queryStr
 
-        let (success, result, errorMsg) = executeQuery(server.db, server.ctx, queryStr)
+        let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr)
         if success:
           if result.rows.len > 0:
             let dataMsg = serializeResult(result, header.requestId)

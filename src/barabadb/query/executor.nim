@@ -7,6 +7,7 @@ import ir
 import ../core/types
 import ../storage/lsm
 import ../storage/btree
+import ../core/mvcc
 
 type
   IndexEntry = ref object
@@ -17,6 +18,8 @@ type
     db*: LSMTree
     tables*: Table[string, TableDef]  # table name -> definition
     btrees*: Table[string, BTreeIndex[string, IndexEntry]]  # index name -> btree
+    txnManager*: TxnManager
+    pendingTxn*: Transaction  # active transaction for this context
 
   TableDef* = object
     name*: string
@@ -36,6 +39,12 @@ type
 proc newExecutionContext*(db: LSMTree): ExecutionContext =
   ExecutionContext(db: db, tables: initTable[string, TableDef](),
                    btrees: initTable[string, BTreeIndex[string, IndexEntry]]())
+
+proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
+  ## Create a per-connection context that shares the same data but has its own transaction.
+  ExecutionContext(db: ctx.db, tables: ctx.tables,
+                   btrees: ctx.btrees, txnManager: ctx.txnManager,
+                   pendingTxn: nil)
 
 proc execScan(ctx: ExecutionContext, table: string): seq[Row] =
   ## Full table scan via LSM-Tree memtable scan.
@@ -66,7 +75,6 @@ proc execPointRead(ctx: ExecutionContext, table: string, key: string): seq[Row] 
   return @[]
 
 proc execInsert(ctx: ExecutionContext, table: string, fields: seq[string], values: seq[seq[string]]): int =
-  ## Insert rows into LSM-Tree with constraint validation and B-Tree index population.
   var count = 0
   for rowVals in values:
     var key = ""
@@ -83,9 +91,14 @@ proc execInsert(ctx: ExecutionContext, table: string, fields: seq[string], value
         valParts.add(f & "=")
     let valStr = valParts.join(",")
     let fullKey = table & "." & key
-    ctx.db.put(fullKey, cast[seq[byte]](valStr))
 
-    # Populate B-Tree indexes
+    # Use MVCC transaction if active, otherwise write directly
+    if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
+      discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](valStr))
+    else:
+      ctx.db.put(fullKey, cast[seq[byte]](valStr))
+
+    # Populate B-Tree indexes (always direct, not transactional for now)
     for colName, btIdx in ctx.btrees:
       if colName.startsWith(table & "."):
         let colOnly = colName[table.len + 1..^1]
@@ -228,7 +241,10 @@ proc execDelete(ctx: ExecutionContext, table: string, key: string): int =
   let fullKey = table & "." & key
   let (found, _) = ctx.db.get(fullKey)
   if found:
-    ctx.db.delete(fullKey)
+    if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
+      discard ctx.txnManager.delete(ctx.pendingTxn, fullKey)
+    else:
+      ctx.db.delete(fullKey)
     return 1
   return 0
 
@@ -580,13 +596,33 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
     return (true, "", 0)
 
   of nkBeginTxn:
+    if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
+      # Auto-commit previous pending transaction
+      discard ctx.txnManager.commit(ctx.pendingTxn)
+    ctx.pendingTxn = ctx.txnManager.beginTxn(ilReadCommitted)
     return (true, "", 0)
 
   of nkCommitTxn:
-    return (true, "", 0)
+    if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
+      # Flush write set to LSM-Tree
+      for key, version in ctx.pendingTxn.writeSet:
+        if version.value == @[]:
+          ctx.db.delete(key)
+        else:
+          ctx.db.put(key, version.value)
+      discard ctx.txnManager.commit(ctx.pendingTxn)
+      ctx.pendingTxn = nil
+      return (true, "", 0)
+    else:
+      return (false, "No active transaction to commit", 0)
 
   of nkRollbackTxn:
-    return (true, "", 0)
+    if ctx.pendingTxn != nil:
+      discard ctx.txnManager.abortTxn(ctx.pendingTxn)
+      ctx.pendingTxn = nil
+      return (true, "", 0)
+    else:
+      return (false, "No active transaction to rollback", 0)
 
   of nkCreateType:
     return (true, "", 0)
