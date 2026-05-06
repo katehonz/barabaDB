@@ -4,6 +4,7 @@ import std/tables
 import std/hashes
 import std/sequtils
 import std/algorithm
+import std/re
 import lexer as qlex
 import parser as qpar
 import ast
@@ -18,17 +19,38 @@ type
     lsmKey*: string
     rowValue*: string
 
+  ChangeKind* = enum
+    ckInsert, ckUpdate, ckDelete
+
+  ChangeEvent* = object
+    table*: string
+    kind*: ChangeKind
+    key*: string
+    data*: string
+
   ExecutionContext* = ref object
     db*: LSMTree
     tables*: Table[string, TableDef]
     btrees*: Table[string, BTreeIndex[string, IndexEntry]]
     txnManager*: TxnManager
     pendingTxn*: Transaction
+    onChange*: proc(ev: ChangeEvent) {.closure.}
+
+  ForeignKeyDef* = object
+    refTable*: string
+    refColumn*: string
+    onDelete*: string  # CASCADE, SET NULL, RESTRICT
+
+  CheckDef* = object
+    name*: string
+    expr*: string  # stored expression string
 
   TableDef* = object
     name*: string
     columns*: seq[ColumnDef]
     pkColumns*: seq[string]
+    foreignKeys*: seq[ForeignKeyDef]
+    checks*: seq[CheckDef]
 
   ColumnDef* = object
     name*: string
@@ -37,6 +59,8 @@ type
     isNotNull*: bool
     isUnique*: bool
     defaultVal*: string
+    fkTable*: string
+    fkColumn*: string
 
   Row* = Table[string, string]
 
@@ -57,9 +81,12 @@ proc errResult*(msg: string): ExecResult =
 # Context management
 # ----------------------------------------------------------------------
 
+proc restoreSchema(ctx: ExecutionContext)
+
 proc newExecutionContext*(db: LSMTree): ExecutionContext =
   result = ExecutionContext(db: db, tables: initTable[string, TableDef](),
-                   btrees: initTable[string, BTreeIndex[string, IndexEntry]]())
+                   btrees: initTable[string, BTreeIndex[string, IndexEntry]](),
+                   onChange: nil)
   restoreSchema(result)
 
 proc restoreSchema(ctx: ExecutionContext) =
@@ -75,7 +102,8 @@ proc restoreSchema(ctx: ExecutionContext) =
       let stmt = astNode.stmts[0]
       case stmt.kind
       of nkCreateTable:
-        var tbl = TableDef(name: stmt.crtName, columns: @[], pkColumns: @[])
+        var tbl = TableDef(name: stmt.crtName, columns: @[], pkColumns: @[],
+                           foreignKeys: @[], checks: @[])
         for col in stmt.crtColumns:
           if col.kind == nkColumnDef:
             var colDef = ColumnDef(name: col.cdName, colType: col.cdType)
@@ -98,7 +126,7 @@ proc restoreSchema(ctx: ExecutionContext) =
 proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
   ExecutionContext(db: ctx.db, tables: ctx.tables,
                    btrees: ctx.btrees, txnManager: ctx.txnManager,
-                   pendingTxn: nil)
+                   pendingTxn: nil, onChange: ctx.onChange)
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -106,7 +134,7 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
 
 proc getTableDef(ctx: ExecutionContext, tableName: string): TableDef =
   if tableName in ctx.tables: return ctx.tables[tableName]
-  return TableDef(name: tableName, columns: @[], pkColumns: @[])
+  return TableDef(name: tableName, columns: @[], pkColumns: @[], foreignKeys: @[], checks: @[])
 
 proc getValue(values: seq[string], fields: seq[string], colName: string): string =
   for i, f in fields:
@@ -200,7 +228,8 @@ proc evalExpr(expr: IRExpr, row: Table[string, string]): string =
     of irLike:
       let pattern = right.replace("%", ".*").replace("_", ".")
       try:
-        if left.match(pattern): return "true"
+        let rePattern = re(pattern)
+        if left.match(rePattern): return "true"
       except: discard
       return "false"
     else: return "false"
@@ -324,6 +353,24 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
 # Constraint Validation
 # ----------------------------------------------------------------------
 
+proc validateType*(colType: string, value: string): (bool, string) =
+  if isNull(value): return (true, "")
+  let t = colType.toUpper()
+  if t == "INTEGER" or t == "INT" or t == "BIGINT" or t == "SMALLINT" or t == "SERIAL":
+    try: discard parseInt(value)
+    except: return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
+  elif t == "FLOAT" or t == "REAL" or t == "DOUBLE" or t == "DOUBLE PRECISION" or t == "NUMERIC":
+    try: discard parseFloat(value)
+    except: return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
+  elif t == "BOOLEAN" or t == "BOOL":
+    let lv = value.toLower()
+    if lv notin ["true", "false", "1", "0", "t", "f", "yes", "no"]:
+      return (false, "Type mismatch: expected BOOLEAN but got '" & value & "'")
+  elif t == "TIMESTAMP" or t == "DATE":
+    if value.len < 8:  # minimal date check
+      return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
+  return (true, "")
+
 proc validateConstraints*(ctx: ExecutionContext, tableName: string,
     fields: seq[string], values: seq[seq[string]]): (bool, string) =
   let tbl = ctx.getTableDef(tableName)
@@ -331,9 +378,36 @@ proc validateConstraints*(ctx: ExecutionContext, tableName: string,
   for rowIdx, rowVals in values:
     for col in tbl.columns:
       let val = getValue(rowVals, fields, col.name)
+
+      # NOT NULL check
       if col.isNotNull and isNull(val):
         return (false, "NOT NULL constraint violated for column '" & col.name & "'")
 
+      # Type enforcement
+      if col.colType.len > 0 and not isNull(val):
+        let (typeOk, typeErr) = validateType(col.colType, val)
+        if not typeOk:
+          return (false, typeErr)
+
+      # FK check
+      if col.fkTable.len > 0 and col.fkColumn.len > 0 and not isNull(val):
+        let fkKey = col.fkTable & "." & col.fkColumn & "=" & val
+        let (fkExists, _) = ctx.db.get(fkKey)
+        if not fkExists:
+          # Also check if value is in any row's first field
+          var found = false
+          let prefix = col.fkTable & "."
+          for entry in ctx.db.scanMemTable():
+            if entry.deleted: continue
+            if entry.key.startsWith(prefix):
+              let rest = entry.key[prefix.len..^1]
+              if rest.startsWith(col.fkColumn & "=") and rest[col.fkColumn.len+1..^1] == val:
+                found = true
+                break
+          if not found:
+            return (false, "FOREIGN KEY violation: '" & val & "' not found in " & col.fkTable & "." & col.fkColumn)
+
+    # PK uniqueness
     if tbl.pkColumns.len > 0:
       var pkVals: seq[string] = @[]
       for pkCol in tbl.pkColumns:
@@ -342,22 +416,16 @@ proc validateConstraints*(ctx: ExecutionContext, tableName: string,
       let pkKey = tableName & "." & pkStr
       let (exists, _) = ctx.db.get(pkKey)
       if exists:
-        return (false, "UNIQUE constraint violated: duplicate key '" & pkStr & "' for table '" & tableName & "'")
+        return (false, "UNIQUE constraint violated: duplicate key '" & pkStr & "'")
 
+    # UNIQUE constraint via B-Tree
     for col in tbl.columns:
       if col.isUnique:
         let uVal = getValue(rowVals, fields, col.name)
         if not isNull(uVal):
           let idxName = tableName & "." & col.name
-          if idxName in ctx.btrees:
-            if ctx.btrees[idxName].contains(uVal):
-              return (false, "UNIQUE constraint violated: duplicate value '" & uVal & "' for column '" & col.name & "'")
-
-    # CHECK constraints (via table-level cstType="check")
-    for col in tbl.columns:
-      let fkIdx = tableName & "." & col.name
-      # FK check: verify referenced row exists
-      # (skipped for now — needs full table metadata)
+          if idxName in ctx.btrees and ctx.btrees[idxName].contains(uVal):
+            return (false, "UNIQUE constraint violated: duplicate '" & uVal & "' for column '" & col.name & "'")
 
   return (true, "")
 
@@ -585,7 +653,28 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     return sourceRows[start..<endIdx]
 
   of irpkGroupBy:
-    return executePlan(ctx, plan.groupSource)
+    let sourceRows = executePlan(ctx, plan.groupSource)
+    if plan.groupKeys.len == 0: return sourceRows
+    # Group rows by the group key values
+    var groups = initTable[string, seq[Row]]()
+    for row in sourceRows:
+      var groupKey = ""
+      for gk in plan.groupKeys:
+        groupKey &= evalExpr(gk, row) & "|"
+      if groupKey notin groups:
+        groups[groupKey] = @[]
+      groups[groupKey].add(row)
+    result = @[]
+    for gk, groupRows in groups:
+      # For each group, produce one row with the group key and aggregates
+      var aggRow: Table[string, string]
+      for gkExpr in plan.groupKeys:
+        if gkExpr.kind == irekField and gkExpr.fieldPath.len > 0:
+          aggRow[gkExpr.fieldPath[^1]] = evalExpr(gkExpr, groupRows[0])
+      # COUNT(*) = group size
+      aggRow["count(*)"] = $groupRows.len
+      result.add(aggRow)
+    return result
 
   of irpkJoin:
     let leftRows = executePlan(ctx, plan.joinLeft)
@@ -671,6 +760,9 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
     if not valid: return errResult(errMsg)
 
     let count = execInsert(ctx, stmt.insTarget, mutableFields, mutableValues)
+    if ctx.onChange != nil:
+      for i in 0..<count:
+        ctx.onChange(ChangeEvent(table: stmt.insTarget, kind: ckInsert, key: "", data: ""))
     return okResult(affected=count)
 
   of nkUpdate:
@@ -696,7 +788,10 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
         if evalExpr(whereExpr, row) != "true": continue
       # Get key from row
       if "$key" in row:
+        let old = row["$key"]
         count += execUpdateRow(ctx, stmt.updTarget, row["$key"], sets)
+        if ctx.onChange != nil:
+          ctx.onChange(ChangeEvent(table: stmt.updTarget, kind: ckUpdate, key: old, data: ""))
     return okResult(affected=count)
 
   of nkDelete:
@@ -708,11 +803,38 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
         let whereExpr = lowerExpr(stmt.delWhere.whereExpr)
         if evalExpr(whereExpr, row) != "true": continue
       if "$key" in row:
+        let old = row["$key"]
         count += execDelete(ctx, stmt.delTarget, row["$key"])
+        if ctx.onChange != nil:
+          ctx.onChange(ChangeEvent(table: stmt.delTarget, kind: ckDelete, key: old, data: ""))
     return okResult(affected=count)
 
   of nkCreateTable:
-    var tbl = TableDef(name: stmt.crtName, columns: @[], pkColumns: @[])
+    var tbl = TableDef(name: stmt.crtName, columns: @[], pkColumns: @[],
+                       foreignKeys: @[], checks: @[])
+    # First pass: collect table-level constraints
+    for cstNode in stmt.crtConstraints:
+      if cstNode.kind == nkConstraintDef:
+        if cstNode.cstType == "pkey":
+          for c in cstNode.cstColumns: tbl.pkColumns.add(c)
+          for i, c in tbl.columns:
+            if c.name in cstNode.cstColumns:
+              tbl.columns[i].isPk = true
+              ctx.btrees[stmt.crtName & "." & c.name] = newBTreeIndex[string, IndexEntry]()
+        elif cstNode.cstType == "fkey":
+          tbl.foreignKeys.add(ForeignKeyDef(
+            refTable: cstNode.cstRefTable,
+            refColumn: if cstNode.cstRefColumns.len > 0: cstNode.cstRefColumns[0] else: "",
+            onDelete: cstNode.cstOnDelete))
+          if cstNode.cstColumns.len > 0:
+            for i, c in tbl.columns:
+              if c.name in cstNode.cstColumns:
+                tbl.columns[i].fkTable = cstNode.cstRefTable
+                tbl.columns[i].fkColumn = if cstNode.cstRefColumns.len > 0: cstNode.cstRefColumns[0] else: ""
+        elif cstNode.cstType == "check":
+          tbl.checks.add(CheckDef(name: "check_" & $tbl.checks.len))
+
+    # Second pass: column definitions
     for col in stmt.crtColumns:
       if col.kind == nkColumnDef:
         var colDef = ColumnDef(name: col.cdName, colType: col.cdType)
@@ -721,7 +843,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
             case cst.cstType
             of "pkey":
               colDef.isPk = true
-              tbl.pkColumns.add(col.cdName)
+              if col.cdName notin tbl.pkColumns: tbl.pkColumns.add(col.cdName)
               ctx.btrees[stmt.crtName & "." & col.cdName] = newBTreeIndex[string, IndexEntry]()
             of "notnull": colDef.isNotNull = true
             of "unique":
@@ -733,6 +855,11 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
                 elif cst.cstDefault.kind == nkIntLit: colDef.defaultVal = $cst.cstDefault.intVal
                 elif cst.cstDefault.kind == nkBoolLit: colDef.defaultVal = $cst.cstDefault.boolVal
                 elif cst.cstDefault.kind == nkFloatLit: colDef.defaultVal = $cst.cstDefault.floatVal
+            of "fkey":
+              colDef.fkTable = cst.cstRefTable
+              colDef.fkColumn = if cst.cstRefColumns.len > 0: cst.cstRefColumns[0] else: ""
+            of "check":
+              tbl.checks.add(CheckDef(name: "check_" & col.cdName))
             else: discard
         tbl.columns.add(colDef)
     ctx.tables[stmt.crtName] = tbl
@@ -745,6 +872,8 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
       if col.isNotNull: parts.add("NOT NULL")
       if col.isUnique: parts.add("UNIQUE")
       if col.defaultVal.len > 0: parts.add("DEFAULT '" & col.defaultVal & "'")
+      if col.fkTable.len > 0:
+        parts.add("REFERENCES " & col.fkTable & "(" & col.fkColumn & ")")
       colDefs.add(parts.join(" "))
     let schemaKey = "_schema:migrations:" & $ctx.tables.len
     ctx.db.put(schemaKey, cast[seq[byte]]("CREATE TABLE " & stmt.crtName & " (" & colDefs.join(", ") & ")"))
@@ -805,7 +934,31 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
     return okResult(msg="EXPLAIN")
 
   of nkAlterTable:
-    return okResult(msg="ALTER TABLE not yet fully implemented")
+    if stmt.altName in ctx.tables:
+      var tbl = ctx.tables[stmt.altName]
+      for op in stmt.altOps:
+        if op.kind == nkColumnDef:
+          var colDef = ColumnDef(name: op.cdName, colType: op.cdType)
+          tbl.columns.add(colDef)
+      ctx.tables[stmt.altName] = tbl
+      return okResult(msg="ALTER TABLE " & stmt.altName & " executed")
+    return errResult("Table '" & stmt.altName & "' does not exist")
+
+  of nkCreateIndex:
+    let idxName = if stmt.ciName.len > 0: stmt.ciName
+                  else: stmt.ciTarget & "." & stmt.ciTarget
+    let key = stmt.ciTarget & "." & stmt.ciTarget
+    ctx.btrees[key] = newBTreeIndex[string, IndexEntry]()
+    # Populate index from existing data
+    let rows = execScan(ctx, stmt.ciTarget)
+    for row in rows:
+      if "$key" in row:
+        let val = row["$key"]
+        let eqPos = val.find('=')
+        if eqPos >= 0:
+          let colVal = val[eqPos+1..^1]
+          ctx.btrees[key].insert(colVal, IndexEntry(lsmKey: stmt.ciTarget & "." & val, rowValue: ""))
+    return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget)
 
   else:
     return errResult("Unsupported statement type: " & $stmt.kind)

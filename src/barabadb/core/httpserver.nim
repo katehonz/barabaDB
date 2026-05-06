@@ -3,6 +3,7 @@ import std/asynchttpserver
 import std/asyncdispatch
 import std/strutils
 import std/json
+import std/tables
 import std/os
 import config
 import ../query/lexer
@@ -11,6 +12,7 @@ import ../query/executor
 import ../storage/lsm
 import ../core/mvcc
 import ../protocol/auth
+import ../protocol/ratelimit
 
 type
   HttpServer* = ref object
@@ -19,6 +21,7 @@ type
     db: LSMTree
     ctx: ExecutionContext
     authManager: AuthManager
+    rateLimiter*: RateLimiter
     metrics*: Metrics
 
   Metrics* = ref object
@@ -35,6 +38,7 @@ proc newHttpServer*(config: BaraConfig): HttpServer =
   ctx.txnManager = newTxnManager()
   HttpServer(config: config, running: false, db: db, ctx: ctx,
              authManager: newAuthManager(),
+             rateLimiter: newRateLimiter(perClientRate=100),
              metrics: Metrics(queriesTotal: 0, queryErrors: 0,
                               insertCount: 0, selectCount: 0, activeConnections: 0))
 
@@ -69,28 +73,47 @@ proc jsonError(code: int, message: string): JsonNode =
 # Request handler
 # ----------------------------------------------------------------------
 
+proc corsHeaders(): HttpHeaders =
+  newHttpHeaders([
+    ("Content-Type", "application/json"),
+    ("Access-Control-Allow-Origin", "*"),
+    ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"),
+    ("Access-Control-Allow-Headers", "Content-Type, Authorization"),
+    ("Access-Control-Max-Age", "86400")
+  ])
+
 proc handleRequest(server: HttpServer, req: Request) {.async, gcsafe.} =
   {.cast(gcsafe).}:
     inc server.metrics.queriesTotal
     inc server.metrics.activeConnections
 
+    # Rate limiting
+    let clientIp = req.hostname
+    if not server.rateLimiter.allowRequest(clientIp):
+      await req.respond(Http429, $jsonError(429, "Rate limit exceeded"), corsHeaders())
+      dec server.metrics.activeConnections
+      return
+
+    # CORS preflight
+    if req.reqMethod == HttpOptions:
+      await req.respond(Http200, "", corsHeaders())
+      dec server.metrics.activeConnections
+      return
+
     case req.url.path
     of "/query":
       if req.reqMethod != HttpPost:
-        await req.respond(Http405, $jsonError(405, "Method not allowed. Use POST."),
-                          newHttpHeaders([("Content-Type", "application/json")]))
+        await req.respond(Http405, $jsonError(405, "Method not allowed. Use POST."), corsHeaders())
         return
 
       let (authed, claims) = server.authorize(req.headers)
       if not authed:
-        await req.respond(Http401, $jsonError(401, "Unauthorized"),
-                          newHttpHeaders([("Content-Type", "application/json")]))
+        await req.respond(Http401, $jsonError(401, "Unauthorized"), corsHeaders())
         return
 
       let queryStr = req.body
       if queryStr.len == 0:
-        await req.respond(Http400, $jsonError(400, "Missing query in request body"),
-                          newHttpHeaders([("Content-Type", "application/json")]))
+        await req.respond(Http400, $jsonError(400, "Missing query in request body"), corsHeaders())
         return
 
       var reqCtx = cloneForConnection(server.ctx)
@@ -99,8 +122,7 @@ proc handleRequest(server: HttpServer, req: Request) {.async, gcsafe.} =
       let astNode = parse(tokens)
 
       if astNode.stmts.len == 0:
-        await req.respond(Http200, $ %* {"rows": [], "affectedRows": 0, "columns": []},
-                          newHttpHeaders([("Content-Type", "application/json")]))
+        await req.respond(Http200, $ %* {"rows": [], "affectedRows": 0, "columns": []}, corsHeaders())
         return
 
       let result = executor.executeQuery(reqCtx, astNode)
@@ -110,29 +132,27 @@ proc handleRequest(server: HttpServer, req: Request) {.async, gcsafe.} =
         var jsonRows = newJArray()
         for row in result.rows:
           var jsonRow = newJObject()
-          for col, val in row:
-            jsonRow[col] = %val
+          for col in result.columns:
+            let key = col
+            var val = ""
+            if key in row: val = row[key]
+            jsonRow[key] = %val
           jsonRows.add(jsonRow)
         var jsonCols = newJArray()
         for c in result.columns:
           jsonCols.add(%c)
-        var msg: JsonNode = nil
-        if result.message.len > 0:
-          msg = %result.message
         await req.respond(Http200, $ %* {
           "rows": jsonRows,
           "affectedRows": result.affectedRows,
           "columns": jsonCols,
           "message": if result.message.len > 0: %result.message else: newJNull()
-        }, newHttpHeaders([("Content-Type", "application/json")]))
+        }, corsHeaders())
       else:
         inc server.metrics.queryErrors
-        await req.respond(Http400, $jsonError(400, result.message),
-                          newHttpHeaders([("Content-Type", "application/json")]))
+        await req.respond(Http400, $jsonError(400, result.message), corsHeaders())
 
     of "/health":
-      await req.respond(Http200, $ %* {"status": "ok", "version": "0.1.0"},
-                        newHttpHeaders([("Content-Type", "application/json")]))
+      await req.respond(Http200, $ %* {"status": "ok", "version": "0.1.0"}, corsHeaders())
 
     of "/metrics":
       let prometheus = "baradb_queries_total " & $server.metrics.queriesTotal & "\n" &
@@ -143,8 +163,7 @@ proc handleRequest(server: HttpServer, req: Request) {.async, gcsafe.} =
       await req.respond(Http200, prometheus, newHttpHeaders([("Content-Type", "text/plain")]))
 
     else:
-      await req.respond(Http404, $jsonError(404, "Not found: " & req.url.path),
-                        newHttpHeaders([("Content-Type", "application/json")]))
+      await req.respond(Http404, $jsonError(404, "Not found: " & req.url.path), corsHeaders())
 
   dec server.metrics.activeConnections
 

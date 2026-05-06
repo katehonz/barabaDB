@@ -688,7 +688,31 @@ proc parseAlterTable(p: var Parser): Node =
   result = Node(kind: nkAlterTable, line: tok.line, col: tok.col)
   result.altName = p.expect(tkIdent).value
   result.altOps = @[]
-  discard p.match(tkAdd)  # or tkRename
+  if p.match(tkAdd):
+    discard p.match(tkColumn)
+    let colName = p.expect(tkIdent).value
+    var colType = ""
+    if p.peek().kind == tkIdent:
+      colType = p.advance().value.toUpper()
+    result.altOps.add(Node(kind: nkColumnDef, cdName: colName, cdType: colType))
+
+proc parseCreateIndex(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  var isUnique = false
+  if p.peek().kind == tkUnique:
+    discard p.advance()
+    isUnique = true
+  discard p.expect(tkIndex)
+  var idxName = ""
+  if p.peek().kind == tkIdent and p.peek().value.toLower() != "on":
+    idxName = p.advance().value
+  discard p.match(tkOn)
+  let tableName = p.expect(tkIdent).value
+  discard p.match(tkLParen)
+  let colName = p.expect(tkIdent).value
+  discard p.match(tkRParen)
+  result = Node(kind: nkCreateIndex, ciName: idxName, ciTarget: tableName,
+                line: tok.line, col: tok.col)
 
 proc parseBeginTxn(p: var Parser): Node =
   let tok = p.expect(tkBegin)
@@ -726,6 +750,8 @@ proc parseStatement*(p: var Parser): Node =
       if next.kind == tkTable or
          (next.kind == tkIdent and next.value.toLower() == "if"):
         p.parseCreateTable()
+      elif next.kind == tkIndex or next.kind == tkUnique:
+        p.parseCreateIndex()
       else:
         p.parseCreateType()
     else:
