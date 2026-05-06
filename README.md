@@ -1,5 +1,7 @@
 # BaraDB
 
+![BaraDB Logo](baradb_b24a2740917f.jpeg)
+
 **A multimodal database engine written in Nim — 100% native, zero dependencies.**
 
 BaraDB combines document, graph, vector, columnar, and full-text search storage
