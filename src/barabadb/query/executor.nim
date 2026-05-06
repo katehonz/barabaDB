@@ -2,6 +2,7 @@
 import std/strutils
 import std/tables
 import std/hashes
+import std/sequtils
 import ast
 import ir
 import ../core/types
@@ -45,6 +46,26 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
   ExecutionContext(db: ctx.db, tables: ctx.tables,
                    btrees: ctx.btrees, txnManager: ctx.txnManager,
                    pendingTxn: nil)
+
+proc getTableDef(ctx: ExecutionContext, tableName: string): TableDef =
+  if tableName in ctx.tables:
+    return ctx.tables[tableName]
+  var tbl = TableDef(name: tableName, columns: @[], pkColumns: @[])
+  return tbl
+
+proc getColumnDef(tbl: TableDef, colName: string): ColumnDef =
+  for col in tbl.columns:
+    if col.name.toLower() == colName.toLower():
+      return col
+
+proc getValue(values: seq[string], fields: seq[string], colName: string): string =
+  for i, f in fields:
+    if f.toLower() == colName.toLower() and i < values.len:
+      return values[i]
+  return ""
+
+proc isNull(value: string): bool =
+  result = value.len == 0 or value.toLower() == "null"
 
 proc execScan(ctx: ExecutionContext, table: string): seq[Row] =
   ## Full table scan via LSM-Tree memtable scan.
@@ -99,13 +120,13 @@ proc execInsert(ctx: ExecutionContext, table: string, fields: seq[string], value
       ctx.db.put(fullKey, cast[seq[byte]](valStr))
 
     # Populate B-Tree indexes (always direct, not transactional for now)
-    for colName, btIdx in ctx.btrees:
+    for colName in ctx.btrees.keys.toSeq():
       if colName.startsWith(table & "."):
         let colOnly = colName[table.len + 1..^1]
         let colVal = getValue(rowVals, fields, colOnly)
         if colVal.len > 0 and not isNull(colVal):
           let entry = IndexEntry(lsmKey: fullKey, rowValue: valStr)
-          btIdx.insert(colVal, entry)
+          ctx.btrees[colName].insert(colVal, entry)
 
     inc count
   return count
@@ -139,26 +160,6 @@ proc execUpdateRow(ctx: ExecutionContext, table: string, key: string, sets: seq[
 # ----------------------------------------------------------------------
 # Constraint Validation
 # ----------------------------------------------------------------------
-
-proc getTableDef(ctx: ExecutionContext, tableName: string): TableDef =
-  if tableName in ctx.tables:
-    return ctx.tables[tableName]
-  var tbl = TableDef(name: tableName, columns: @[], pkColumns: @[])
-  return tbl
-
-proc getColumnDef(tbl: TableDef, colName: string): ColumnDef =
-  for col in tbl.columns:
-    if col.name.toLower() == colName.toLower():
-      return col
-
-proc getValue(values: seq[string], fields: seq[string], colName: string): string =
-  for i, f in fields:
-    if f.toLower() == colName.toLower() and i < values.len:
-      return values[i]
-  return ""
-
-proc isNull(value: string): bool =
-  result = value.len == 0 or value.toLower() == "null"
 
 proc validateConstraints*(ctx: ExecutionContext, tableName: string,
     fields: seq[string], values: seq[seq[string]]): (bool, string) =

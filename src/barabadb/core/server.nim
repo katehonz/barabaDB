@@ -4,7 +4,6 @@ import std/asyncnet
 import std/strutils
 import std/os
 import std/endians
-import std/tables
 import config
 import ../protocol/wire
 import ../query/lexer
