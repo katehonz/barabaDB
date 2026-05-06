@@ -10,6 +10,7 @@ import std/locks
 import bloom
 import wal
 import mmap
+import streams
 
 const
   SSTableMagic* = 0x53535442'u32  # "SSTB"
@@ -323,7 +324,44 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
   result.memMaxSize = memMaxSize
   result.currentSeq = 0
   result.nextSSTableId = nextId
-  discard
+
+  # WAL crash recovery — replay unflushed entries into memTable
+  let walPath = dir / "wal" / "wal.log"
+  if fileExists(walPath):
+    try:
+      let stream = newFileStream(walPath, fmRead)
+      if stream != nil:
+        var magic: uint32 = 0
+        var version: uint32 = 0
+        if stream.readData(addr magic, 4) == 4 and magic == WALMagic:
+          if stream.readData(addr version, 4) == 4:
+            while not stream.atEnd():
+              var kind: uint8 = 0
+              var timestamp: uint64 = 0
+              var keyLen: uint32 = 0
+              var valLen: uint32 = 0
+              if stream.readData(addr kind, 1) != 1: break
+              if stream.readData(addr timestamp, 8) != 8: break
+              if stream.readData(addr keyLen, 4) != 4: break
+              var key = newString(keyLen.int)
+              if keyLen > 0:
+                if stream.readData(addr key[0], keyLen.int) != keyLen.int: break
+              if stream.readData(addr valLen, 4) != 4: break
+              var value = newSeq[byte](valLen.int)
+              if valLen > 0:
+                if stream.readData(addr value[0], valLen.int) != valLen.int: break
+              case WalEntryKind(kind)
+              of wekPut:
+                discard result.memTable.put(key, value, timestamp)
+              of wekDelete:
+                discard result.memTable.put(key, @[], timestamp)  # tombstone
+              of wekCommit:
+                discard
+              of wekCheckpoint:
+                discard
+        stream.close()
+    except:
+      discard
 
 proc put*(db: LSMTree, key: string, value: seq[byte]) =
   acquire(db.lock)

@@ -28,12 +28,14 @@ type
 proc newWriteAheadLog*(dir: string, syncOnWrite: bool = true): WriteAheadLog =
   createDir(dir)
   let path = dir / "wal.log"
-  let stream = newFileStream(path, fmWrite)
+  let exists = fileExists(path)
+  let stream = if exists: newFileStream(path, fmAppend) else: newFileStream(path, fmWrite)
   if stream == nil:
     raise newException(IOError, "Cannot open WAL: " & path)
-  stream.write(WALMagic)
-  stream.write(WALVersion)
-  stream.flush()
+  if not exists:
+    stream.write(WALMagic)
+    stream.write(WALVersion)
+    stream.flush()
   WriteAheadLog(path: path, stream: stream, entryCount: 0, syncOnWrite: syncOnWrite)
 
 proc writeEntry*(wal: var WriteAheadLog, entry: WalEntry) =
