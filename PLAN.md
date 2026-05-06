@@ -9,10 +9,10 @@
 **Core:**
 - CREATE TABLE / INDEX / VIEW / TRIGGER / USER / POLICY
 - SELECT / INSERT / UPDATE / DELETE with WHERE
-- JOIN (inner, left, right, full, cross) — fully tested
+- JOIN (inner, left, right, full, cross) — fully tested and executed
 - GROUP BY / HAVING / ORDER BY / LIMIT / OFFSET
 - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
-- CTE (WITH clause) — parsed; execution via subqueries
+- CTE (WITH clause) — parsed; non-recursive execution via subqueries
 - Constraints (PK, FK, UNIQUE, NOT NULL, CHECK, DEFAULT)
 - B-Tree indexes + query planner + index point-read optimization
 - MVCC transactions (BEGIN / COMMIT / ROLLBACK / savepoints)
@@ -29,6 +29,12 @@
 - TLS/SSL for TCP (OpenSSL-backed, self-signed cert generation)
 - Connection limits (max connections enforced + idle timeout)
 - Slow query log (configurable threshold, file-based)
+
+**Operations:**
+- Config file loading (`baradb.json`) + environment variables
+- Structured JSON logging with configurable level/file/format
+- Docker + Docker Compose (dev + production)
+- Backup/restore via tar.gz
 
 **Advanced:**
 - Row-Level Security (policies, GRANT/REVOKE)
@@ -92,6 +98,16 @@
 - `slowQueryLogPath` config (empty = disabled)
 - Queries exceeding threshold logged to file with timestamp, client ID, duration, query text
 
+### C.4 Config File Loading ✅
+- `baradb.json` support with nested sections (server, storage, tls, auth, logging, performance)
+- Environment variable overrides (`BARADB_ADDRESS`, `BARADB_PORT`, `BARADB_DATA_DIR`, etc.)
+- Priority: defaults → JSON file → env vars
+
+### C.5 Structured JSON Logging ✅
+- `logging.nim` module with `debug/info/warn/error` levels
+- Configurable via `logLevel`, `logFile`, `logFormat`
+- Integrated into `server.nim` and `baradadb.nim`
+
 ---
 
 ## Phase D: Nice-to-Have (Post-Production)
@@ -105,17 +121,17 @@
 | OpenTelemetry tracing | Logs + metrics are enough for v1 |
 | Multi-column indexes | Point reads cover most web queries |
 | Covering index optimization | Premature optimization |
+| Recursive CTE | Rarely used in web apps |
 
 ---
 
 ## Honest Assessment
 
-**Current score: 9.5/10** — all production blockers resolved.
+**Current score: 9.7/10** — all production blockers resolved.
 
 **Remaining polish items (not blockers):**
 1. Recursive CTE execution (WITH RECURSIVE)
 2. Column type metadata in wire protocol serialization (currently inferred heuristically)
-3. Config file loading from environment / YAML (currently defaults-only)
 
 **Total estimated work: ~1 focused session.**
 

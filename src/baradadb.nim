@@ -4,9 +4,11 @@ import std/asyncdispatch
 import std/threadpool
 import std/locks
 import std/os
+import std/strutils
 import barabadb/core/server
 import barabadb/core/httpserver
 import barabadb/core/config
+import barabadb/core/logging
 import barabadb/protocol/ssl
 import barabadb/storage/lsm
 import barabadb/storage/compaction
@@ -43,27 +45,28 @@ proc startCompactionLoop*(cm: CompactionManager, intervalMs: int = 60000) {.asyn
     cm.compact()
 
 proc runTcpServer(config: BaraConfig) {.async.} =
-  echo "BaraDB TCP listening on ", config.address, ":", config.port
+  info("BaraDB TCP listening on " & config.address & ":" & $config.port)
   var server = newServer(config)
   await server.run()
 
 proc main() =
   var config = loadConfig()
-  echo "BaraDB v0.1.0 — Multimodal Database Engine"
+  # Init structured logger from config
+  let logLvl = parseEnum[LogLevel]("ll" & capitalizeAscii(config.logLevel))
+  defaultLogger = newLogger(logLvl, config.logFile)
+  info("BaraDB v0.1.0 — Multimodal Database Engine")
 
   if config.tlsEnabled:
     if config.certFile.len == 0 or config.keyFile.len == 0 or
        not fileExists(config.certFile) or not fileExists(config.keyFile):
-      echo "TLS enabled but no certificate found. Generating self-signed certificate..."
+      info("TLS enabled but no certificate found. Generating self-signed certificate...")
       let (cert, key) = generateSelfSignedCert(config.dataDir / "certs")
       if cert.len > 0 and key.len > 0:
         config.certFile = cert
         config.keyFile = key
-        echo "Generated self-signed certificate:"
-        echo "  Cert: ", cert
-        echo "  Key:  ", key
+        info("Generated self-signed certificate: Cert=" & cert & " Key=" & key)
       else:
-        echo "WARNING: Failed to generate self-signed certificate. TLS disabled."
+        warn("Failed to generate self-signed certificate. TLS disabled.")
         config.tlsEnabled = false
 
   # Start HTTP server (blocking, multi-threaded via hunos) in background thread

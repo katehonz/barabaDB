@@ -7,6 +7,7 @@ import std/os
 import std/endians
 import std/monotimes
 import config
+import logging
 import ../protocol/wire
 import ../protocol/ssl
 import ../query/lexer
@@ -216,7 +217,7 @@ proc slowQueryLog(logPath: string, query: string, durationMs: int, clientId: int
   except: discard
 
 proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} =
-  echo "Client ", clientId, " connected"
+  info("Client " & $clientId & " connected")
   var connCtx = cloneForConnection(server.ctx)
   let idleTimeout = server.config.idleTimeoutMs
   let queryTimeout = server.config.queryTimeoutMs
@@ -243,7 +244,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
       of mkQuery:
         var pos = 0
         let queryStr = readString(cast[seq[byte]](payload), pos)
-        echo "[", clientId, "] Query: ", queryStr
+        info("[" & $clientId & "] Query: " & queryStr)
 
         let startTicks = getMonoTime().ticks()
         let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr)
@@ -264,7 +265,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
       of mkQueryParams:
         let (queryStr, params) = readQueryParamsMessage(cast[seq[byte]](payload))
-        echo "[", clientId, "] QueryParams: ", queryStr, " (", params.len, " params)"
+        info("[" & $clientId & "] QueryParams: " & queryStr & " (" & $params.len & " params)")
 
         let startTicks = getMonoTime().ticks()
         let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, params)
@@ -299,10 +300,10 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         await client.send(cast[string](errorMsg))
 
   except Exception as e:
-    echo "Client ", clientId, " error: ", e.msg
+    errorMsg("Client " & $clientId & " error: " & e.msg)
   finally:
     dec server.activeConnections
-    echo "Client ", clientId, " disconnected"
+    info("Client " & $clientId & " disconnected")
     client.close()
 
 proc run*(server: Server) {.async.} =
@@ -313,9 +314,9 @@ proc run*(server: Server) {.async.} =
   sock.bindAddr(Port(server.config.port), server.config.address)
   sock.listen()
   if server.config.tlsEnabled:
-    echo "BaraDB TLS listening on ", server.config.address, ":", server.config.port
+    info("BaraDB TLS listening on " & server.config.address & ":" & $server.config.port)
   else:
-    echo "BaraDB listening on ", server.config.address, ":", server.config.port
+    info("BaraDB listening on " & server.config.address & ":" & $server.config.port)
   while server.running:
     let client = await sock.accept()
     if server.config.maxConnections > 0 and server.activeConnections >= server.config.maxConnections:
@@ -325,7 +326,7 @@ proc run*(server: Server) {.async.} =
       try:
         server.tls.wrapServer(client)
       except Exception as e:
-        echo "TLS handshake failed: ", e.msg
+        errorMsg("TLS handshake failed: " & e.msg)
         client.close()
         continue
     inc clientId
