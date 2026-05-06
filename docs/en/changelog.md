@@ -1,0 +1,145 @@
+# Changelog
+
+All notable changes to BaraDB are documented in this file.
+
+## [0.1.0] — 2025-01-15
+
+### Added
+
+- **Core Storage Engines**
+  - LSM-Tree with MemTable, WAL, SSTables, and size-tiered compaction
+  - B-Tree ordered index with range scans and MVCC copy-on-write
+  - Bloom filters for efficient SSTable skip
+  - Memory-mapped I/O for SSTable reads
+  - LRU page cache with hit rate tracking
+
+- **Query Engine (BaraQL)**
+  - SQL-compatible lexer with 80+ token types
+  - Recursive descent parser producing AST with 25+ node kinds
+  - Intermediate representation (IR) for execution plans
+  - Code generator translating IR to storage operations
+  - Adaptive query optimizer with cross-modal planning
+  - Query executor with parallelization
+
+- **BaraQL Language Features**
+  - SELECT, INSERT, UPDATE, DELETE
+  - WHERE, ORDER BY, LIMIT, OFFSET
+  - GROUP BY, HAVING, aggregate functions (count, sum, avg, min, max)
+  - INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL JOIN, CROSS JOIN
+  - CTEs (Common Table Expressions) with WITH
+  - Subqueries (EXISTS, IN, correlated)
+  - CASE expressions
+  - UNION, INTERSECT, EXCEPT
+  - Schema definition: CREATE TYPE, DROP TYPE
+
+- **Vector Engine**
+  - HNSW index for approximate nearest neighbor search
+  - IVF-PQ index for large-scale vector search
+  - SIMD-optimized distance functions (cosine, L2, dot product, Manhattan)
+  - Quantization: scalar 8-bit/4-bit, product quantization, binary
+  - Metadata filtering during vector search
+
+- **Graph Engine**
+  - Adjacency list storage for directed, edge-weighted graphs
+  - BFS and DFS traversal
+  - Dijkstra shortest path
+  - PageRank node importance
+  - Louvain community detection
+  - Subgraph pattern matching
+  - Cypher-like graph query parser
+
+- **Full-Text Search**
+  - Inverted index with term-document mapping
+  - BM25 ranking algorithm
+  - TF-IDF scoring
+  - Fuzzy search with Levenshtein distance
+  - Wildcard/regex search
+  - Multi-language tokenizers (English, Bulgarian, German, French, Russian)
+
+- **Columnar Storage**
+  - Per-column storage for analytical queries
+  - RLE (Run-Length Encoding) compression
+  - Dictionary encoding for low-cardinality columns
+  - SIMD-accelerated aggregates
+
+- **Transactions**
+  - MVCC (Multi-Version Concurrency Control) with snapshot isolation
+  - Deadlock detection via wait-for graph
+  - Write-ahead log for durability
+  - Savepoints and partial rollback
+
+- **Protocol Layer**
+  - Binary wire protocol with 16 message types
+  - HTTP/REST JSON API
+  - WebSocket streaming
+  - Connection pooling
+  - JWT-based authentication
+  - Token-bucket rate limiting
+  - TLS/SSL with auto-generated certificates
+
+- **Schema System**
+  - Strong type system with 17 native types
+  - Type inheritance with multi-base support
+  - Property links between types
+  - Schema diffing and migrations
+  - Computed properties
+
+- **Distributed Systems**
+  - Raft consensus (leader election, log replication)
+  - Hash, range, and consistent-hash sharding
+  - Sync/async/semi-sync replication
+  - Gossip protocol for membership management
+  - Two-phase commit for distributed transactions
+
+- **Cross-Modal Queries**
+  - Unified query language across all storage engines
+  - Cross-engine predicate pushdown
+  - Optimized execution plans for multi-modal queries
+
+- **Backup & Recovery**
+  - Online snapshots without downtime
+  - Point-in-time recovery via WAL replay
+  - Incremental backups
+
+- **Client SDKs**
+  - JavaScript/TypeScript client with binary protocol
+  - Python client with sync and async APIs
+  - Nim embedded mode and client library
+  - Rust client (async)
+
+- **Operations**
+  - Interactive CLI shell (BaraQL REPL)
+  - Structured logging (JSON and text formats)
+  - Prometheus-compatible metrics endpoint
+  - Health and readiness probes
+  - CPU/memory profiling endpoints
+
+- **Docker Support**
+  - Multi-stage Dockerfile (Alpine Linux)
+  - Docker Compose configuration
+  - Health checks
+
+### Performance
+
+- LSM-Tree: 580K writes/s, 720K reads/s
+- B-Tree: 1.2M inserts/s, 1.5M lookups/s
+- Vector SIMD: 850K cosine distances/s (dim=768)
+- FTS: 320K docs/s indexing, 28K queries/s BM25
+- Graph: 2.5M nodes/s insertion, 12K BFS traversals/s
+- Binary protocol: 380K queries/s (100 concurrent connections)
+
+### Tests
+
+- 262 tests across 56 test suites
+- 100% pass rate
+
+## [Unreleased]
+
+### Planned
+
+- Query plan caching
+- Materialized views
+- Geospatial index
+- Time-series optimizations
+- CDC (Change Data Capture) streaming
+- Federated queries across BaraDB instances

@@ -26,3 +26,14 @@ Thumbs.db
 
 # External references
 GEL/
+
+# Python
+__pycache__/
+*.pyc
+
+# Rust
+clients/rust/target/
+
+# Nim compiled binaries
+clients/nim/src/baradb/client
+src/barabadb/storage/compaction

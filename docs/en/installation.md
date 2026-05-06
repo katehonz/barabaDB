@@ -2,34 +2,97 @@
 
 ## Requirements
 
-- **Nim Compiler** >= 2.0.0
+- **Nim Compiler** >= 2.2.0
+- **OpenSSL** development headers (for TLS support)
 - **Operating System**: Linux, macOS, Windows
+
+### Supported Platforms
+
+| OS | Architecture | Status |
+|----|--------------|--------|
+| Linux | x86_64 | ✅ Fully supported |
+| Linux | ARM64 | ✅ Fully supported |
+| macOS | x86_64 | ✅ Fully supported |
+| macOS | ARM64 (Apple Silicon) | ✅ Fully supported |
+| Windows | x86_64 | ✅ Supported |
+| FreeBSD | x86_64 | 🟡 Community tested |
 
 ## Installing Nim
 
-### Linux/macOS
+### Linux
 
 ```bash
+# Official installer
 curl https://nim-lang.org/choosenim/init.sh -sSf | sh
+
+# Ubuntu/Debian
+sudo apt-get update
+sudo apt-get install nim
+
+# Fedora
+sudo dnf install nim
+
+# Arch Linux
+sudo pacman -S nim
 ```
 
-Or via package manager:
+### macOS
 
 ```bash
-# Ubuntu/Debian
-apt-get install nim
-
-# macOS
+# Homebrew
 brew install nim
+
+# MacPorts
+sudo port install nim
 ```
 
 ### Windows
 
-Download the installer from [nim-lang.org](https://nim-lang.org/install.html) or use winget:
-
 ```powershell
+# Using choosenim
+curl.exe -A "MSYS2_$(uname -m)" -L https://nim-lang.org/choosenim/init.ps1 | powershell -
+
+# Using winget
 winget install nim
+
+# Using scoop
+scoop install nim
 ```
+
+### Verify Installation
+
+```bash
+nim --version
+# Expected: Nim Compiler Version 2.2.0 or later
+```
+
+## Installing OpenSSL
+
+### Linux
+
+```bash
+# Ubuntu/Debian
+sudo apt-get install libssl-dev
+
+# Fedora
+sudo dnf install openssl-devel
+
+# Arch Linux
+sudo pacman -S openssl
+```
+
+### macOS
+
+OpenSSL is included with the system. If needed:
+
+```bash
+brew install openssl
+```
+
+### Windows
+
+OpenSSL is bundled with the Nim Windows distribution. For manual builds,
+download from [slproweb.com](https://slproweb.com/products/Win32OpenSSL.html).
 
 ## Building BaraDB
 
@@ -40,74 +103,207 @@ git clone https://github.com/katehonz/barabaDB.git
 cd barabaDB
 ```
 
-### Build the Project
+### Install Dependencies
+
+```bash
+nimble install -d -y
+```
+
+### Build Options
+
+#### Debug Build
+
+```bash
+nim c -d:ssl -o:build/baradadb src/baradadb.nim
+```
+
+#### Release Build (Recommended)
+
+```bash
+nim c -d:ssl -d:release --opt:speed -o:build/baradadb src/baradadb.nim
+```
+
+#### Using Nimble Tasks
 
 ```bash
 # Debug build
-nim c -o:build/baradadb src/baradadb.nim
+nimble build_debug
 
-# Release build (optimized)
-nim c -d:release -o:build/baradadb src/baradadb.nim
+# Release build
+nimble build_release
 ```
 
-### Run Tests
+#### Strip Binary (Minimal Size)
 
 ```bash
-nim c --path:src -r tests/test_all.nim
+nim c -d:ssl -d:release --opt:size -o:build/baradadb src/baradadb.nim
+strip build/baradadb
 ```
 
-### Run Benchmarks
+### Verify Build
 
 ```bash
-nim c -d:release -r benchmarks/bench_all.nim
+./build/baradadb --version
+# Expected: BaraDB v0.1.0 — Multimodal Database Engine
+```
+
+## Running Tests
+
+### All Tests
+
+```bash
+nim c -d:ssl -r tests/test_all.nim
+```
+
+### Specific Test Suites
+
+```bash
+# Storage tests
+nim c -d:ssl -r tests/test_storage.nim
+
+# Query engine tests
+nim c -d:ssl -r tests/test_query.nim
+
+# Protocol tests
+nim c -d:ssl -r tests/test_protocol.nim
+```
+
+### Benchmarks
+
+```bash
+nim c -d:ssl -d:release -r benchmarks/bench_all.nim
 ```
 
 ## Installation Options
 
+### System-Wide Installation
+
+```bash
+# Build release binary
+nimble build_release
+
+# Install to /usr/local/bin
+sudo cp build/baradadb /usr/local/bin/
+sudo chmod +x /usr/local/bin/baradadb
+
+# Create data directory
+sudo mkdir -p /var/lib/baradb
+sudo chmod 755 /var/lib/baradb
+```
+
 ### Pre-built Binary
 
-Download the latest release from the [GitHub Releases](https://github.com/katehonz/barabaDB/releases) page.
+Download the latest release for your platform:
+
+```bash
+# Linux x86_64
+wget https://github.com/katehonz/barabaDB/releases/latest/download/baradadb-linux-amd64
+chmod +x baradadb-linux-amd64
+mv baradadb-linux-amd64 /usr/local/bin/baradadb
+
+# Linux ARM64
+wget https://github.com/katehonz/barabaDB/releases/latest/download/baradadb-linux-arm64
+chmod +x baradadb-linux-arm64
+mv baradadb-linux-arm64 /usr/local/bin/baradadb
+
+# macOS
+wget https://github.com/katehonz/barabaDB/releases/latest/download/baradadb-darwin-amd64
+chmod +x baradadb-darwin-amd64
+mv baradadb-darwin-amd64 /usr/local/bin/baradadb
+```
 
 ### Docker
 
 ```bash
-docker pull barabadb/barabadb
-docker run -it barabadb/barabadb
+# Pull official image
+docker pull barabadb/barabadb:latest
+
+# Run
+docker run -d \
+  -p 5432:5432 \
+  -p 8080:8080 \
+  -p 8081:8081 \
+  -v baradb_data:/data \
+  barabadb/barabadb
 ```
 
-### Embedded Usage
+### Docker Compose
+
+```bash
+docker-compose up -d
+```
+
+### Embedded Usage (Nim Projects)
 
 Add to your `.nimble` file:
 
 ```nim
-requires "barabadb >= 1.0.0"
+requires "barabadb >= 0.1.0"
 ```
 
-Then import in your code:
+Use in your code:
 
 ```nim
-import barabadb
+import barabadb/storage/lsm
 
 var db = newLSMTree("./data")
-db.put("key1", cast[seq[byte]]("value1"))
+db.put("key", cast[seq[byte]]("value"))
+let (found, val) = db.get("key")
 db.close()
 ```
 
-## Verifying Installation
+## First Run
 
 ```bash
-./build/baradadb --version
+# Start server
+./build/baradadb
+
+# Expected output:
+# BaraDB v0.1.0 — Multimodal Database Engine
+# BaraDB TCP listening on 127.0.0.1:5432
+
+# Test with HTTP API
+curl http://localhost:8080/health
+
+# Interactive shell
+./build/baradadb --shell
 ```
 
-Expected output:
+## Troubleshooting Installation
 
+### "cannot open file: hunos"
+
+```bash
+nimble install -d -y
 ```
-BaraDB v1.0.0
-multimodal database engine
+
+### "BaraDB requires SSL support"
+
+Always compile with `-d:ssl`:
+
+```bash
+nim c -d:ssl -o:build/baradadb src/baradadb.nim
+```
+
+### Slow compilation
+
+Use parallel compilation:
+
+```bash
+nim c -d:ssl -d:release --parallelBuild:4 -o:build/baradadb src/baradadb.nim
+```
+
+### Large binary size
+
+Use size optimization:
+
+```bash
+nim c -d:ssl -d:release --opt:size --passL:-s -o:build/baradadb src/baradadb.nim
 ```
 
 ## Next Steps
 
-- [Quick Start Guide](en/quickstart.md)
-- [Architecture Overview](en/architecture.md)
-- [BaraQL Query Language](en/baraql.md)
+- [Quick Start Guide](quickstart.md)
+- [Configuration Reference](configuration.md)
+- [Architecture Overview](architecture.md)
+- [BaraQL Query Language](baraql.md)
