@@ -738,6 +738,47 @@ proc parseExplain(p: var Parser): Node =
     result.expAnalyze = true
   result.expStmt = p.parseStatement()
 
+proc parseCreateView(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  var orReplace = false
+  if p.peek().kind == tkIdent and p.peek().value.toLower() == "or":
+    discard p.advance()
+    discard p.expect(tkIdent)  # REPLACE
+    orReplace = true
+  discard p.expect(tkView)
+  let name = p.expect(tkIdent).value
+  discard p.expect(tkAs)
+  let query = p.parseSelect()
+  result = Node(kind: nkCreateView, cvName: name, cvQuery: query,
+                cvOrReplace: orReplace, line: tok.line, col: tok.col)
+
+proc parseDropView(p: var Parser): Node =
+  let tok = p.expect(tkDrop)
+  discard p.expect(tkView)
+  var ifExists = false
+  if p.peek().kind == tkIdent and p.peek().value.toLower() == "if":
+    discard p.advance()
+    discard p.expect(tkExists)
+    ifExists = true
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkDropView, dvName: name, dvIfExists: ifExists,
+                line: tok.line, col: tok.col)
+
+proc parseCreateMigration(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  discard p.expect(tkMigration)
+  let name = p.expect(tkIdent).value
+  discard p.expect(tkAs)
+  let body = p.expect(tkStringLit).value
+  result = Node(kind: nkCreateMigration, cmName: name, cmBody: body,
+                line: tok.line, col: tok.col)
+
+proc parseApplyMigration(p: var Parser): Node =
+  let tok = p.expect(tkIdent)  # APPLY
+  discard p.expect(tkMigration)
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkApplyMigration, amName: name, line: tok.line, col: tok.col)
+
 proc parseStatement*(p: var Parser): Node =
   case p.peek().kind
   of tkWith, tkSelect: p.parseSelect()
@@ -752,19 +793,37 @@ proc parseStatement*(p: var Parser): Node =
         p.parseCreateTable()
       elif next.kind == tkIndex or next.kind == tkUnique:
         p.parseCreateIndex()
+      elif next.kind == tkView or
+           (next.kind == tkIdent and next.value.toLower() == "or"):
+        p.parseCreateView()
+      elif next.kind == tkMigration:
+        p.parseCreateMigration()
       else:
         p.parseCreateType()
     else:
       p.parseCreateType()
   of tkDrop:
-    if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkTable:
-      p.parseDropTable()
+    if p.pos + 1 < p.tokens.len:
+      let next = p.tokens[p.pos + 1]
+      if next.kind == tkTable:
+        p.parseDropTable()
+      elif next.kind == tkView:
+        p.parseDropView()
+      else:
+        let tok = p.advance()
+        Node(kind: nkNullLit, line: tok.line, col: tok.col)
     else:
       let tok = p.advance()
       Node(kind: nkNullLit, line: tok.line, col: tok.col)
   of tkAlter:
     if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkTable:
       p.parseAlterTable()
+    else:
+      let tok = p.advance()
+      Node(kind: nkNullLit, line: tok.line, col: tok.col)
+  of tkApply:
+    if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkMigration:
+      p.parseApplyMigration()
     else:
       let tok = p.advance()
       Node(kind: nkNullLit, line: tok.line, col: tok.col)

@@ -20,6 +20,10 @@ type
     nkCommitTxn
     nkRollbackTxn
     nkExplainStmt
+    nkCreateView
+    nkDropView
+    nkCreateMigration
+    nkApplyMigration
 
     # Clauses
     nkFrom
@@ -200,6 +204,18 @@ type
     of nkExplainStmt:
       expStmt*: Node
       expAnalyze*: bool
+    of nkCreateView:
+      cvName*: string
+      cvQuery*: Node
+      cvOrReplace*: bool
+    of nkDropView:
+      dvName*: string
+      dvIfExists*: bool
+    of nkCreateMigration:
+      cmName*: string
+      cmBody*: string
+    of nkApplyMigration:
+      amName*: string
     of nkCreateIndex:
       ciTarget*: string
       ciName*: string

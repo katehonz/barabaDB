@@ -42,14 +42,15 @@ type
     nextLsn: uint64
     activeTxns: Table[TxnId, Transaction]
     committedTxns: seq[TxnId]
-    globalVersions*: Table[string, seq[VersionedRecord]]  # key -> versions
+    globalVersions*: Table[string, seq[VersionedRecord]]
+    txnTimeoutMs: int64
 
 proc `==`*(a, b: TxnId): bool {.borrow.}
 proc `==`*(a, b: Lsn): bool {.borrow.}
 proc `$`*(id: TxnId): string = $uint64(id)
 proc `$`*(lsn: Lsn): string = $uint64(lsn)
 
-proc newTxnManager*(): TxnManager =
+proc newTxnManager*(txnTimeoutMs: int64 = 30000): TxnManager =
   new(result)
   initLock(result.lock)
   result.nextTxnId = 1
@@ -57,6 +58,7 @@ proc newTxnManager*(): TxnManager =
   result.activeTxns = initTable[TxnId, Transaction]()
   result.committedTxns = @[]
   result.globalVersions = initTable[string, seq[VersionedRecord]]()
+  result.txnTimeoutMs = txnTimeoutMs
 
 proc allocTxnId(tm: TxnManager): TxnId =
   result = TxnId(tm.nextTxnId)
@@ -156,6 +158,14 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
   if txn.state != tsActive:
     release(tm.lock)
     return false
+
+  # Timeout-based deadlock detection: abort stale transactions
+  let now = getMonoTime().ticks()
+  for otherId, otherTxn in tm.activeTxns:
+    if otherId != txn.id and otherTxn.state == tsActive:
+      if now - otherTxn.startTime > tm.txnTimeoutMs * 1_000_000:
+        otherTxn.state = tsAborted
+        tm.activeTxns.del(otherId)
 
   # Check for write-write conflict
   if key notin txn.writeSet:

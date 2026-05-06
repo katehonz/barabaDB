@@ -90,6 +90,9 @@ type
     tkCommit
     tkRollback
     tkExplain
+    tkView
+    tkMigration
+    tkApply
     tkCount
     tkSum
     tkAvg
@@ -233,6 +236,9 @@ const keywords*: Table[string, TokenKind] = {
   "commit": tkCommit,
   "rollback": tkRollback,
   "explain": tkExplain,
+  "view": tkView,
+  "migration": tkMigration,
+  "apply": tkApply,
   "count": tkCount,
   "sum": tkSum,
   "avg": tkAvg,

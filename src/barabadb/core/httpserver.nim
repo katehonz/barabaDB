@@ -190,12 +190,97 @@ proc openApiHandler(): RequestHandler =
       }
     })
 
-# ----------------------------------------------------------------------
-# Server lifecycle
-# ----------------------------------------------------------------------
+proc adminHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    let html = """
+<!DOCTYPE html><html><head>
+<meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>
+<title>BaraDB Admin</title>
+<style>
+body{font:14px monospace;background:#1a1a2e;color:#e0e0e0;margin:0;padding:20px}
+h1{color:#e94560;margin:0 0 10px}
+.card{background:#16213e;border-radius:8px;padding:16px;margin:10px 0}
+input,textarea,select{background:#0f3460;color:#e0e0e0;border:1px solid #533483;padding:8px;border-radius:4px;font:14px monospace;width:100%;box-sizing:border-box}
+textarea{height:100px;resize:vertical}
+button{background:#e94560;color:white;border:none;padding:8px 20px;border-radius:4px;cursor:pointer;font:14px monospace;margin:4px}
+button:hover{background:#c23152}
+table{width:100%;border-collapse:collapse;margin:10px 0}
+th{background:#533483;padding:8px;text-align:left}
+td{padding:6px 8px;border-bottom:1px solid #333}
+tr:hover td{background:#1a2744}
+#result{max-height:400px;overflow:auto;font:12px monospace;background:#0a0a1a;padding:8px;border-radius:4px;white-space:pre-wrap}
+.tab{display:inline-block;padding:8px 16px;cursor:pointer;border-bottom:2px solid transparent}
+.tab.active{border-color:#e94560;color:#e94560}
+#tabs{margin-bottom:16px}
+.status{color:#4ecca3;font-size:12px}
+.error{color:#e94560}
+a{color:#4ecca3}
+</style></head><body>
+<h1>BaraDB Admin</h1>
+<div id='tabs'>
+  <span class='tab active' onclick='showTab("query")'>SQL Playground</span>
+  <span class='tab' onclick='showTab("schema")'>Schema</span>
+  <span class='tab' onclick='showTab("metrics")'>Metrics</span>
+</div>
+<div id='tab-query'>
+  <div class='card'>
+    <textarea id='sql' placeholder='SELECT version()&#10;CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)&#10;INSERT INTO users VALUES (1, "test")&#10;SELECT * FROM users'></textarea>
+    <button onclick='runQuery()'>Run</button>
+    <button onclick='explainQuery()'>EXPLAIN</button>
+  </div>
+  <div id='result'></div>
+</div>
+<div id='tab-schema' style='display:none'>
+  <div class='card' id='schema-data'>Loading schema...</div>
+</div>
+<div id='tab-metrics' style='display:none'>
+  <div class='card' id='metrics-data'>Loading metrics...</div>
+</div>
+<script>
+async function api(path, body) {
+  const r = await fetch(path, {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})})
+  return r.json()
+}
+async function runQuery(){
+  const sql = document.getElementById('sql').value
+  const res = await api('/query', {query: sql})
+  document.getElementById('result').innerHTML = JSON.stringify(res, null, 2)
+}
+async function explainQuery(){
+  const sql = 'EXPLAIN ' + document.getElementById('sql').value
+  const res = await api('/query', {query: sql})
+  document.getElementById('result').innerHTML = JSON.stringify(res, null, 2)
+}
+async function loadSchema(){
+  try{const r = await fetch('/query',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({query:'SELECT name, type FROM __tables'})})
+  const d = await r.json()
+  document.getElementById('schema-data').innerHTML = '<table><tr><th>Table</th><th>Type</th></tr>' +
+    (d.rows||[]).map(r=>'<tr><td>'+r.name+'</td><td>'+r.type+'</td></tr>').join('') + '</table>'
+  }catch(e){}
+}
+async function loadMetrics(){
+  try{const r = await fetch('/metrics')
+  document.getElementById('metrics-data').innerHTML = '<pre>'+ (await r.text()) +'</pre>'
+  }catch(e){}
+}
+function showTab(name){
+  document.querySelectorAll('#tabs .tab').forEach(t=>t.classList.remove('active'))
+  document.querySelectorAll('[id^=tab-]').forEach(t=>t.style.display='none')
+  document.querySelector('.tab:nth-child('+({'query':1,'schema':2,'metrics':3}[name])+')').classList.add('active')
+  document.getElementById('tab-'+name).style.display=''
+  if(name==='schema') loadSchema()
+  if(name==='metrics') loadMetrics()
+}
+</script>
+<div class='status'>BaraDB v0.1.0 — Production-ready multimodal database</div>
+</body></html>"""
+    request.respond(200, @[("Content-Type", "text/html")], html)
 
 proc run*(server: HttpServer, port: int = 8080) =
   var router = newRouter()
+  router.get("/admin", server.adminHandler())
+  router.get("/", server.adminHandler())
   router.post("/query", server.queryHandler())
   router.get("/health", healthHandler())
   router.get("/metrics", server.metricsHandler())

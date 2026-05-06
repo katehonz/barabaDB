@@ -32,6 +32,7 @@ type
     db*: LSMTree
     tables*: Table[string, TableDef]
     btrees*: Table[string, BTreeIndex[string, IndexEntry]]
+    views*: Table[string, Node]  # view name -> SELECT AST
     txnManager*: TxnManager
     pendingTxn*: Transaction
     onChange*: proc(ev: ChangeEvent) {.closure.}
@@ -86,6 +87,7 @@ proc restoreSchema(ctx: ExecutionContext)
 proc newExecutionContext*(db: LSMTree): ExecutionContext =
   result = ExecutionContext(db: db, tables: initTable[string, TableDef](),
                    btrees: initTable[string, BTreeIndex[string, IndexEntry]](),
+                   views: initTable[string, Node](),
                    onChange: nil)
   restoreSchema(result)
 
@@ -125,7 +127,8 @@ proc restoreSchema(ctx: ExecutionContext) =
 
 proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
   ExecutionContext(db: ctx.db, tables: ctx.tables,
-                   btrees: ctx.btrees, txnManager: ctx.txnManager,
+                   btrees: ctx.btrees, views: ctx.views,
+                   txnManager: ctx.txnManager,
                    pendingTxn: nil, onChange: ctx.onChange)
 
 # ----------------------------------------------------------------------
@@ -695,6 +698,48 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
   let stmt = astNode.stmts[0]
   case stmt.kind
   of nkSelect:
+    # Expand view if FROM table is a view
+    if stmt.selFrom != nil and stmt.selFrom.fromTable in ctx.views:
+      let viewQuery = ctx.views[stmt.selFrom.fromTable]
+      if viewQuery != nil and viewQuery.kind == nkSelect:
+        # Execute the view's underlying query
+        var inner = Node(kind: nkStatementList, stmts: @[])
+        inner.stmts.add(viewQuery)
+        let innerResult = executeQuery(ctx, inner)
+        # Now filter and project with outer query constraints
+        var filteredRows = innerResult.rows
+        var cols = innerResult.columns
+        if stmt.selWhere != nil and stmt.selWhere.whereExpr != nil:
+          let whereIr = lowerExpr(stmt.selWhere.whereExpr)
+          var tmp: seq[Row] = @[]
+          for row in filteredRows:
+            if evalExpr(whereIr, row) == "true":
+              tmp.add(row)
+          filteredRows = tmp
+        if stmt.selOrderBy.len > 0:
+          let sortExpr = lowerExpr(stmt.selOrderBy[0].orderByExpr)
+          let asc = stmt.selOrderBy[0].orderByDir == sdAsc
+          proc sortCmp(a, b: Row): int =
+            let va = evalExpr(sortExpr, a)
+            let vb = evalExpr(sortExpr, b)
+            try:
+              let fa = parseFloat(va)
+              let fb = parseFloat(vb)
+              if fa < fb: return -1
+              if fa > fb: return 1
+              return 0
+            except:
+              return cmp(va, vb)
+          filteredRows.sort(sortCmp, if asc: Ascending else: Descending)
+        if stmt.selLimit != nil:
+          let limitVal = if stmt.selLimit.limitExpr.kind == nkIntLit:
+            int(stmt.selLimit.limitExpr.intVal) else: 0
+          if limitVal > 0 and limitVal < filteredRows.len:
+            filteredRows = filteredRows[0..<limitVal]
+        return okResult(filteredRows, cols)
+      else:
+        return errResult("Invalid view definition")
+
     # Try B-Tree index point read first
     if stmt.selFrom != nil and stmt.selFrom.fromTable.len > 0:
       if stmt.selWhere != nil and stmt.selWhere.whereExpr != nil:
@@ -943,6 +988,35 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
       ctx.tables[stmt.altName] = tbl
       return okResult(msg="ALTER TABLE " & stmt.altName & " executed")
     return errResult("Table '" & stmt.altName & "' does not exist")
+
+  of nkCreateView:
+    ctx.views[stmt.cvName] = stmt.cvQuery
+    return okResult(msg="CREATE VIEW " & stmt.cvName)
+
+  of nkDropView:
+    if stmt.dvName in ctx.views:
+      ctx.views.del(stmt.dvName)
+      return okResult(msg="DROP VIEW " & stmt.dvName)
+    return errResult("View '" & stmt.dvName & "' does not exist")
+
+  of nkCreateMigration:
+    # Store migration in LSM-Tree
+    let migKey = "_schema:migration:" & stmt.cmName
+    ctx.db.put(migKey, cast[seq[byte]](stmt.cmBody))
+    return okResult(msg="CREATE MIGRATION " & stmt.cmName)
+
+  of nkApplyMigration:
+    # Execute stored migration SQL
+    let migKey = "_schema:migration:" & stmt.amName
+    let (found, val) = ctx.db.get(migKey)
+    if not found:
+      return errResult("Migration '" & stmt.amName & "' not found")
+    let sql = cast[string](val)
+    let tokens = qlex.tokenize(sql)
+    let astNode = qpar.parse(tokens)
+    if astNode.stmts.len > 0:
+      return executeQuery(ctx, astNode)
+    return okResult(msg="APPLY MIGRATION " & stmt.amName)
 
   of nkCreateIndex:
     let idxName = if stmt.ciName.len > 0: stmt.ciName
