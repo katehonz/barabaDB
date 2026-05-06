@@ -1,0 +1,55 @@
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Documentation
+docs/
+*.md
+!README.md
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Build outputs (keep baradadb and backup for Dockerfile)
+build/*
+!build/baradadb
+!build/backup
+*.exe
+
+# Data & logs
+data/
+wal/
+sstables/
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker самите файлове (не са нужни в контекста)
+Dockerfile*
+docker-compose*
+.dockerignore
+
+# Scripts (ако са само за хост машината)
+scripts/docker-*.sh
+
+# Tests (не са нужни за production build)
+tests/
+benchmarks/
+
+# Examples
+examples/
+
+# Backup файлове
+backup_*.tar.gz
+backup_history.log

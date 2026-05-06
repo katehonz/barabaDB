@@ -1,0 +1,16 @@
+# BaraDB — Docker Compose Override (автоматично зарежда се от docker compose)
+# Този файл се използва за development настройки когато използвате:
+#   docker compose up -d
+#
+# За production използвайте:
+#   docker compose -f docker-compose.prod.yml up -d
+
+services:
+  baradb:
+    # Development настройки
+    environment:
+      - BARADB_LOG_LEVEL=debug
+
+    # Монтираме изходния код за development (ако работите върху кода)
+    # volumes:
+    #   - ./src:/app/src:ro

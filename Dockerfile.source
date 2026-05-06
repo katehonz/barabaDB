@@ -1,0 +1,86 @@
+# ┌─────────────────────────────────────────────────────────┐
+# │ BaraDB — Multimodal Database Engine                     │
+# │ Dockerfile.source (build from source)                   │
+# └─────────────────────────────────────────────────────────┘
+#
+# Този Dockerfile build-ва BaraDB от source код.
+# ВНИМАНИЕ: Изисква локални nimble пакети (hunos, nimmax), които
+# не са в публичния nimble repository. Преди build трябва да:
+#   1. symlink-нете или копирате hunos/ и nimmax/ в проекта, или
+#   2. копирате ~/.nimble/pkgs2 в builder стейджа.
+#
+# Build:
+#   docker build -f Dockerfile.source -t baradb:latest .
+
+# ─── Stage 1: Builder ─────────────────────────────────────
+FROM nimlang/nim:2.2.2-alpine AS builder
+
+WORKDIR /build
+
+# Инсталираме build зависимости
+RUN apk add --no-cache git gcc musl-dev openssl-dev pcre-dev
+
+# Копираме nimble файл и инсталираме публични зависимости
+COPY baradadb.nimble .
+RUN nimble install -d -y || true
+
+# Копираме целия изходен код
+COPY src/ src/
+COPY *.nim .
+
+# Компилираме release binary
+# Забележка: Ако липсват локални пакети (hunos), този ред ще се провали.
+RUN nim c -d:release --opt:speed -d:ssl -o:baradadb src/baradadb.nim
+
+# Компилираме backup tool
+RUN nim c -d:release -o:backup src/barabadb/core/backup.nim
+
+# ─── Stage 2: Production Runtime ──────────────────────────
+FROM alpine:3.19
+
+LABEL maintainer="BaraDB Team"
+LABEL description="BaraDB — Multimodal Database Engine (source build)"
+LABEL version="0.1.0"
+
+# Инсталираме runtime зависимости
+RUN apk add --no-cache ca-certificates su-exec wget pcre
+
+# Създаваме dedicated потребител за сигурност
+RUN addgroup -g 1000 -S baradb && \
+    adduser -u 1000 -S baradb -G baradb
+
+WORKDIR /app
+
+# Копираме компилираните бинарни файлове
+COPY --from=builder /build/baradadb /app/baradadb
+COPY --from=builder /build/backup /app/backup
+
+# Копираме entrypoint скрипта
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+# Създаваме data директория и symlink за съвместимост с default dataDir=./data
+RUN mkdir -p /data && chown baradb:baradb /data && \
+    ln -s /data /app/data && chown -h baradb:baradb /app/data
+
+# Environment variables (defaults)
+ENV BARADB_ADDRESS=0.0.0.0
+ENV BARADB_PORT=9472
+ENV BARADB_HTTP_PORT=9470
+ENV BARADB_WS_PORT=9471
+ENV BARADB_DATA_DIR=/data
+ENV BARADB_LOG_LEVEL=info
+
+# Expose ports
+EXPOSE 9472 9470 9471
+
+# Volume за persistent data
+VOLUME ["/data"]
+
+# Healthcheck
+HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
+    CMD wget -q --spider http://localhost:${BARADB_HTTP_PORT}/health || exit 1
+
+# Стартираме чрез entrypoint
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["./baradadb"]

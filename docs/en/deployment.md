@@ -2,68 +2,33 @@
 
 ## Docker
 
-### Single Node
+За пълно ръководство за Docker deployment вижте [Docker Guide](docker.md).
+
+### Бърз старт
 
 ```bash
 docker build -t baradb:latest .
-docker run -d \
-  --name baradb \
-  -p 9472:9472 \
-  -p 9470:9470 \
-  -p 9471:9471 \
-  -v baradb_data:/data \
-  -e BARADB_DATA_DIR=/data \
-  baradb:latest
+docker compose up -d
 ```
 
-### Docker Compose (Production)
+### Docker Compose файлове
 
-```yaml
-version: "3.9"
-services:
-  baradb:
-    image: baradb:latest
-    ports:
-      - "9472:9472"
-      - "9470:9470"
-      - "9471:9471"
-    volumes:
-      - baradb_data:/data
-      - ./certs:/certs:ro
-    environment:
-      - BARADB_PORT=9472
-      - BARADB_HTTP_PORT=9470
-      - BARADB_WS_PORT=9471
-      - BARADB_DATA_DIR=/data
-      - BARADB_TLS_ENABLED=true
-      - BARADB_CERT_FILE=/certs/server.crt
-      - BARADB_KEY_FILE=/certs/server.key
-      - BARADB_LOG_LEVEL=info
-      - BARADB_MEMTABLE_SIZE_MB=256
-      - BARADB_CACHE_SIZE_MB=512
-    healthcheck:
-      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9470/health"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-    restart: unless-stopped
-    deploy:
-      resources:
-        limits:
-          cpus: '4.0'
-          memory: 8G
-        reservations:
-          cpus: '1.0'
-          memory: 1G
+| Файл | Назначение |
+|------|-----------|
+| `docker-compose.yml` | Development |
+| `docker-compose.prod.yml` | Production |
+| `docker-compose.override.yml` | Dev override (автоматично) |
 
-volumes:
-  baradb_data:
+### Production
+
+```bash
+docker compose -f docker-compose.prod.yml up -d
 ```
 
 ### Docker Swarm
 
 ```bash
-docker stack deploy -c docker-compose.yml baradb
+docker stack deploy -c docker-compose.prod.yml baradb
 ```
 
 ## systemd Service

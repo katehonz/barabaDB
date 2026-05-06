@@ -483,27 +483,47 @@ nim c -d:ssl -d:release -r benchmarks/bench_all.nim
 
 ## Docker Deployment
 
-### Quick Start with Docker
+### Quick Start
 
 ```bash
-docker build -t baradb .
-docker run -p 9472:9472 -p 9470:9470 -p 9471:9471 -v baradb_data:/data baradb
+docker build -t baradb:latest .
+docker compose up -d
 ```
 
-### Docker Compose
+### Docker Files
+
+| File | Purpose |
+|------|---------|
+| `Dockerfile` | Production-ready image (pre-built binary) |
+| `Dockerfile.source` | Build from source |
+| `docker-compose.yml` | Development |
+| `docker-compose.prod.yml` | Production with TLS, backups, resource limits |
+| `docker-entrypoint.sh` | Container initialization |
+
+### Production
 
 ```bash
-docker-compose up -d
+docker compose -f docker-compose.prod.yml up -d
 ```
+
+See [docs/en/docker.md](docs/en/docker.md) for full Docker documentation.
+
+### Ports
+
+| Port | Description |
+|------|-------------|
+| `9472` | TCP binary protocol |
+| `9912` | HTTP/REST API (TCP port + 440) |
+| `9913` | WebSocket (TCP port + 441) |
 
 ### Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `BARADB_ADDRESS` | `0.0.0.0` | Bind address |
 | `BARADB_PORT` | `9472` | TCP binary protocol port |
-| `BARADB_HTTP_PORT` | `9470` | HTTP/REST API port |
-| `BARADB_WS_PORT` | `9471` | WebSocket port |
-| `BARADB_DATA_DIR` | `./data` | Data directory |
+| `BARADB_DATA_DIR` | `/data` | Data directory |
+| `BARADB_LOG_LEVEL` | `info` | Log level |
 | `BARADB_TLS_ENABLED` | `false` | Enable TLS |
 | `BARADB_CERT_FILE` | — | TLS certificate path |
 | `BARADB_KEY_FILE` | — | TLS private key path |

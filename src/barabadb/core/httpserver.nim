@@ -15,6 +15,7 @@ import ../query/parser
 import ../query/executor
 import ../storage/lsm
 import ../core/mvcc
+import ../protocol/wire
 import ../protocol/ratelimit
 import ../core/websocket
 import jwt as jwtlib

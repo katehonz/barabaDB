@@ -1,3 +1,6 @@
+import std/os
+import std/strutils
+
 type
   BaraConfig* = object
     address*: string
@@ -37,3 +40,16 @@ proc defaultConfig*(): BaraConfig =
 
 proc loadConfig*(): BaraConfig =
   result = defaultConfig()
+  # Docker / Environment overrides
+  let envAddress = getEnv("BARADB_ADDRESS", "")
+  if envAddress.len > 0:
+    result.address = envAddress
+  let envPort = getEnv("BARADB_PORT", "")
+  if envPort.len > 0:
+    try:
+      result.port = parseInt(envPort)
+    except ValueError:
+      discard
+  let envDataDir = getEnv("BARADB_DATA_DIR", "")
+  if envDataDir.len > 0:
+    result.dataDir = envDataDir
