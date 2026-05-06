@@ -5,6 +5,8 @@ import std/strutils
 import std/tables
 import std/base64
 import std/sets
+import config
+import jwt as jwtlib
 
 type
   WsFrame = object
@@ -24,11 +26,14 @@ type
     clients*: Table[int, WsClient]
     nextId: int
     running: bool
+    config*: BaraConfig
+    secretKey*: string
     onInsert*: proc (table, key, value: string) {.closure.}
     onDelete*: proc (table, key: string) {.closure.}
 
-proc newWsServer*(): WsServer =
-  WsServer(clients: initTable[int, WsClient](), nextId: 1, running: false)
+proc newWsServer*(cfg: BaraConfig = defaultConfig(), secret: string = ""): WsServer =
+  WsServer(clients: initTable[int, WsClient](), nextId: 1, running: false,
+           config: cfg, secretKey: secret)
 
 # ----------------------------------------------------------------------
 # WebSocket frame encoding/decoding (RFC 6455)
@@ -269,6 +274,25 @@ proc handleConnection(server: WsServer, client: AsyncSocket) {.async.} =
     await client.send("HTTP/1.1 400 Bad Request\r\n\r\n")
     client.close()
     return
+
+  # Auth check
+  if server.config.authEnabled:
+    let authHeader = headers.getOrDefault("authorization", "")
+    if authHeader.len == 0 or not authHeader.startsWith("Bearer "):
+      await client.send("HTTP/1.1 401 Unauthorized\r\n\r\n")
+      client.close()
+      return
+    let tokenStr = authHeader[7..^1]
+    try:
+      let token = tokenStr.toJWT()
+      if not token.verify(server.secretKey, HS256):
+        await client.send("HTTP/1.1 401 Unauthorized\r\n\r\n")
+        client.close()
+        return
+    except:
+      await client.send("HTTP/1.1 401 Unauthorized\r\n\r\n")
+      client.close()
+      return
 
   let acceptKey = computeAcceptKey(wsKey)
 
