@@ -312,3 +312,23 @@ proc makeCompleteMessage*(requestId: uint32, affectedRows: int): seq[byte] =
     payload: payload,
   )
   return serializeMessage(msg)
+
+proc makeAuthOkMessage*(requestId: uint32): seq[byte] =
+  var msg = WireMessage(
+    header: MessageHeader(kind: mkAuthOk, length: 0, requestId: requestId),
+    payload: @[],
+  )
+  return serializeMessage(msg)
+
+proc makeAuthChallengeMessage*(requestId: uint32, challenge: string): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(challenge)
+  var msg = WireMessage(
+    header: MessageHeader(kind: mkAuthChallenge, length: uint32(payload.len), requestId: requestId),
+    payload: payload,
+  )
+  return serializeMessage(msg)
+
+proc parseAuthMessage*(payload: openArray[byte]): string =
+  var pos = 0
+  return readString(payload, pos)

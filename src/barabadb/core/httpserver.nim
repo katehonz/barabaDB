@@ -46,8 +46,9 @@ proc newHttpServer*(config: BaraConfig): HttpServer =
   ctx.onChange = proc(ev: ChangeEvent) =
     let msg = $ev.kind & " " & ev.table
     asyncCheck ws.broadcastToTable(ev.table, msg)
+  let secret = if config.jwtSecret.len > 0: config.jwtSecret else: "baradb-default-secret-change-in-production!"
   HttpServer(config: config, running: false, db: db, ctx: ctx,
-             secretKey: "baradb-default-secret-change-in-production!",
+             secretKey: secret,
              metrics: Metrics(), ws: ws)
 
 # ----------------------------------------------------------------------
@@ -77,6 +78,24 @@ proc verifyToken*(server: HttpServer, tokenStr: string): (bool, string, string) 
     return (false, "", "")
 
 # ----------------------------------------------------------------------
+# Auth helper
+# ----------------------------------------------------------------------
+
+proc checkAuth(server: HttpServer, request: Request, ctx: Context): bool =
+  if not server.config.authEnabled:
+    return true
+  let authHeader = request.headers["Authorization"]
+  if authHeader.len == 0 or not authHeader.startsWith("Bearer "):
+    ctx.json(%*{"error": "Unauthorized"}, 401)
+    return false
+  let tokenStr = authHeader[7..^1]
+  let (valid, userId, role) = server.verifyToken(tokenStr)
+  if not valid:
+    ctx.json(%*{"error": "Unauthorized"}, 401)
+    return false
+  return true
+
+# ----------------------------------------------------------------------
 # Handlers
 # ----------------------------------------------------------------------
 
@@ -87,8 +106,11 @@ proc queryHandler(server: HttpServer): RequestHandler =
       server.metrics.queriesTotal += 1
 
       # Auth check
-      let authHeader = request.headers["Authorization"]
-      if authHeader.len > 0 and authHeader.startsWith("Bearer "):
+      if server.config.authEnabled:
+        let authHeader = request.headers["Authorization"]
+        if authHeader.len == 0 or not authHeader.startsWith("Bearer "):
+          ctx.json(%*{"error": "Unauthorized"}, 401)
+          return
         let tokenStr = authHeader[7..^1]
         let (valid, userId, role) = server.verifyToken(tokenStr)
         if not valid:
@@ -157,6 +179,9 @@ proc healthHandler(): RequestHandler =
 
 proc metricsHandler(server: HttpServer): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
+    let ctx = newContext(request)
+    if not server.checkAuth(request, ctx):
+      return
     let prometheus = "baradb_queries_total " & $server.metrics.queriesTotal & "\n" &
                      "baradb_query_errors_total " & $server.metrics.queryErrors & "\n" &
                      "baradb_inserts_total " & $server.metrics.insertCount & "\n" &
@@ -174,6 +199,12 @@ proc authHandler(server: HttpServer): RequestHandler =
         return
 
       let username = body["username"].getStr()
+      let password = body["password"].getStr()
+      # Simple password check: must match jwtSecret when auth is enabled
+      if server.config.authEnabled and password != server.config.jwtSecret:
+        ctx.json(%*{"error": "Invalid credentials"}, 401)
+        return
+
       let token = server.createToken(username, "user")
       ctx.json(%*{
         "token": token,
@@ -214,6 +245,8 @@ proc tablesHandler(server: HttpServer): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
     {.cast(gcsafe).}:
       let ctx = newContext(request)
+      if not server.checkAuth(request, ctx):
+        return
       var tables = newJArray()
       for name, tbl in server.ctx.tables:
         var cols = newJArray()

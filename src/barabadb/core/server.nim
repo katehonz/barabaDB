@@ -16,6 +16,7 @@ import ../query/ast
 import ../query/executor
 import ../storage/lsm
 import ../core/mvcc
+import jwt as jwtlib
 
 type
   Server* = ref object
@@ -216,6 +217,17 @@ proc slowQueryLog(logPath: string, query: string, durationMs: int, clientId: int
     f.write(line)
   except: discard
 
+proc verifyToken(secret, tokenStr: string): (bool, string, string) =
+  try:
+    let token = tokenStr.toJWT()
+    if not token.verify(secret, HS256):
+      return (false, "", "")
+    let userId = token.claims["sub"].node.str
+    let role = if "role" in token.claims: token.claims["role"].node.str else: "user"
+    return (true, userId, role)
+  except:
+    return (false, "", "")
+
 proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} =
   info("Client " & $clientId & " connected")
   var connCtx = cloneForConnection(server.ctx)
@@ -223,6 +235,8 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
   let queryTimeout = server.config.queryTimeoutMs
   let slowThreshold = server.config.slowQueryThresholdMs
   let slowLog = server.config.slowQueryLogPath
+  var authenticated = not server.config.authEnabled
+  let secret = if server.config.jwtSecret.len > 0: server.config.jwtSecret else: "baradb-default-secret-change-in-production!"
 
   try:
     while true:
@@ -240,7 +254,24 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         if payload.len < int(header.length):
           break
 
+      if not authenticated and header.kind != mkAuth:
+        let err = makeErrorMessage(header.requestId, 401, "Authentication required")
+        await client.send(cast[string](err))
+        continue
+
       case header.kind
+      of mkAuth:
+        let tokenStr = parseAuthMessage(cast[seq[byte]](payload))
+        let (valid, userId, role) = verifyToken(secret, tokenStr)
+        if valid:
+          authenticated = true
+          let okMsg = makeAuthOkMessage(header.requestId)
+          await client.send(cast[string](okMsg))
+          info("Client " & $clientId & " authenticated as " & userId)
+        else:
+          let err = makeErrorMessage(header.requestId, 403, "Invalid token")
+          await client.send(cast[string](err))
+
       of mkQuery:
         var pos = 0
         let queryStr = readString(cast[seq[byte]](payload), pos)
