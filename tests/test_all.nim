@@ -2170,6 +2170,37 @@ suite "UTF-8 Support":
     check res.rows[0]["имя"] == "Иван"
     check res.rows[0]["град"] == "София"
 
+suite "B-Tree Range Scan":
+  test "BETWEEN uses index range scan":
+    var db = newLSMTree("")
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE products (id INTEGER, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO products (id, name) VALUES (1, 'apple'), (2, 'banana'), (3, 'cherry'), (4, 'date'), (5, 'elderberry')"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_products_name ON products(name)"))
+    let res = qexec.executeQuery(ctx, parse("SELECT name FROM products WHERE name BETWEEN 'banana' AND 'date'"))
+    check res.success
+    check res.rows.len == 3
+
+  test "Greater than uses index range scan":
+    var db = newLSMTree("")
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE nums (id INTEGER, val TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO nums (id, val) VALUES (1, '10'), (2, '20'), (3, '30'), (4, '40'), (5, '50')"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_nums_val ON nums(val)"))
+    let res = qexec.executeQuery(ctx, parse("SELECT val FROM nums WHERE val > '20'"))
+    check res.success
+    check res.rows.len == 3
+
+  test "Less than or equal uses index range scan":
+    var db = newLSMTree("")
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE nums2 (id INTEGER, val TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO nums2 (id, val) VALUES (1, '10'), (2, '20'), (3, '30'), (4, '40'), (5, '50')"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_nums2_val ON nums2(val)"))
+    let res = qexec.executeQuery(ctx, parse("SELECT val FROM nums2 WHERE val <= '30'"))
+    check res.success
+    check res.rows.len == 3
+
 suite "Enhanced Migrations":
   test "Parse CREATE MIGRATION with UP/DOWN":
     let ast = parse("CREATE MIGRATION add_users { UP: CREATE TABLE users (id INTEGER PRIMARY KEY); DOWN: DROP TABLE users; }")

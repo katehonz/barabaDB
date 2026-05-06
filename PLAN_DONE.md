@@ -14,7 +14,7 @@
 - Aggregate functions (COUNT, SUM, AVG, MIN, MAX)
 - CTE (WITH clause) — parsed; non-recursive execution via subqueries
 - Constraints (PK, FK, UNIQUE, NOT NULL, CHECK, DEFAULT)
-- B-Tree indexes + query planner + index point-read optimization
+- B-Tree indexes + query planner + index point-read optimization + range scans (BETWEEN, >, <, >=, <=)
 - MVCC transactions (BEGIN / COMMIT / ROLLBACK / savepoints)
 - Deadlock detection (wait-for graph, auto-abort victim) — wired into TxnManager
 - WAL crash recovery (REDO + UNDO)
@@ -24,7 +24,7 @@
 - TCP wire protocol with typed binary values (int/float/bool/string/null)
 - HTTP REST API (query, health, metrics, auth)
 - WebSocket real-time (SUBSCRIBE / broadcasts)
-- JWT authentication (HTTP + TCP)
+- JWT authentication (HTTP + TCP + WebSocket handshake)
 - Admin Dashboard (SQL playground, table browser, live events, metrics)
 - TLS/SSL for TCP (OpenSSL-backed, self-signed cert generation)
 - Connection limits (max connections enforced + idle timeout)

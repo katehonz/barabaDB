@@ -1380,6 +1380,60 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
                 if cols.len == 0: cols = @["key", "value"]
                 return okResult(rows, cols)
 
+        # B-Tree range scan for BETWEEN
+        if w.kind == nkBetweenExpr:
+          if w.betweenExpr.kind == nkIdent and w.betweenLow.kind == nkStringLit and w.betweenHigh.kind == nkStringLit:
+            let colName = w.betweenExpr.identName
+            let idxName = stmt.selFrom.fromTable & "." & colName
+            if idxName in ctx.btrees:
+              let scanned = ctx.btrees[idxName].scan(w.betweenLow.strVal, w.betweenHigh.strVal)
+              var rows: seq[Row] = @[]
+              for (k, entries) in scanned:
+                for entry in entries:
+                  let (found, val) = ctx.db.get(entry.lsmKey)
+                  if found:
+                    rows.add(parseRowData(cast[string](val)))
+              let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
+              var cols: seq[string] = @[]
+              for c in tbl.columns: cols.add(c.name)
+              if cols.len == 0: cols = @["key", "value"]
+              return okResult(rows, cols)
+
+        # B-Tree range scan for > >= < <=
+        if w.kind == nkBinOp and w.binLeft.kind == nkIdent and w.binRight.kind == nkStringLit:
+          let colName = w.binLeft.identName
+          let idxName = stmt.selFrom.fromTable & "." & colName
+          if idxName in ctx.btrees:
+            var startKey = ""
+            var endKey = ""
+            case w.binOp
+            of bkGt:
+              startKey = w.binRight.strVal & "\x00"
+              endKey = "\x7f"
+            of bkGtEq:
+              startKey = w.binRight.strVal
+              endKey = "\x7f"
+            of bkLt:
+              startKey = ""
+              endKey = w.binRight.strVal
+            of bkLtEq:
+              startKey = ""
+              endKey = w.binRight.strVal
+            else: discard
+            if startKey != "" or endKey != "":
+              let scanned = ctx.btrees[idxName].scan(startKey, endKey)
+              var rows: seq[Row] = @[]
+              for (k, entries) in scanned:
+                for entry in entries:
+                  let (found, val) = ctx.db.get(entry.lsmKey)
+                  if found:
+                    rows.add(parseRowData(cast[string](val)))
+              let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
+              var cols: seq[string] = @[]
+              for c in tbl.columns: cols.add(c.name)
+              if cols.len == 0: cols = @["key", "value"]
+              return okResult(rows, cols)
+
     # Full pipeline execution
     let plan = lowerSelect(stmt)
     let rows = executePlan(ctx, plan)
