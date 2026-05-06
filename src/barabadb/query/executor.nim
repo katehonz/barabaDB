@@ -3,6 +3,8 @@ import std/strutils
 import std/tables
 import std/hashes
 import std/sequtils
+import lexer as qlex
+import parser as qpar
 import ast
 import ir
 import ../core/types
@@ -38,8 +40,48 @@ type
   Row = Table[string, string]
 
 proc newExecutionContext*(db: LSMTree): ExecutionContext =
-  ExecutionContext(db: db, tables: initTable[string, TableDef](),
+  result = ExecutionContext(db: db, tables: initTable[string, TableDef](),
                    btrees: initTable[string, BTreeIndex[string, IndexEntry]]())
+  restoreSchema(result)
+
+proc restoreSchema(ctx: ExecutionContext) =
+  ## Replay persisted migrations on startup
+  let prefix = "_schema:migrations:"
+  for entry in ctx.db.scanMemTable():
+    if entry.deleted: continue
+    if not entry.key.startsWith(prefix): continue
+    let ddl = cast[string](entry.value)
+    if ddl.len == 0: continue
+    # Replay DDL
+    let tokens = qlex.tokenize(ddl)
+    let astNode = qpar.parse(tokens)
+    if astNode.stmts.len > 0:
+      let stmt = astNode.stmts[0]
+      case stmt.kind
+      of nkCreateTable:
+        var tbl = TableDef(name: stmt.crtName, columns: @[], pkColumns: @[])
+        for col in stmt.crtColumns:
+          if col.kind == nkColumnDef:
+            var colDef = ColumnDef(name: col.cdName, colType: col.cdType)
+            for cst in col.cdConstraints:
+              if cst.kind == nkConstraintDef:
+                case cst.cstType
+                of "pkey":
+                  colDef.isPk = true
+                  tbl.pkColumns.add(col.cdName)
+                  let idxName = stmt.crtName & "." & col.cdName
+                  var bt = newBTreeIndex[string, IndexEntry]()
+                  ctx.btrees[idxName] = bt
+                of "notnull": colDef.isNotNull = true
+                of "unique":
+                  colDef.isUnique = true
+                  let idxName2 = stmt.crtName & "." & col.cdName
+                  var bt2 = newBTreeIndex[string, IndexEntry]()
+                  ctx.btrees[idxName2] = bt2
+                else: discard
+            tbl.columns.add(colDef)
+        ctx.tables[stmt.crtName] = tbl
+      else: discard
 
 proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
   ## Create a per-connection context that shares the same data but has its own transaction.
@@ -566,14 +608,12 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
             of "pkey":
               colDef.isPk = true
               tbl.pkColumns.add(col.cdName)
-              # Create B-Tree index for PK
               let idxName = stmt.crtName & "." & col.cdName
               var bt = newBTreeIndex[string, IndexEntry]()
               ctx.btrees[idxName] = bt
             of "notnull": colDef.isNotNull = true
             of "unique":
               colDef.isUnique = true
-              # Create B-Tree index for UNIQUE
               let idxName2 = stmt.crtName & "." & col.cdName
               var bt2 = newBTreeIndex[string, IndexEntry]()
               ctx.btrees[idxName2] = bt2
@@ -583,6 +623,20 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
             else: discard
         tbl.columns.add(colDef)
     ctx.tables[stmt.crtName] = tbl
+
+    # Persist schema as migration
+    let schemaKey = "_schema:migrations:" & $ctx.tables.len
+    let schemaDDL = "CREATE TABLE " & stmt.crtName & " ("
+    var colDefs: seq[string] = @[]
+    for col in tbl.columns:
+      var parts = @[col.name, col.colType]
+      if col.isPk: parts.add("PRIMARY KEY")
+      if col.isNotNull: parts.add("NOT NULL")
+      if col.isUnique: parts.add("UNIQUE")
+      if col.defaultVal.len > 0: parts.add("DEFAULT '" & col.defaultVal & "'")
+      colDefs.add(parts.join(" "))
+    ctx.db.put(schemaKey, cast[seq[byte]](colDefs.join(", ") & ")"))
+
     return (true, "", 0)
 
   of nkDropTable:
