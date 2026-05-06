@@ -1,15 +1,22 @@
 ## BaraQL Executor — AST lowering, IR compilation, and execution
 import std/strutils
 import std/tables
+import std/hashes
 import ast
 import ir
 import ../core/types
 import ../storage/lsm
+import ../storage/btree
 
 type
+  IndexEntry = ref object
+    lsmKey*: string
+    rowValue*: string
+
   ExecutionContext* = ref object
     db*: LSMTree
     tables*: Table[string, TableDef]  # table name -> definition
+    btrees*: Table[string, BTreeIndex[string, IndexEntry]]  # index name -> btree
 
   TableDef* = object
     name*: string
@@ -27,7 +34,8 @@ type
   Row = Table[string, string]
 
 proc newExecutionContext*(db: LSMTree): ExecutionContext =
-  ExecutionContext(db: db, tables: initTable[string, TableDef]())
+  ExecutionContext(db: db, tables: initTable[string, TableDef](),
+                   btrees: initTable[string, BTreeIndex[string, IndexEntry]]())
 
 proc execScan(ctx: ExecutionContext, table: string): seq[Row] =
   ## Full table scan via LSM-Tree memtable scan.
@@ -58,24 +66,163 @@ proc execPointRead(ctx: ExecutionContext, table: string, key: string): seq[Row] 
   return @[]
 
 proc execInsert(ctx: ExecutionContext, table: string, fields: seq[string], values: seq[seq[string]]): int =
-  ## Insert rows into LSM-Tree.
-  ## Each row is stored as key=table.pk_value, value=<serialized row>
+  ## Insert rows into LSM-Tree with constraint validation and B-Tree index population.
   var count = 0
   for rowVals in values:
     var key = ""
-    var valStr = ""
+    var keyFound = false
+    var valParts: seq[string] = @[]
     for i, f in fields:
       if i < rowVals.len:
-        if key == "":
+        if not keyFound:
           key = f & "=" & rowVals[i]
+          keyFound = true
         else:
-          valStr &= f & "=" & rowVals[i]
-        if i < rowVals.len - 1:
-          valStr &= ","
+          valParts.add(f & "=" & rowVals[i])
+      elif f.len > 0:
+        valParts.add(f & "=")
+    let valStr = valParts.join(",")
     let fullKey = table & "." & key
     ctx.db.put(fullKey, cast[seq[byte]](valStr))
+
+    # Populate B-Tree indexes
+    for colName, btIdx in ctx.btrees:
+      if colName.startsWith(table & "."):
+        let colOnly = colName[table.len + 1..^1]
+        let colVal = getValue(rowVals, fields, colOnly)
+        if colVal.len > 0 and not isNull(colVal):
+          let entry = IndexEntry(lsmKey: fullKey, rowValue: valStr)
+          btIdx.insert(colVal, entry)
+
     inc count
   return count
+
+proc execUpdateRow(ctx: ExecutionContext, table: string, key: string, sets: seq[(string, string)]): int =
+  let fullKey = table & "." & key
+  let (found, existing) = ctx.db.get(fullKey)
+  if not found:
+    return 0
+  var valStr = cast[string](existing)
+  for (f, v) in sets:
+    let prefix = f & "="
+    var newParts: seq[string] = @[]
+    for part in valStr.split(","):
+      if part.startsWith(prefix):
+        newParts.add(prefix & v)
+      else:
+        newParts.add(part)
+    # If field not in existing, append
+    var hasField = false
+    for part in valStr.split(","):
+      if part.startsWith(prefix):
+        hasField = true
+        break
+    if not hasField:
+      newParts.add(prefix & v)
+    valStr = newParts.join(",")
+  ctx.db.put(fullKey, cast[seq[byte]](valStr))
+  return 1
+
+# ----------------------------------------------------------------------
+# Constraint Validation
+# ----------------------------------------------------------------------
+
+proc getTableDef(ctx: ExecutionContext, tableName: string): TableDef =
+  if tableName in ctx.tables:
+    return ctx.tables[tableName]
+  var tbl = TableDef(name: tableName, columns: @[], pkColumns: @[])
+  return tbl
+
+proc getColumnDef(tbl: TableDef, colName: string): ColumnDef =
+  for col in tbl.columns:
+    if col.name.toLower() == colName.toLower():
+      return col
+
+proc getValue(values: seq[string], fields: seq[string], colName: string): string =
+  for i, f in fields:
+    if f.toLower() == colName.toLower() and i < values.len:
+      return values[i]
+  return ""
+
+proc isNull(value: string): bool =
+  result = value.len == 0 or value.toLower() == "null"
+
+proc validateConstraints*(ctx: ExecutionContext, tableName: string,
+    fields: seq[string], values: seq[seq[string]]): (bool, string) =
+  ## Validate INSERT/UPDATE constraints.
+  ## Returns (success, errorMessage).
+
+  let tbl = ctx.getTableDef(tableName)
+
+  for rowIdx, rowVals in values:
+    for col in tbl.columns:
+      let val = getValue(rowVals, fields, col.name)
+
+      # NOT NULL check
+      if col.isNotNull and isNull(val):
+        return (false, "NOT NULL constraint violated for column '" & col.name & "'")
+
+      # DEFAULT value
+      if isNull(val) and col.defaultVal.len > 0:
+        # We'll handle this in the insert loop
+        discard
+
+    # PRIMARY KEY uniqueness check (against existing data)
+    if tbl.pkColumns.len > 0:
+      var pkVals: seq[string] = @[]
+      for pkCol in tbl.pkColumns:
+        pkVals.add(getValue(rowVals, fields, pkCol))
+      let pkStr = pkVals.join("|")
+      let pkKey = tableName & "." & pkStr
+      let (exists, _) = ctx.db.get(pkKey)
+      if exists:
+        return (false, "UNIQUE constraint violated: duplicate key '" & pkStr & "' for table '" & tableName & "'")
+
+    # UNIQUE constraint check
+    for col in tbl.columns:
+      if col.isUnique:
+        let uVal = getValue(rowVals, fields, col.name)
+        if not isNull(uVal):
+          # Check uniqueness by scanning existing rows
+          let prefix = tableName & "."
+          for entry in ctx.db.scanMemTable():
+            if entry.deleted: continue
+            if entry.key.startsWith(prefix):
+              let existingVal = cast[string](entry.value)
+              let fieldPrefix = col.name & "="
+              for part in existingVal.split(","):
+                if part.startsWith(fieldPrefix) and part[fieldPrefix.len..^1] == uVal:
+                  return (false, "UNIQUE constraint violated: duplicate value '" & uVal & "' for column '" & col.name & "'")
+
+  return (true, "")
+
+proc applyDefaultValues(tbl: TableDef, fields: var seq[string], values: var seq[seq[string]]) =
+  for col in tbl.columns:
+    if col.defaultVal.len == 0: continue
+    var hasField = false
+    for f in fields:
+      if f.toLower() == col.name.toLower():
+        hasField = true
+        break
+    if not hasField:
+      fields.add(col.name)
+      for rowIdx in 0..<values.len:
+        if rowIdx < values.len:
+          values[rowIdx].add(col.defaultVal)
+    else:
+      for rowIdx in 0..<values.len:
+        if rowIdx < values.len:
+          let fidx = fields.len - 1  # approximate
+          var found = false
+          for i, f in fields:
+            if f.toLower() == col.name.toLower() and i < values[rowIdx].len:
+              if isNull(values[rowIdx][i]):
+                values[rowIdx][i] = col.defaultVal
+              found = true
+              break
+          if not found:
+            # Field may have been added, ensure we have a value
+            discard
 
 proc execDelete(ctx: ExecutionContext, table: string, key: string): int =
   let fullKey = table & "." & key
@@ -308,9 +455,28 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
   let stmt = astNode.stmts[0]
   case stmt.kind
   of nkSelect:
-    let plan = lowerSelect(stmt)
-    let rows = executePlan(ctx, plan)
-    return (true, "", rows.len)
+    # Check if WHERE clause can use B-Tree index
+    var useIndex = false
+    var idxKey = ""
+    if stmt.selFrom != nil and stmt.selFrom.fromTable.len > 0:
+      if stmt.selWhere != nil and stmt.selWhere.whereExpr != nil:
+        let w = stmt.selWhere.whereExpr
+        if w.kind == nkBinOp and w.binOp == bkEq:
+          if w.binLeft.kind == nkIdent and w.binRight.kind == nkStringLit:
+            let colName = w.binLeft.identName
+            let idxName = stmt.selFrom.fromTable & "." & colName
+            if idxName in ctx.btrees:
+              let entries = ctx.btrees[idxName].get(w.binRight.strVal)
+              if entries.len > 0:
+                useIndex = true
+                idxKey = w.binRight.strVal
+
+    if useIndex:
+      return (true, "", 1)  # Point read via B-Tree (result count)
+    else:
+      let plan = lowerSelect(stmt)
+      let rows = executePlan(ctx, plan)
+      return (true, "", rows.len)
 
   of nkInsert:
     var fields: seq[string] = @[]
@@ -329,7 +495,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
           elif v.kind == nkIntLit: row.add($v.intVal)
           elif v.kind == nkFloatLit: row.add($v.floatVal)
           elif v.kind == nkBoolLit: row.add($v.boolVal)
-          elif v.kind == nkNullLit: row.add("NULL")
+          elif v.kind == nkNullLit: row.add("")
           else: row.add("")
       else:
         if rowNode.kind == nkStringLit: row.add(rowNode.strVal)
@@ -337,7 +503,25 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
         else: row.add("")
       values.add(row)
 
-    let count = execInsert(ctx, stmt.insTarget, fields, values)
+    # If no fields specified, use all columns from table definition
+    if fields.len == 0:
+      let tbl = ctx.getTableDef(stmt.insTarget)
+      if tbl.columns.len > 0:
+        for col in tbl.columns:
+          fields.add(col.name)
+
+    # Apply DEFAULT values
+    let tbl = ctx.getTableDef(stmt.insTarget)
+    var mutableFields = fields
+    var mutableValues = values
+    applyDefaultValues(tbl, mutableFields, mutableValues)
+
+    # Validate constraints
+    let (valid, errMsg) = validateConstraints(ctx, stmt.insTarget, mutableFields, mutableValues)
+    if not valid:
+      return (false, errMsg, 0)
+
+    let count = execInsert(ctx, stmt.insTarget, mutableFields, mutableValues)
     return (true, "", count)
 
   of nkUpdate:
@@ -365,8 +549,17 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
             of "pkey":
               colDef.isPk = true
               tbl.pkColumns.add(col.cdName)
+              # Create B-Tree index for PK
+              let idxName = stmt.crtName & "." & col.cdName
+              var bt = newBTreeIndex[string, IndexEntry]()
+              ctx.btrees[idxName] = bt
             of "notnull": colDef.isNotNull = true
-            of "unique": colDef.isUnique = true
+            of "unique":
+              colDef.isUnique = true
+              # Create B-Tree index for UNIQUE
+              let idxName2 = stmt.crtName & "." & col.cdName
+              var bt2 = newBTreeIndex[string, IndexEntry]()
+              ctx.btrees[idxName2] = bt2
             of "default":
               if cst.cstDefault != nil and cst.cstDefault.kind == nkStringLit:
                 colDef.defaultVal = cst.cstDefault.strVal
@@ -377,6 +570,13 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
 
   of nkDropTable:
     ctx.tables.del(stmt.drtName)
+    # Remove associated B-Tree indexes
+    var toDelete: seq[string] = @[]
+    for idxName, bt in ctx.btrees:
+      if idxName.startsWith(stmt.drtName & "."):
+        toDelete.add(idxName)
+    for idxName in toDelete:
+      ctx.btrees.del(idxName)
     return (true, "", 0)
 
   of nkBeginTxn:
@@ -392,6 +592,24 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): (bool, string, int) =
     return (true, "", 0)
 
   of nkExplainStmt:
+    if stmt.expStmt != nil and stmt.expStmt.kind == nkSelect:
+      var planStr = "EXPLAIN "
+      if stmt.expStmt.selFrom != nil:
+        planStr &= "SELECT on " & stmt.expStmt.selFrom.fromTable
+      # Check if index can be used
+      var indexUsed = false
+      if stmt.expStmt.selFrom != nil and stmt.expStmt.selFrom.fromTable.len > 0:
+        if stmt.expStmt.selWhere != nil and stmt.expStmt.selWhere.whereExpr != nil:
+          let w = stmt.expStmt.selWhere.whereExpr
+          if w.kind == nkBinOp and w.binOp == bkEq:
+            if w.binLeft.kind == nkIdent:
+              let idxName = stmt.expStmt.selFrom.fromTable & "." & w.binLeft.identName
+              if idxName in ctx.btrees:
+                planStr &= " (using B-Tree index on " & w.binLeft.identName & ")"
+                indexUsed = true
+      if not indexUsed:
+        planStr &= " (full table scan)"
+      return (true, "", 0)
     return (true, "", 0)
 
   else:
