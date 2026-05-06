@@ -774,7 +774,7 @@ proc parseCreateMigration(p: var Parser): Node =
                 line: tok.line, col: tok.col)
 
 proc parseApplyMigration(p: var Parser): Node =
-  let tok = p.expect(tkIdent)  # APPLY
+  let tok = p.expect(tkApply)
   discard p.expect(tkMigration)
   let name = p.expect(tkIdent).value
   result = Node(kind: nkApplyMigration, amName: name, line: tok.line, col: tok.col)

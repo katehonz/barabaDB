@@ -2,6 +2,7 @@
 import std/asyncdispatch
 import std/asyncnet
 import std/strutils
+import std/tables
 import std/os
 import std/endians
 import config
