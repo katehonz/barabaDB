@@ -3,6 +3,7 @@ import std/math
 import std/algorithm
 import std/random
 import std/tables
+import std/sets
 import std/monotimes
 
 type
@@ -47,6 +48,8 @@ type
     metric*: DistanceMetric
     dimensions*: int
 
+  NodeDist = tuple[dist: float64, id: uint64]
+
 proc cosineDistance*(a, b: Vector): float64 =
   var dot, normA, normB: float64
   for i in 0..<min(a.len, b.len):
@@ -83,6 +86,10 @@ proc distance*(a, b: Vector, metric: DistanceMetric): float64 =
   of dmDotProduct: dotProduct(a, b)
   of dmManhattan: manhattanDistance(a, b)
 
+# ----------------------------------------------------------------------
+# HNSW Index — Hierarchical Navigable Small World
+# ----------------------------------------------------------------------
+
 proc newHNSWIndex*(dimensions: int, m: int = 16, efConstruction: int = 200,
                    metric: DistanceMetric = dmCosine): HNSWIndex =
   HNSWIndex(
@@ -96,22 +103,100 @@ proc newHNSWIndex*(dimensions: int, m: int = 16, efConstruction: int = 200,
     dimensions: dimensions,
   )
 
-proc randomLevel(maxLevel: int): int =
+proc randomLevel(m: int): int =
+  ## Geometric distribution: probability of level L is (1/m)^L
   var level = 0
-  var r = rand(1.0)
-  while r < 0.5 and level < maxLevel:
+  let p = 1.0 / float64(m)
+  while rand(1.0) < p and level < 16:
     inc level
-    r = rand(1.0)
   return level
+
+proc nodeDistCmp(a, b: NodeDist): int = cmp(a.dist, b.dist)
+
+proc searchLayer(idx: HNSWIndex, entryId: uint64, query: Vector, ef: int,
+                 level: int, metric: DistanceMetric): seq[NodeDist] =
+  ## Greedy beam search at a specific level.
+  ## Returns up to `ef` nearest neighbors sorted by distance.
+  var visited = initHashSet[uint64]()
+  var candidates: seq[NodeDist] = @[]
+  var nearest: seq[NodeDist] = @[]
+
+  let entryDist = distance(query, idx.nodes[entryId].vector, metric)
+  candidates.add((entryDist, entryId))
+  nearest.add((entryDist, entryId))
+  visited.incl(entryId)
+
+  while candidates.len > 0:
+    # Pop closest candidate
+    var bestIdx = 0
+    for i in 1..<candidates.len:
+      if candidates[i].dist < candidates[bestIdx].dist:
+        bestIdx = i
+    let current = candidates[bestIdx]
+    candidates.del(bestIdx)
+
+    # Stop if current is worse than the ef-th nearest
+    if nearest.len >= ef and current.dist > nearest[^1].dist:
+      break
+
+    # Explore neighbors at this level
+    let node = idx.nodes[current.id]
+    if level < node.neighbors.len:
+      for neighborId in node.neighbors[level]:
+        if neighborId notin visited:
+          visited.incl(neighborId)
+          let dist = distance(query, idx.nodes[neighborId].vector, metric)
+          candidates.add((dist, neighborId))
+          nearest.add((dist, neighborId))
+          nearest.sort(nodeDistCmp)
+          if nearest.len > ef:
+            nearest.setLen(ef)
+
+  return nearest
+
+proc selectNeighbors(idx: HNSWIndex, baseVector: Vector, candidates: seq[NodeDist],
+                     maxNeighbors: int, metric: DistanceMetric): seq[uint64] =
+  ## Keep only the closest `maxNeighbors` candidates.
+  var sorted = candidates
+  sorted.sort(nodeDistCmp)
+  let n = min(maxNeighbors, sorted.len)
+  result = newSeq[uint64](n)
+  for i in 0..<n:
+    result[i] = sorted[i].id
+
+proc addBidirectionalLink(idx: HNSWIndex, nodeId, neighborId: uint64, level: int) =
+  ## Add a bidirectional link between two nodes at the given level,
+  ## pruning if the neighbor list exceeds maxM.
+  let node = idx.nodes[nodeId]
+  let neighbor = idx.nodes[neighborId]
+  if level >= node.neighbors.len or level >= neighbor.neighbors.len:
+    return
+
+  # Add forward link
+  if neighborId notin node.neighbors[level]:
+    node.neighbors[level].add(neighborId)
+
+  # Add backward link
+  if nodeId notin neighbor.neighbors[level]:
+    neighbor.neighbors[level].add(nodeId)
+
+  # Prune neighbor's connections if too many
+  if neighbor.neighbors[level].len > idx.maxM:
+    var dists: seq[(float64, uint64)] = @[]
+    for nid in neighbor.neighbors[level]:
+      dists.add((distance(neighbor.vector, idx.nodes[nid].vector, idx.metric), nid))
+    dists.sort(proc(a, b: (float64, uint64)): int = cmp(a[0], b[0]))
+    neighbor.neighbors[level].setLen(idx.maxM)
+    for i in 0..<idx.maxM:
+      neighbor.neighbors[level][i] = dists[i][1]
 
 proc insert*(idx: HNSWIndex, id: uint64, vector: Vector,
              metadata: Table[string, string] = initTable[string, string]()) =
-  let node = HNSWNode(id: id, vector: vector, metadata: metadata, neighbors: @[])
-  let level = randomLevel(16)
-
+  let level = randomLevel(idx.m)
+  let node = HNSWNode(id: id, vector: vector, metadata: metadata,
+                      neighbors: newSeq[seq[uint64]](level + 1))
   for i in 0..level:
-    node.neighbors.add(@[])
-
+    node.neighbors[i] = @[]
   idx.nodes[id] = node
 
   if idx.entryPoint == 0:
@@ -119,6 +204,24 @@ proc insert*(idx: HNSWIndex, id: uint64, vector: Vector,
     idx.maxLevel = level
     return
 
+  # Find entry point for each level from maxLevel down to level+1
+  var currEntry = idx.entryPoint
+  for lc in countdown(idx.maxLevel, level + 1):
+    let nearest = searchLayer(idx, currEntry, vector, 1, lc, idx.metric)
+    if nearest.len > 0:
+      currEntry = nearest[0].id
+
+  # For each level from min(level, maxLevel) down to 0, find neighbors and link
+  let topLevel = min(level, idx.maxLevel)
+  for lc in countdown(topLevel, 0):
+    let nearest = searchLayer(idx, currEntry, vector, idx.efConstruction, lc, idx.metric)
+    let neighbors = selectNeighbors(idx, vector, nearest, idx.m, idx.metric)
+    for neighborId in neighbors:
+      addBidirectionalLink(idx, id, neighborId, lc)
+    if nearest.len > 0:
+      currEntry = nearest[0].id
+
+  # Update entry point if new node has higher level
   if level > idx.maxLevel:
     idx.entryPoint = id
     idx.maxLevel = level
@@ -128,17 +231,22 @@ proc search*(idx: HNSWIndex, query: Vector, k: int,
   if idx.nodes.len == 0:
     return @[]
 
-  var candidates: seq[(uint64, float64)] = @[]
-  for nodeId, node in idx.nodes:
-    let dist = distance(query, node.vector, metric)
-    candidates.add((nodeId, dist))
+  var currEntry = idx.entryPoint
 
-  candidates.sort(proc(a, b: (uint64, float64)): int = cmp(a[1], b[1]))
+  # Descend from top level to level 1
+  for lc in countdown(idx.maxLevel, 1):
+    let nearest = searchLayer(idx, currEntry, query, 1, lc, metric)
+    if nearest.len > 0:
+      currEntry = nearest[0].id
 
-  if candidates.len > k:
-    candidates = candidates[0..<k]
+  # Search at level 0 with ef = max(k * 2, idx.efConstruction)
+  let ef = max(k * 2, idx.efConstruction)
+  let nearest = searchLayer(idx, currEntry, query, ef, 0, metric)
 
-  return candidates
+  let n = min(k, nearest.len)
+  result = newSeq[(uint64, float64)](n)
+  for i in 0..<n:
+    result[i] = (nearest[i].id, nearest[i].dist)
 
 proc searchWithFilter*(idx: HNSWIndex, query: Vector, k: int,
                        filter: proc(metadata: Table[string, string]): bool {.gcsafe.},
@@ -146,16 +254,28 @@ proc searchWithFilter*(idx: HNSWIndex, query: Vector, k: int,
   if idx.nodes.len == 0:
     return @[]
 
-  var candidates: seq[(uint64, float64)] = @[]
-  for nodeId, node in idx.nodes:
-    if filter(node.metadata):
-      let dist = distance(query, node.vector, metric)
-      candidates.add((nodeId, dist))
+  var currEntry = idx.entryPoint
+  for lc in countdown(idx.maxLevel, 1):
+    let nearest = searchLayer(idx, currEntry, query, 1, lc, metric)
+    if nearest.len > 0:
+      currEntry = nearest[0].id
 
-  candidates.sort(proc(a, b: (uint64, float64)): int = cmp(a[1], b[1]))
-  if candidates.len > k:
-    candidates = candidates[0..<k]
-  return candidates
+  # Use larger ef to compensate for filtering
+  let ef = max(k * 10, idx.efConstruction)
+  let nearest = searchLayer(idx, currEntry, query, ef, 0, metric)
+
+  var filtered: seq[(uint64, float64)] = @[]
+  for (dist, id) in nearest:
+    if filter(idx.nodes[id].metadata):
+      filtered.add((id, dist))
+      if filtered.len >= k:
+        break
+
+  return filtered
+
+# ----------------------------------------------------------------------
+# IVF-PQ Index (unchanged)
+# ----------------------------------------------------------------------
 
 proc newIVFPQIndex*(dimensions: int, nClusters: int = 100,
                     nSubquantizers: int = 8, nBits: int = 8,
@@ -222,6 +342,10 @@ proc search*(idx: IVFPQIndex, query: Vector, k: int, nProbe: int = 10,
     candidates = candidates[0..<k]
   return candidates
 
+# ----------------------------------------------------------------------
+# Helpers
+# ----------------------------------------------------------------------
+
 proc len*(idx: HNSWIndex): int = idx.nodes.len
 
 proc clear*(idx: HNSWIndex) =
@@ -233,7 +357,6 @@ proc clear*(idx: IVFPQIndex) =
   for i in 0..<idx.nClusters:
     idx.clusters[i].entries.setLen(0)
 
-# Batch insert for HNSW
 proc batchInsert*(idx: HNSWIndex, batch: seq[(uint64, Vector)],
                   metadata: seq[Table[string, string]] = @[]) =
   for i, (id, vec) in batch:
@@ -242,14 +365,12 @@ proc batchInsert*(idx: HNSWIndex, batch: seq[(uint64, Vector)],
       meta = metadata[i]
     idx.insert(id, vec, meta)
 
-# Batch insert for IVF-PQ
 proc batchInsert*(idx: IVFPQIndex, batch: seq[(uint64, Vector)]) =
   var entries: seq[VectorEntry] = @[]
   for (id, vec) in batch:
     entries.add(VectorEntry(id: id, vector: vec, metadata: @[]))
   idx.train(entries, nIterations = 5)
 
-# Batch search
 proc batchSearch*(idx: HNSWIndex, queries: seq[Vector], k: int,
                   metric: DistanceMetric = dmCosine): seq[seq[(uint64, float64)]] =
   result = newSeq[seq[(uint64, float64)]](queries.len)
@@ -260,8 +381,8 @@ proc batchSearch*(idx: HNSWIndex, queries: seq[Vector], k: int,
 type
   RebuildConfig* = object
     maxUnindexedCount*: int
-    checkInterval*: int64   # nanoseconds
-    rebuildThreshold*: float64  # ratio of unindexed/total to trigger rebuild
+    checkInterval*: int64
+    rebuildThreshold*: float64
     autoRebuild*: bool
 
   IndexWatcher* = ref object
@@ -275,8 +396,8 @@ type
 proc defaultRebuildConfig*(): RebuildConfig =
   RebuildConfig(
     maxUnindexedCount: 10000,
-    checkInterval: 60_000_000_000,  # 1 minute
-    rebuildThreshold: 0.1,  # 10% unindexed triggers rebuild
+    checkInterval: 60_000_000_000,
+    rebuildThreshold: 0.1,
     autoRebuild: true,
   )
 
