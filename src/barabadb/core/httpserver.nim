@@ -8,6 +8,7 @@ import tables
 import strutils
 import os
 import times
+import std/asyncdispatch
 import config
 import ../query/lexer
 import ../query/parser
@@ -22,7 +23,7 @@ type
   HttpServer* = ref object
     config: BaraConfig
     running: bool
-    db: LSMTree
+    db*: LSMTree
     ctx: ExecutionContext
     metrics*: Metrics
     secretKey*: string

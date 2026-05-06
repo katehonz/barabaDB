@@ -377,6 +377,8 @@ proc validateType*(colType: string, value: string): (bool, string) =
       return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
   return (true, "")
 
+proc lowerExpr*(node: Node): IRExpr
+
 proc validateConstraints*(ctx: ExecutionContext, tableName: string,
     fields: seq[string], values: seq[seq[string]]): (bool, string) =
   let tbl = ctx.getTableDef(tableName)

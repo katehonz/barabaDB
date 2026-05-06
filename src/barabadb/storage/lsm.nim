@@ -7,6 +7,7 @@ import std/tables
 import std/monotimes
 import std/streams
 import std/locks
+import std/asyncdispatch
 import bloom
 import wal
 import mmap
@@ -40,15 +41,15 @@ type
     mmapFile*: MmapFile
 
   LSMTree* = ref object
-    dir: string
+    dir*: string
     memTable: MemTable
     immutableMem: MemTable
-    sstables: seq[SSTable]
+    sstables*: seq[SSTable]
     wal: WriteAheadLog
     memMaxSize: int
     currentSeq: uint64
     nextSSTableId: int
-    lock: Lock
+    lock*: Lock
 
 proc newMemTable(maxSize: int = DefaultMemTableSize): MemTable =
   MemTable(entries: @[], size: 0, maxSize: maxSize)
@@ -323,6 +324,7 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
   result.memMaxSize = memMaxSize
   result.currentSeq = 0
   result.nextSSTableId = nextId
+  discard
 
 proc put*(db: LSMTree, key: string, value: seq[byte]) =
   acquire(db.lock)
