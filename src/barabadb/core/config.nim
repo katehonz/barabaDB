@@ -9,6 +9,10 @@ type
     tlsEnabled*: bool
     certFile*: string
     keyFile*: string
+    idleTimeoutMs*: int
+    queryTimeoutMs*: int
+    slowQueryThresholdMs*: int
+    slowQueryLogPath*: string
 
   CompactionStrategy* = enum
     csSizeTiered = "size_tiered"
@@ -25,6 +29,10 @@ proc defaultConfig*(): BaraConfig =
     tlsEnabled: false,
     certFile: "",
     keyFile: "",
+    idleTimeoutMs: 300_000,
+    queryTimeoutMs: 30_000,
+    slowQueryThresholdMs: 1_000,
+    slowQueryLogPath: "",
   )
 
 proc loadConfig*(): BaraConfig =

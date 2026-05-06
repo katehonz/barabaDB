@@ -5,6 +5,7 @@ import std/strutils
 import std/tables
 import std/os
 import std/endians
+import std/monotimes
 import config
 import ../protocol/wire
 import ../protocol/ssl
@@ -23,6 +24,7 @@ type
     ctx*: ExecutionContext
     txnManager*: TxnManager
     tls*: TLSContext
+    activeConnections*: int
 
   ClientConnection = ref object
     socket: AsyncSocket
@@ -69,6 +71,26 @@ proc parseHeader(data: string): (bool, MessageHeader) =
 # Query Execution (pipeline-based)
 # ----------------------------------------------------------------------
 
+proc valueToWire(val: string, colType: string): WireValue =
+  if val.len == 0 or val.toLower() == "null":
+    return WireValue(kind: fkNull)
+  let t = colType.toUpper()
+  if t.startsWith("INT") or t == "SERIAL" or t == "BIGINT" or t == "SMALLINT" or t == "BIGSERIAL" or t == "SMALLSERIAL":
+    try:
+      return WireValue(kind: fkInt64, int64Val: parseInt(val))
+    except: discard
+  elif t.startsWith("FLOAT") or t == "REAL" or t == "DOUBLE" or t == "NUMERIC" or t.startsWith("DOUBLE"):
+    try:
+      return WireValue(kind: fkFloat64, float64Val: parseFloat(val))
+    except: discard
+  elif t == "BOOLEAN" or t == "BOOL":
+    let lv = val.toLower()
+    if lv in ["true", "t", "yes", "1"]:
+      return WireValue(kind: fkBool, boolVal: true)
+    elif lv in ["false", "f", "no", "0"]:
+      return WireValue(kind: fkBool, boolVal: false)
+  return WireValue(kind: fkString, strVal: val)
+
 proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[]): (bool, QueryResult, string) =
   try:
     let tokens = tokenize(query)
@@ -81,14 +103,36 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
     if result.success:
       var qr = QueryResult(affectedRows: result.affectedRows, rowCount: result.rows.len)
       qr.columns = result.columns
+
+      var colTypes: seq[string] = @[]
+      var tableName = ""
+      if astNode.stmts[0].kind == nkSelect and astNode.stmts[0].selFrom != nil:
+        tableName = astNode.stmts[0].selFrom.fromTable
+      elif astNode.stmts[0].kind == nkInsert:
+        tableName = astNode.stmts[0].insTarget
+      elif astNode.stmts[0].kind == nkUpdate:
+        tableName = astNode.stmts[0].updTarget
+
+      if tableName.len > 0 and tableName in ctx.tables:
+        let tbl = ctx.tables[tableName]
+        for col in result.columns:
+          var found = ""
+          for c in tbl.columns:
+            if c.name.toLower() == col.toLower():
+              found = c.colType
+              break
+          colTypes.add(found)
+      else:
+        colTypes = newSeq[string](result.columns.len)
+
+      qr.columnTypes = newSeq[FieldKind](result.columns.len)
       qr.rows = @[]
       for row in result.rows:
         var wireRow: seq[WireValue] = @[]
-        for col in result.columns:
-          if col in row:
-            wireRow.add(WireValue(kind: fkString, strVal: row[col]))
-          else:
-            wireRow.add(WireValue(kind: fkString, strVal: ""))
+        for i, col in result.columns:
+          let val = if col in row: row[col] else: ""
+          let cType = if i < colTypes.len: colTypes[i] else: ""
+          wireRow.add(valueToWire(val, cType))
         qr.rows.add(wireRow)
       return (true, qr, result.message)
     else:
@@ -153,13 +197,35 @@ proc recvExact(client: AsyncSocket, size: int): Future[string] {.async.} =
     buf.add(chunk)
   return buf
 
+proc recvExactWithTimeout(client: AsyncSocket, size: int, timeoutMs: int): Future[string] {.async.} =
+  if timeoutMs <= 0:
+    return await client.recvExact(size)
+  let fut = client.recvExact(size)
+  let ok = await withTimeout(fut, timeoutMs)
+  if ok:
+    return fut.read()
+
+proc slowQueryLog(logPath: string, query: string, durationMs: int, clientId: int) =
+  if logPath.len == 0:
+    return
+  try:
+    let f = open(logPath, fmAppend)
+    defer: f.close()
+    let line = $getMonoTime().ticks() & " | " & $clientId & " | " & $durationMs & "ms | " & query & "\n"
+    f.write(line)
+  except: discard
+
 proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} =
   echo "Client ", clientId, " connected"
   var connCtx = cloneForConnection(server.ctx)
+  let idleTimeout = server.config.idleTimeoutMs
+  let queryTimeout = server.config.queryTimeoutMs
+  let slowThreshold = server.config.slowQueryThresholdMs
+  let slowLog = server.config.slowQueryLogPath
+
   try:
     while true:
-      # Read 12-byte header
-      let headerData = await client.recvExact(12)
+      let headerData = await client.recvExactWithTimeout(12, idleTimeout)
       if headerData.len < 12:
         break
 
@@ -167,21 +233,25 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
       if not ok:
         break
 
-      # Read payload
       var payload = ""
       if header.length > 0:
-        payload = await client.recvExact(int(header.length))
+        payload = await client.recvExactWithTimeout(int(header.length), idleTimeout)
         if payload.len < int(header.length):
           break
 
       case header.kind
       of mkQuery:
-        # Parse query from payload
         var pos = 0
         let queryStr = readString(cast[seq[byte]](payload), pos)
         echo "[", clientId, "] Query: ", queryStr
 
+        let startTicks = getMonoTime().ticks()
         let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr)
+        let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
+
+        if durationMs >= slowThreshold:
+          slowQueryLog(slowLog, queryStr, durationMs, clientId)
+
         if success:
           if result.rows.len > 0:
             let dataMsg = serializeResult(result, header.requestId)
@@ -196,7 +266,13 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         let (queryStr, params) = readQueryParamsMessage(cast[seq[byte]](payload))
         echo "[", clientId, "] QueryParams: ", queryStr, " (", params.len, " params)"
 
+        let startTicks = getMonoTime().ticks()
         let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, params)
+        let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
+
+        if durationMs >= slowThreshold:
+          slowQueryLog(slowLog, queryStr, durationMs, clientId)
+
         if success:
           if result.rows.len > 0:
             let dataMsg = serializeResult(result, header.requestId)
@@ -225,6 +301,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
   except Exception as e:
     echo "Client ", clientId, " error: ", e.msg
   finally:
+    dec server.activeConnections
     echo "Client ", clientId, " disconnected"
     client.close()
 
@@ -241,6 +318,9 @@ proc run*(server: Server) {.async.} =
     echo "BaraDB listening on ", server.config.address, ":", server.config.port
   while server.running:
     let client = await sock.accept()
+    if server.config.maxConnections > 0 and server.activeConnections >= server.config.maxConnections:
+      client.close()
+      continue
     if server.tls != nil:
       try:
         server.tls.wrapServer(client)
@@ -249,6 +329,7 @@ proc run*(server: Server) {.async.} =
         client.close()
         continue
     inc clientId
+    inc server.activeConnections
     asyncCheck server.handleClient(client, clientId)
 
 proc stop*(server: Server) =

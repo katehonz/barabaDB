@@ -6,6 +6,7 @@ import std/sequtils
 import std/algorithm
 import std/re
 import checksums/sha2
+import std/math
 import std/times
 import lexer as qlex
 import parser as qpar
@@ -367,6 +368,16 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string]): string =
         if r != 0: return $(parseFloat(left) / r)
         return "0"
       except: return "0"
+    of irMod:
+      try:
+        let a = parseInt(left)
+        let b = parseInt(right)
+        if b != 0: return $(a mod b)
+        return "0"
+      except: return "0"
+    of irPow:
+      try: return $(pow(parseFloat(left), parseFloat(right)))
+      except: return "0"
     of irLike:
       let pattern = right.replace("%", ".*").replace("_", ".")
       try:
@@ -374,6 +385,27 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string]): string =
         if left.match(rePattern): return "true"
       except: discard
       return "false"
+    of irILike:
+      let pattern = right.toLower().replace("%", ".*").replace("_", ".")
+      try:
+        let rePattern = re(pattern)
+        if left.toLower().match(rePattern): return "true"
+      except: discard
+      return "false"
+    of irIn:
+      try:
+        let lv = parseFloat(left)
+        let rv = parseFloat(right)
+        return if lv == rv: "true" else: "false"
+      except: discard
+      return if left == right: "true" else: "false"
+    of irNotIn:
+      try:
+        let lv = parseFloat(left)
+        let rv = parseFloat(right)
+        return if lv != rv: "true" else: "false"
+      except: discard
+      return if left != right: "true" else: "false"
     else: return "false"
   of irekUnary:
     case expr.unOp
@@ -776,14 +808,35 @@ proc lowerExpr*(node: Node): IRExpr =
     result.binRight = lowerExpr(node.likePattern)
   of nkBetweenExpr:
     result = IRExpr(kind: irekBinary)
-    result.binOp = irBetween
-    result.binLeft = lowerExpr(node.betweenExpr)
-    result.binRight = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkString, strVal: ""))
+    result.binOp = irAnd
+    let leftCmp = IRExpr(kind: irekBinary)
+    leftCmp.binOp = irGte
+    leftCmp.binLeft = lowerExpr(node.betweenExpr)
+    leftCmp.binRight = lowerExpr(node.betweenLow)
+    let rightCmp = IRExpr(kind: irekBinary)
+    rightCmp.binOp = irLte
+    rightCmp.binLeft = lowerExpr(node.betweenExpr)
+    rightCmp.binRight = lowerExpr(node.betweenHigh)
+    result.binLeft = leftCmp
+    result.binRight = rightCmp
   of nkInExpr:
-    result = IRExpr(kind: irekBinary)
-    result.binOp = irIn
-    result.binLeft = lowerExpr(node.inLeft)
-    result.binRight = lowerExpr(node.inRight)
+    if node.inRight.kind == nkArrayLit:
+      result = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkBool, boolVal: false))
+      for elem in node.inRight.arrayElems:
+        let eqCmp = IRExpr(kind: irekBinary)
+        eqCmp.binOp = irEq
+        eqCmp.binLeft = lowerExpr(node.inLeft)
+        eqCmp.binRight = lowerExpr(elem)
+        let orNode = IRExpr(kind: irekBinary)
+        orNode.binOp = irOr
+        orNode.binLeft = result
+        orNode.binRight = eqCmp
+        result = orNode
+    else:
+      result = IRExpr(kind: irekBinary)
+      result.binOp = irEq
+      result.binLeft = lowerExpr(node.inLeft)
+      result.binRight = lowerExpr(node.inRight)
   of nkExists:
     result = IRExpr(kind: irekExists)
   of nkStar:

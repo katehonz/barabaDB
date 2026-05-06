@@ -29,17 +29,6 @@ proc newCompactionManager*(db: LSMTree): CompactionManager =
       createdAt: 0,
     )
     result.strategy.addTable(meta)
-  for sst in db.sstables:
-    let meta = SSTableMeta(
-      path: sst.path,
-      level: sst.level,
-      minKey: sst.minKey,
-      maxKey: sst.maxKey,
-      entryCount: sst.entryCount,
-      sizeBytes: sst.entryCount * 64,
-      createdAt: 0,
-    )
-    result.strategy.addTable(meta)
 
 proc compact*(cm: CompactionManager) =
   acquire(cm.db.lock)
