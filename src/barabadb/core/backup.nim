@@ -6,6 +6,7 @@
 ##   list     List available snapshots with size & timestamp
 ##   verify   Check archive integrity without extracting
 ##   cleanup  Remove old snapshots keeping N most recent
+##   history  Show restore operation log
 ##   help     Show detailed usage information
 ##
 ## Options:
@@ -15,6 +16,8 @@
 ##   --keep,     -k <N>     Number of snapshots to retain (default: 5)
 ##   --exclude,  -e <PAT>   Exclude pattern (can be used multiple times)
 ##   --level,    -l <0-9>   Compression level for gzip (default: 6)
+##   --dry-run               Show what would be done without doing it
+##   --force,    -f         Skip confirmation prompts
 ##   --verbose,  -v         Enable verbose output
 
 import std/os
@@ -22,7 +25,6 @@ import std/osproc
 import std/strutils
 import std/times
 import std/algorithm
-import std/sequtils
 import std/parseopt
 
 type
@@ -36,6 +38,7 @@ const
   DEFAULT_DATA_DIR = "data/server"
   DEFAULT_KEEP_COUNT = 5
   DEFAULT_COMPRESSION = 6
+  HISTORY_FILE = "backup_history.log"
   HELP_TEXT = """
 BaraDB Backup Manager — Archive and restore your database safely
 ================================================================
@@ -49,6 +52,7 @@ COMMANDS:
 
   restore  Replace the current data directory with contents from a snapshot.
            WARNING: This DESTROYS existing data. Use with care.
+           Automatically verifies archive integrity before extracting.
 
   list     Show all snapshots found next to the data directory.
            Displays size, timestamp and compression ratio if known.
@@ -59,6 +63,8 @@ COMMANDS:
   cleanup  Delete old snapshots, keeping only the N most recent ones.
            Default retention is 5 snapshots.
 
+  history  Show log of all restore operations performed on this system.
+
   help     Show this help message.
 
 OPTIONS:
@@ -68,6 +74,8 @@ OPTIONS:
   -k, --keep     <N>     Retention count for cleanup (default: 5)
   -e, --exclude  <PAT>   Exclude files matching pattern (repeatable)
   -l, --level    <0-9>   Gzip compression level (default: 6, max: 9)
+      --dry-run          Show what restore would do without changing anything
+  -f, --force            Skip confirmation prompts (use with caution!)
   -v, --verbose          Print detailed progress information
 
 EXAMPLES:
@@ -80,6 +88,12 @@ EXAMPLES:
   # Restore from a specific snapshot
   backup restore --input=backup_1715011200.tar.gz
 
+  # Dry-run restore — preview what will happen
+  backup restore --input=backup.tar.gz --dry-run
+
+  # Force restore without confirmation (automation/scripts)
+  backup restore --input=backup.tar.gz --force
+
   # List all snapshots
   backup list
 
@@ -91,6 +105,10 @@ EXAMPLES:
 
   # Exclude WAL files from backup
   backup backup --exclude="*.log" --exclude="wal/*"
+
+EXIT CODES:
+  0  Success
+  1  General error (invalid arguments, missing files, tar failure, etc.)
 """
 
 proc formatBytes*(bytes: int64): string =
@@ -123,6 +141,58 @@ proc parseBackupFilename*(filename: string): int64 =
       result = 0
   except:
     result = 0
+
+proc getArchiveSize*(input: string): int64 =
+  ## Return uncompressed size estimate from tar archive
+  let cmd = "tar -tzf " & quoteShell(input) & " | wc -l"
+  let (outStr, exitCode) = execCmdEx(cmd)
+  if exitCode == 0:
+    try:
+      result = parseBiggestInt(strip(outStr))
+    except:
+      result = 0
+  else:
+    result = 0
+
+proc getFreeSpace*(path: string): int64 =
+  ## Return free disk space in bytes for the filesystem containing path
+  let cmd = "df -B1 " & quoteShell(path) & " | tail -1 | awk '{print $4}'"
+  let (outStr, exitCode) = execCmdEx(cmd)
+  if exitCode == 0:
+    try:
+      result = parseBiggestInt(strip(outStr))
+    except:
+      result = -1
+  else:
+    result = -1
+
+proc logRestore*(archive: string, dataDir: string, success: bool, dryRun: bool = false) =
+  ## Append restore operation to history log
+  let logPath = getCurrentDir() / HISTORY_FILE
+  let status = if dryRun: "DRY-RUN" elif success: "SUCCESS" else: "FAILED"
+  let entry = "[" & format(getTime(), "yyyy-MM-dd HH:mm:ss") & "] " &
+              status & " restore from " & absolutePath(archive) &
+              " to " & absolutePath(dataDir) & "\n"
+  try:
+    let f = open(logPath, fmAppend)
+    f.write(entry)
+    f.close()
+  except:
+    discard  # Silently fail if log cannot be written
+
+proc readHistory*(): seq[string] =
+  ## Read restore history log
+  result = @[]
+  let logPath = getCurrentDir() / HISTORY_FILE
+  if not fileExists(logPath):
+    return
+  try:
+    let content = readFile(logPath)
+    for line in splitLines(content):
+      if line.len > 0:
+        result.add(line)
+  except:
+    discard
 
 proc backupDataDir*(dataDir: string, output: string, excludes: seq[string] = @[], compression: int = DEFAULT_COMPRESSION, verbose: bool = false): bool =
   ## Create a tar.gz backup of the data directory
@@ -162,17 +232,38 @@ proc backupDataDir*(dataDir: string, output: string, excludes: seq[string] = @[]
   echo "  Source:   ", dataDir
   return true
 
-proc restoreDataDir*(input: string, dataDir: string, verbose: bool = false): bool =
-  ## Restore from a tar.gz backup
+proc restoreDataDir*(input: string, dataDir: string, verbose: bool = false, dryRun: bool = false): bool =
+  ## Restore from a tar.gz backup.
+  ## When dryRun is true, only prints what would be done.
   if not fileExists(input):
     echo "ERROR: Backup file not found: ", input
     return false
 
+  let archiveSize = getFileSize(input)
+  let freeSpace = getFreeSpace(parentDir(dataDir))
+  let oldBackupPath = dataDir & ".old_" & $getTime().toUnix()
+
+  if dryRun:
+    echo "DRY-RUN: The following actions would be performed:"
+    echo "  1. Verify archive integrity: ", input
+    echo "  2. Move existing data to:    ", oldBackupPath
+    echo "  3. Extract archive to:       ", dataDir
+    echo "  Archive size: ", formatBytes(archiveSize)
+    if freeSpace >= 0:
+      echo "  Free space:   ", formatBytes(freeSpace)
+    else:
+      echo "  Free space:   unable to determine"
+    return true
+
+  # Check free space
+  if freeSpace >= 0 and freeSpace < archiveSize * 2:
+    echo "WARNING: Free space (", formatBytes(freeSpace), ") may be insufficient."
+    echo "         Archive is ", formatBytes(archiveSize), " — at least 2x is recommended."
+
   if dirExists(dataDir):
-    let backupOld = dataDir & ".old_" & $getTime().toUnix()
     if verbose:
-      echo "Moving existing data to: ", backupOld
-    moveDir(dataDir, backupOld)
+      echo "Moving existing data to: ", oldBackupPath
+    moveDir(dataDir, oldBackupPath)
 
   createDir(dataDir)
 
@@ -185,10 +276,18 @@ proc restoreDataDir*(input: string, dataDir: string, verbose: bool = false): boo
     echo "ERROR: tar extraction failed with exit code ", exitCode
     if outputStr.len > 0:
       echo outputStr
+    # Attempt rollback
+    if dirExists(oldBackupPath):
+      echo "Attempting rollback..."
+      removeDir(dataDir)
+      moveDir(oldBackupPath, dataDir)
+      echo "Rollback complete. Data restored to previous state."
     return false
 
   echo "Restored successfully from: ", input
   echo "  Target: ", dataDir
+  if dirExists(oldBackupPath):
+    echo "  Old data preserved at: ", oldBackupPath
   return true
 
 proc verifyArchive*(input: string, verbose: bool = false): bool =
@@ -276,6 +375,18 @@ proc cleanupOldBackups*(dataDir: string, keepLast: int = DEFAULT_KEEP_COUNT, ver
 
   echo "Cleanup complete."
 
+proc printHistory*() =
+  ## Display restore history
+  let entries = readHistory()
+  if entries.len == 0:
+    echo "No restore history found."
+    return
+  echo "Restore history:"
+  echo repeat("-", 80)
+  for entry in entries:
+    echo entry
+  echo repeat("-", 80)
+
 # =============================================================================
 # CLI Entry Point
 # =============================================================================
@@ -288,6 +399,8 @@ when isMainModule:
     excludes: seq[string] = @[]
     compression = DEFAULT_COMPRESSION
     verbose = false
+    dryRun = false
+    force = false
 
   for kind, key, val in getopt():
     case kind
@@ -311,6 +424,8 @@ when isMainModule:
           if compression < 0 or compression > 9:
             quit("ERROR: --level must be between 0 and 9", 1)
         except: quit("ERROR: --level must be a number", 1)
+      of "dry-run": dryRun = true
+      of "force", "f": force = true
       of "verbose", "v": verbose = true
       of "help", "h":
         echo HELP_TEXT
@@ -333,13 +448,27 @@ when isMainModule:
   of "restore":
     if target.len == 0:
       quit("ERROR: restore requires --input=<file.tar.gz>\nUse 'backup help' for usage.", 1)
-    echo "WARNING: This will REPLACE the data in: ", dataDir
-    echo "Continue? [y/N] "
-    let answer = readLine(stdin)
-    if answer.toLowerAscii() notin ["y", "yes"]:
-      quit("Restore cancelled", 0)
-    let ok = restoreDataDir(target, dataDir, verbose)
-    if not ok:
+
+    # Always verify first unless dry-run
+    if not dryRun:
+      echo "Verifying archive before restore..."
+      let vok = verifyArchive(target, verbose)
+      if not vok:
+        logRestore(target, dataDir, false)
+        quit("Restore aborted: archive verification failed.", 1)
+
+    if not dryRun and not force:
+      echo "WARNING: This will REPLACE the data in: ", dataDir
+      echo "Continue? [y/N] "
+      let answer = readLine(stdin)
+      if answer.toLowerAscii() notin ["y", "yes"]:
+        echo "Restore cancelled."
+        logRestore(target, dataDir, false, dryRun = false)
+        quit(0)
+
+    let ok = restoreDataDir(target, dataDir, verbose, dryRun)
+    logRestore(target, dataDir, ok, dryRun)
+    if not ok and not dryRun:
       quit("Restore failed", 1)
 
   of "list":
@@ -355,6 +484,9 @@ when isMainModule:
 
   of "cleanup":
     cleanupOldBackups(dataDir, keepCount, verbose)
+
+  of "history":
+    printHistory()
 
   of "help":
     echo HELP_TEXT

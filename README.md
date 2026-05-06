@@ -664,25 +664,33 @@ BARADB_LOG_LEVEL=debug ./build/baradadb
 ## Backup & Recovery
 
 BaraDB includes a built-in backup manager that creates compressed tar.gz
-snapshots of your data directory. The manager supports online backups
-(server does not need to stop), integrity verification, retention policies,
-and safe restore with automatic rollback protection.
+snapshots of your data directory. The manager supports **online backups**
+(server does not need to stop), **integrity verification**, **retention policies**,
+**dry-run restore previews**, **automatic rollback protection**, and a full
+**restore history log**.
 
 ### Quick Reference
 
 | Command | Purpose |
 |---------|---------|
 | `backup backup` | Create a new snapshot |
-| `backup restore` | Restore data from a snapshot |
+| `backup restore` | Restore data from a snapshot (auto-verifies first) |
 | `backup list` | Show all snapshots |
-| `backup verify` | Check archive integrity |
-| `backup cleanup` | Delete old snapshots |
+| `backup verify` | Check archive integrity without extracting |
+| `backup cleanup` | Delete old snapshots, keep N most recent |
+| `backup history` | Show log of all restore operations |
 | `backup help` | Show full help text |
 
 ### Build the Backup Tool
 
 ```bash
 nim c -o:build/backup src/barabadb/core/backup.nim
+```
+
+For production use, compile with release optimizations:
+
+```bash
+nim c -d:release -o:build/backup src/barabadb/core/backup.nim
 ```
 
 ### Creating Backups
@@ -742,7 +750,8 @@ Found 3 backup(s):
 ### Verifying Backups
 
 Always verify a snapshot before restoring, especially after transferring it
-over the network:
+over the network. The restore command does this automatically, but you can
+also check manually:
 
 ```bash
 ./build/backup verify --input=backup_1715011200.tar.gz
@@ -758,18 +767,55 @@ A corrupted archive prints an error and exits with code 1.
 
 ### Restoring from Backup
 
+The restore command follows a **safe restore workflow**:
+
+1. **Verify** archive integrity automatically
+2. **Prompt** for confirmation (unless `--force` is used)
+3. **Move** existing data to `data/server.old_<timestamp>`
+4. **Extract** the archive
+5. **Rollback** automatically if extraction fails
+6. **Log** the operation to `backup_history.log`
+
 > ⚠️ **WARNING:** Restore replaces the existing data directory. The old data
 > is automatically moved to `data/server.old_<timestamp>` before extraction.
+> If extraction fails, the tool attempts an automatic rollback to the old data.
+
+**Interactive restore** (asks for confirmation):
 
 ```bash
 ./build/backup restore --input=backup_1715011200.tar.gz
 ```
 
-You will be prompted for confirmation:
+You will be prompted:
 
 ```
+Verifying archive before restore...
+Archive is valid: backup_1715011200.tar.gz (12.45 MB)
 WARNING: This will REPLACE the data in: data/server
 Continue? [y/N]
+```
+
+**Force restore** — skip confirmation (for scripts and automation):
+
+```bash
+./build/backup restore --input=backup.tar.gz --force
+```
+
+**Dry-run restore** — preview what would happen without making changes:
+
+```bash
+./build/backup restore --input=backup.tar.gz --dry-run
+```
+
+Output:
+
+```
+DRY-RUN: The following actions would be performed:
+  1. Verify archive integrity: backup.tar.gz
+  2. Move existing data to:    data/server.old_1778099200
+  3. Extract archive to:       data/server
+  Archive size: 12.45 MB
+  Free space:   45.20 GB
 ```
 
 **Restore to a different data directory**:
@@ -778,10 +824,30 @@ Continue? [y/N]
 ./build/backup restore --input=backup.tar.gz --data-dir=data/recovered
 ```
 
-**Skip confirmation (scripting)** — pipe `y`:
+**Verbose restore** (shows all steps and disk space check):
 
 ```bash
-echo "y" | ./build/backup restore --input=backup.tar.gz
+./build/backup restore --input=backup.tar.gz --verbose
+```
+
+### Restore History
+
+Every restore operation is logged to `backup_history.log` in the current
+directory. View the history:
+
+```bash
+./build/backup history
+```
+
+Example output:
+
+```
+Restore history:
+--------------------------------------------------------------------------------
+[2026-05-06 23:15:00] SUCCESS restore from /backups/backup_1715011200.tar.gz to /opt/baradb/data/server
+[2026-05-06 22:30:15] FAILED  restore from /backups/backup_1715007000.tar.gz to /opt/baradb/data/server
+[2026-05-05 08:00:00] DRY-RUN restore from /backups/backup_1714900000.tar.gz to /opt/baradb/data/server
+--------------------------------------------------------------------------------
 ```
 
 ### Cleanup & Retention
@@ -799,18 +865,33 @@ Delete old snapshots automatically, keeping only the N most recent:
 ./build/backup cleanup --keep=3 --verbose
 ```
 
-### Full Option Reference
+### Automated Backups with Cron
 
-| Option | Short | Default | Description |
-|--------|-------|---------|-------------|
-| `--data-dir` | `-d` | `data/server` | Path to the data directory |
-| `--output` | `-o` | auto-generated | Destination path for new backup |
-| `--input` | `-i` | — | Source archive for restore/verify |
-| `--keep` | `-k` | `5` | Number of snapshots to retain |
-| `--exclude` | `-e` | — | Exclude pattern (repeatable) |
-| `--level` | `-l` | `6` | Gzip compression 0-9 |
-| `--verbose` | `-v` | off | Detailed progress output |
-| `--help` | `-h` | — | Show help text |
+Add to your crontab for daily backups at 2 AM:
+
+```bash
+# Edit crontab
+crontab -e
+
+# Add this line for daily backups
+0 2 * * * cd /opt/baradb && ./build/backup backup --output=/backups/baradb_$(date +\%F).tar.gz --level=6 >> /var/log/baradb-backup.log 2>&1
+
+# Weekly cleanup — keep last 7 snapshots
+0 3 * * 0 cd /opt/baradb && ./build/backup cleanup --keep=7 >> /var/log/baradb-backup.log 2>&1
+```
+
+### Disaster Recovery Best Practices
+
+1. **3-2-1 Rule:** Keep 3 copies, on 2 different media, with 1 offsite.
+2. **Verify regularly:** Run `backup verify` on archived snapshots monthly.
+3. **Test restores:** Perform a dry-run restore (`--dry-run`) weekly and a
+   full test restore to a staging environment monthly.
+4. **Monitor disk space:** The restore command warns if free space is less
+   than 2× the archive size.
+5. **Keep old data:** After restore, the previous data is preserved as
+   `data/server.old_<timestamp>`. Only delete it after confirming the new
+   data works.
+6. **Log audit trail:** Use `backup history` to track all restore operations.
 
 ### Nim API
 
@@ -832,12 +913,41 @@ for b in backups:
 # Verify without extracting
 let valid = verifyArchive("snapshot.tar.gz")
 
-# Restore (destructive!)
+# Restore with rollback protection
 let restored = restoreDataDir("snapshot.tar.gz", "data/server")
+
+# Dry-run restore — preview without changes
+let preview = restoreDataDir("snapshot.tar.gz", "data/server", dryRun = true)
 
 # Cleanup retention
 cleanupOldBackups("data/server", keepLast = 5)
+
+# Read restore history
+for entry in readHistory():
+  echo entry
 ```
+
+### Full Option Reference
+
+| Option | Short | Default | Description |
+|--------|-------|---------|-------------|
+| `--data-dir` | `-d` | `data/server` | Path to the data directory |
+| `--output` | `-o` | auto-generated | Destination path for new backup |
+| `--input` | `-i` | — | Source archive for restore/verify |
+| `--keep` | `-k` | `5` | Number of snapshots to retain |
+| `--exclude` | `-e` | — | Exclude pattern (repeatable) |
+| `--level` | `-l` | `6` | Gzip compression 0-9 |
+| `--dry-run` | — | off | Preview restore without changes |
+| `--force` | `-f` | off | Skip confirmation prompts |
+| `--verbose` | `-v` | off | Detailed progress output |
+| `--help` | `-h` | — | Show help text |
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Error (invalid args, missing files, verification or extraction failure) |
 
 ### Point-in-Time Recovery (WAL)
 
