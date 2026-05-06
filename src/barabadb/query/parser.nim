@@ -36,6 +36,8 @@ proc match(p: var Parser, kind: TokenKind): bool =
 
 proc parseExpr(p: var Parser): Node
 proc parseSelect(p: var Parser): Node
+proc parseStatement*(p: var Parser): Node
+proc parseCreateType(p: var Parser): Node
 
 proc parsePrimary(p: var Parser): Node =
   let tok = p.peek()
@@ -405,8 +407,50 @@ proc parseSelect(p: var Parser): Node =
 
 proc parseInsert(p: var Parser): Node =
   let tok = p.expect(tkInsert)
+  discard p.match(tkInto)  # optional INTO
   let target = p.expect(tkIdent).value
   result = Node(kind: nkInsert, insTarget: target, line: tok.line, col: tok.col)
+  result.insFields = @[]
+  result.insValues = @[]
+  result.insReturning = @[]
+
+  # Parse column list: (col1, col2, ...)
+  if p.peek().kind == tkLParen:
+    discard p.advance()
+    result.insFields.add(p.parseExpr())
+    while p.match(tkComma):
+      result.insFields.add(p.parseExpr())
+    discard p.expect(tkRParen)
+
+  # Parse VALUES
+  if p.match(tkValues):
+    while true:
+      var row: seq[Node] = @[]
+      if p.peek().kind == tkLParen:
+        discard p.advance()
+        row.add(p.parseExpr())
+        while p.match(tkComma):
+          row.add(p.parseExpr())
+        discard p.expect(tkRParen)
+      else:
+        row.add(p.parseExpr())
+      result.insValues.add(Node(kind: nkArrayLit, arrayElems: row))
+      if p.peek().kind != tkComma:
+        break
+      discard p.advance()
+
+  # Parse ON CONFLICT
+  if p.peek().kind == tkOn:
+    discard p.advance()
+    if p.peek().kind == tkIdent and p.peek().value.toLower() == "conflict":
+      discard p.advance()
+      result.insConflict = p.parseExpr()
+
+  # Parse RETURNING
+  if p.match(tkReturning):
+    result.insReturning.add(p.parseExpr())
+    while p.match(tkComma):
+      result.insReturning.add(p.parseExpr())
 
 proc parseUpdate(p: var Parser): Node =
   let tok = p.expect(tkUpdate)
@@ -429,6 +473,11 @@ proc parseUpdate(p: var Parser): Node =
         binRight: v))
   if p.match(tkWhere):
     result.updWhere = Node(kind: nkWhere, whereExpr: p.parseExpr())
+  if p.match(tkReturning):
+    result.updReturning = @[]
+    result.updReturning.add(p.parseExpr())
+    while p.match(tkComma):
+      result.updReturning.add(p.parseExpr())
 
 proc parseDelete(p: var Parser): Node =
   let tok = p.expect(tkDelete)
@@ -437,25 +486,25 @@ proc parseDelete(p: var Parser): Node =
   result = Node(kind: nkDelete, delTarget: target, line: tok.line, col: tok.col)
   if p.match(tkWhere):
     result.delWhere = Node(kind: nkWhere, whereExpr: p.parseExpr())
+  if p.match(tkReturning):
+    result.delReturning = @[]
+    result.delReturning.add(p.parseExpr())
+    while p.match(tkComma):
+      result.delReturning.add(p.parseExpr())
 
 proc parseCreateType(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkType)
   let name = p.expect(tkIdent).value
   result = Node(kind: nkCreateType, ctName: name, line: tok.line, col: tok.col)
-  # Parse bases (EXTENDING)
   result.ctBases = @[]
-  if p.match(tkIdent):  # "extending" keyword mapped to ident
-    # Check if the ident is "extending"
-    # For now, just accept bases in braces
+  if p.match(tkIdent):
     discard
-  # Parse body
   if p.match(tkLBrace):
     result.ctProperties = @[]
     result.ctLinks = @[]
     while p.peek().kind != tkRbrace and p.peek().kind != tkEof:
-      discard p.match(tkComma)  # optional comma separator
-      # Parse property or link
+      discard p.match(tkComma)
       var isRequired = false
       var isMulti = false
       if p.peek().kind == tkRequired:
@@ -464,11 +513,9 @@ proc parseCreateType(p: var Parser): Node =
       if p.peek().kind == tkMulti:
         discard p.advance()
         isMulti = true
-
       let fieldTok = p.expect(tkIdent)
-      # Check for link or property
-      if p.peek().kind == tkArrow:  # -> means link
-        discard p.advance()  # consume ->
+      if p.peek().kind == tkArrow:
+        discard p.advance()
         let target = p.expect(tkIdent).value
         result.ctLinks.add(Node(kind: nkLinkDef,
           ldName: fieldTok.value, ldTarget: target,
@@ -484,13 +531,221 @@ proc parseCreateType(p: var Parser): Node =
       discard p.match(tkSemicolon)
     discard p.expect(tkRbrace)
 
+proc parseCreateTable(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  result = Node(kind: nkCreateTable, line: tok.line, col: tok.col)
+  result.crtColumns = @[]
+  result.crtConstraints = @[]
+
+  # Optional IF NOT EXISTS
+  if p.peek().kind == tkIf:
+    discard p.advance()
+    discard p.expect(tkNot)
+    discard p.expect(tkExists)
+    result.crtIfNotExists = true
+
+  discard p.expect(tkTable)
+  if p.peek().kind == tkIdent and p.peek().value.toLower() == "if":
+    discard p.advance()  # if
+    discard p.expect(tkNot)
+    discard p.expect(tkExists)
+    result.crtIfNotExists = true
+
+  result.crtName = p.expect(tkIdent).value
+  discard p.expect(tkLParen)
+
+  while p.peek().kind != tkRParen and p.peek().kind != tkEof:
+    discard p.match(tkComma)
+
+    # Check if this is a table-level constraint
+    if p.peek().kind in {tkPrimary, tkForeign, tkUnique, tkCheck}:
+      let cst = Node(kind: nkConstraintDef)
+      cst.cstColumns = @[]; cst.cstRefColumns = @[]
+      if p.match(tkPrimary):
+        discard p.expect(tkKey)
+        cst.cstType = "pkey"
+        if p.peek().kind == tkLParen:
+          discard p.advance()
+          cst.cstColumns.add(p.expect(tkIdent).value)
+          while p.match(tkComma):
+            cst.cstColumns.add(p.expect(tkIdent).value)
+          discard p.expect(tkRParen)
+      elif p.match(tkForeign):
+        discard p.expect(tkKey)
+        cst.cstType = "fkey"
+        if p.peek().kind == tkLParen:
+          discard p.advance()
+          cst.cstColumns.add(p.expect(tkIdent).value)
+          while p.match(tkComma):
+            cst.cstColumns.add(p.expect(tkIdent).value)
+          discard p.expect(tkRParen)
+        discard p.expect(tkReferences)
+        cst.cstRefTable = p.expect(tkIdent).value
+        if p.peek().kind == tkLParen:
+          discard p.advance()
+          cst.cstRefColumns.add(p.expect(tkIdent).value)
+          while p.match(tkComma):
+            cst.cstRefColumns.add(p.expect(tkIdent).value)
+          discard p.expect(tkRParen)
+        if p.peek().kind == tkOn:
+          discard p.advance()
+          if p.peek().kind == tkDelete:
+            discard p.advance()
+            if p.peek().kind == tkCascade:
+              discard p.advance()
+              cst.cstOnDelete = "CASCADE"
+            elif p.peek().kind == tkSet:
+              discard p.advance()
+              discard p.match(tkNull)
+              cst.cstOnDelete = "SET NULL"
+      elif p.match(tkUnique):
+        cst.cstType = "unique"
+        if p.peek().kind == tkLParen:
+          discard p.advance()
+          cst.cstColumns.add(p.expect(tkIdent).value)
+          while p.match(tkComma):
+            cst.cstColumns.add(p.expect(tkIdent).value)
+          discard p.expect(tkRParen)
+      elif p.match(tkCheck):
+        cst.cstType = "check"
+        discard p.expect(tkLParen)
+        cst.cstCheck = p.parseExpr()
+        discard p.expect(tkRParen)
+      result.crtConstraints.add(cst)
+      continue
+
+    # Parse column definition
+    let colName = p.expect(tkIdent).value
+    var colType = ""
+    if p.peek().kind == tkIdent:
+      colType = p.advance().value.toUpper()
+      if p.peek().kind == tkLParen:
+        discard p.advance()
+        let size = p.expect(tkIntLit).value
+        colType &= "(" & size & ")"
+        discard p.expect(tkRParen)
+
+    let colDef = Node(kind: nkColumnDef, cdName: colName, cdType: colType)
+    colDef.cdConstraints = @[]
+
+    # Parse column constraints
+    while p.peek().kind in {tkPrimary, tkNot, tkNull, tkUnique, tkCheck, tkDefault, tkReferences}:
+      let cst = Node(kind: nkConstraintDef)
+      cst.cstColumns = @[colName]; cst.cstRefColumns = @[]
+      if p.match(tkPrimary):
+        discard p.expect(tkKey)
+        cst.cstType = "pkey"
+      elif p.match(tkNot):
+        discard p.expect(tkNull)
+        cst.cstType = "notnull"
+      elif p.match(tkNull):
+        cst.cstType = "null"
+      elif p.match(tkUnique):
+        cst.cstType = "unique"
+      elif p.match(tkCheck):
+        cst.cstType = "check"
+        discard p.expect(tkLParen)
+        cst.cstCheck = p.parseExpr()
+        discard p.expect(tkRParen)
+      elif p.match(tkDefault):
+        cst.cstType = "default"
+        cst.cstDefault = p.parseExpr()
+      elif p.match(tkReferences):
+        cst.cstType = "fkey"
+        cst.cstRefTable = p.expect(tkIdent).value
+        if p.peek().kind == tkLParen:
+          discard p.advance()
+          cst.cstRefColumns.add(p.expect(tkIdent).value)
+          while p.match(tkComma):
+            cst.cstRefColumns.add(p.expect(tkIdent).value)
+          discard p.expect(tkRParen)
+        if p.peek().kind == tkOn:
+          discard p.advance()
+          if p.peek().kind == tkDelete:
+            discard p.advance()
+            if p.peek().kind == tkCascade:
+              discard p.advance()
+              cst.cstOnDelete = "CASCADE"
+      colDef.cdConstraints.add(cst)
+    result.crtColumns.add(colDef)
+
+  discard p.expect(tkRParen)
+
+proc parseDropTable(p: var Parser): Node =
+  let tok = p.expect(tkDrop)
+  result = Node(kind: nkDropTable, line: tok.line, col: tok.col)
+  if p.peek().kind == tkTable:
+    discard p.advance()
+  if p.peek().kind == tkIdent and p.peek().value.toLower() == "if":
+    discard p.advance()
+    discard p.expect(tkExists)
+    result.drtIfExists = true
+  result.drtName = p.expect(tkIdent).value
+
+proc parseAlterTable(p: var Parser): Node =
+  let tok = p.expect(tkAlter)
+  discard p.expect(tkTable)
+  result = Node(kind: nkAlterTable, line: tok.line, col: tok.col)
+  result.altName = p.expect(tkIdent).value
+  result.altOps = @[]
+  discard p.match(tkAdd)  # or tkRename
+
+proc parseBeginTxn(p: var Parser): Node =
+  let tok = p.expect(tkBegin)
+  result = Node(kind: nkBeginTxn, line: tok.line, col: tok.col)
+  discard p.match(tkIdent)  # optional TRANSACTION / WORK
+  result.btxnMode = ""
+
+proc parseCommitTxn(p: var Parser): Node =
+  let tok = p.expect(tkCommit)
+  result = Node(kind: nkCommitTxn, line: tok.line, col: tok.col)
+  discard p.match(tkIdent)  # optional TRANSACTION / WORK
+
+proc parseRollbackTxn(p: var Parser): Node =
+  let tok = p.expect(tkRollback)
+  result = Node(kind: nkRollbackTxn, line: tok.line, col: tok.col)
+  discard p.match(tkIdent)  # optional TRANSACTION / WORK
+
+proc parseExplain(p: var Parser): Node =
+  let tok = p.expect(tkExplain)
+  result = Node(kind: nkExplainStmt, line: tok.line, col: tok.col)
+  if p.peek().kind == tkIdent and p.peek().value.toLower() == "analyze":
+    discard p.advance()
+    result.expAnalyze = true
+  result.expStmt = p.parseStatement()
+
 proc parseStatement*(p: var Parser): Node =
   case p.peek().kind
   of tkWith, tkSelect: p.parseSelect()
   of tkInsert: p.parseInsert()
   of tkUpdate: p.parseUpdate()
   of tkDelete: p.parseDelete()
-  of tkCreate: p.parseCreateType()
+  of tkCreate:
+    if p.pos + 1 < p.tokens.len:
+      let next = p.tokens[p.pos + 1]
+      if next.kind == tkTable or
+         (next.kind == tkIdent and next.value.toLower() == "if"):
+        p.parseCreateTable()
+      else:
+        p.parseCreateType()
+    else:
+      p.parseCreateType()
+  of tkDrop:
+    if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkTable:
+      p.parseDropTable()
+    else:
+      let tok = p.advance()
+      Node(kind: nkNullLit, line: tok.line, col: tok.col)
+  of tkAlter:
+    if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkTable:
+      p.parseAlterTable()
+    else:
+      let tok = p.advance()
+      Node(kind: nkNullLit, line: tok.line, col: tok.col)
+  of tkBegin: p.parseBeginTxn()
+  of tkCommit: p.parseCommitTxn()
+  of tkRollback: p.parseRollbackTxn()
+  of tkExplain: p.parseExplain()
   else:
     let tok = p.advance()
     Node(kind: nkNullLit, line: tok.line, col: tok.col)

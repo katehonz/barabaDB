@@ -11,6 +11,7 @@ benchmarks/bench_all
 benchmarks/compare
 clients/nim/tests/test_client
 src/baradadb
+src/barabadb/core/raft
 
 # Temp
 *.tmp

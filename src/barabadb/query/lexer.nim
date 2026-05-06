@@ -75,6 +75,21 @@ type
     tkLike
     tkILike
     tkReturning
+    tkPrimary
+    tkKey
+    tkForeign
+    tkReferences
+    tkCascade
+    tkUnique
+    tkCheck
+    tkDefault
+    tkAdd
+    tkColumn
+    tkRename
+    tkBegin
+    tkCommit
+    tkRollback
+    tkExplain
     tkCount
     tkSum
     tkAvg
@@ -203,6 +218,21 @@ const keywords*: Table[string, TokenKind] = {
   "like": tkLike,
   "ilike": tkILike,
   "returning": tkReturning,
+  "primary": tkPrimary,
+  "key": tkKey,
+  "foreign": tkForeign,
+  "references": tkReferences,
+  "cascade": tkCascade,
+  "unique": tkUnique,
+  "check": tkCheck,
+  "default": tkDefault,
+  "add": tkAdd,
+  "column": tkColumn,
+  "rename": tkRename,
+  "begin": tkBegin,
+  "commit": tkCommit,
+  "rollback": tkRollback,
+  "explain": tkExplain,
   "count": tkCount,
   "sum": tkSum,
   "avg": tkAvg,

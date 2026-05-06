@@ -2,7 +2,6 @@
 import std/asyncdispatch
 import std/asyncnet
 import std/strutils
-import std/re
 import std/os
 import std/endians
 import config
@@ -10,6 +9,7 @@ import ../protocol/wire
 import ../query/lexer
 import ../query/parser
 import ../query/ast
+import ../query/executor
 import ../storage/lsm
 
 type
@@ -17,6 +17,7 @@ type
     config: BaraConfig
     running: bool
     db: LSMTree
+    ctx: ExecutionContext
 
   ClientConnection = ref object
     socket: AsyncSocket
@@ -24,7 +25,8 @@ type
 
 proc newServer*(config: BaraConfig): Server =
   let dataDir = config.dataDir / "server"
-  Server(config: config, running: false, db: newLSMTree(dataDir))
+  let db = newLSMTree(dataDir)
+  Server(config: config, running: false, db: db, ctx: newExecutionContext(db))
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
@@ -51,85 +53,10 @@ proc parseHeader(data: string): (bool, MessageHeader) =
   return (true, MessageHeader(kind: kind, length: length, requestId: requestId))
 
 # ----------------------------------------------------------------------
-# Query Execution
+# Query Execution (pipeline-based)
 # ----------------------------------------------------------------------
 
-proc extractStringLiteral(node: Node): string =
-  if node == nil:
-    return ""
-  case node.kind
-  of nkStringLit: return node.strVal
-  of nkIdent: return node.identName
-  of nkIntLit: return $node.intVal
-  of nkBinOp:
-    if node.binOp == bkEq and node.binLeft != nil and node.binRight != nil:
-      # Accept any identifier on the left side (e.g., key = 'x', name = 'y')
-      if node.binLeft.kind == nkIdent:
-        return extractStringLiteral(node.binRight)
-      if node.binRight.kind == nkIdent:
-        return extractStringLiteral(node.binLeft)
-    return ""
-  else: return ""
-
-proc execSelect(db: LSMTree, astNode: Node): QueryResult =
-  result = QueryResult(columns: @["key", "value"], rows: @[])
-
-  var keyFilter = ""
-  if astNode.selWhere != nil and astNode.selWhere.whereExpr != nil:
-    let whereExpr = astNode.selWhere.whereExpr
-    keyFilter = extractStringLiteral(whereExpr)
-
-  if keyFilter != "":
-    # Point read
-    let (found, val) = db.get(keyFilter)
-    if found:
-      var row: seq[WireValue] = @[]
-      row.add(WireValue(kind: fkString, strVal: keyFilter))
-      row.add(WireValue(kind: fkBytes, bytesVal: val))
-      result.rows.add(row)
-      result.rowCount = 1
-  else:
-    # Full scan of memory tables
-    for entry in db.scanMemTable():
-      if entry.deleted:
-        continue
-      var row: seq[WireValue] = @[]
-      row.add(WireValue(kind: fkString, strVal: entry.key))
-      row.add(WireValue(kind: fkBytes, bytesVal: entry.value))
-      result.rows.add(row)
-    result.rowCount = result.rows.len
-
-proc execInsert(db: LSMTree, query: string): QueryResult =
-  result = QueryResult()
-  # Manual parsing for simple INSERT: INSERT table { field := 'value' }
-  # We use the value as the key for simple KV semantics
-  let pattern = re"INSERT\s+(\w+)\s*\{\s*(\w+)\s*:=\s*'([^']+)'\s*\}"
-  var matches: array[3, string]
-  if query.match(pattern, matches):
-    let key = matches[2]   # use the value as key
-    let value = matches[2]
-    db.put(key, cast[seq[byte]](value))
-    result.affectedRows = 1
-  else:
-    # Try simpler pattern: INSERT table { field := value }
-    let pattern2 = re"INSERT\s+(\w+)\s*\{\s*(\w+)\s*:=\s*(\w+)\s*\}"
-    var matches2: array[3, string]
-    if query.match(pattern2, matches2):
-      let key = matches2[2]
-      let value = matches2[2]
-      db.put(key, cast[seq[byte]](value))
-      result.affectedRows = 1
-
-proc execDelete(db: LSMTree, astNode: Node): QueryResult =
-  result = QueryResult()
-  var keyFilter = ""
-  if astNode.delWhere != nil and astNode.delWhere.whereExpr != nil:
-    keyFilter = extractStringLiteral(astNode.delWhere.whereExpr)
-  if keyFilter != "":
-    db.delete(keyFilter)
-    result.affectedRows = 1
-
-proc executeQuery(db: LSMTree, query: string): (bool, QueryResult, string) =
+proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string): (bool, QueryResult, string) =
   try:
     let tokens = tokenize(query)
     let astNode = parse(tokens)
@@ -139,15 +66,17 @@ proc executeQuery(db: LSMTree, query: string): (bool, QueryResult, string) =
 
     let stmt = astNode.stmts[0]
     case stmt.kind
-    of nkSelect:
-      let qr = execSelect(db, stmt)
-      return (true, qr, "")
-    of nkInsert:
-      let qr = execInsert(db, query)
-      return (true, qr, "")
-    of nkDelete:
-      let qr = execDelete(db, stmt)
-      return (true, qr, "")
+    of nkSelect, nkInsert, nkUpdate, nkDelete, nkCreateTable, nkDropTable,
+       nkCreateType, nkBeginTxn, nkCommitTxn, nkRollbackTxn, nkExplainStmt:
+      let (success, errMsg, affectedRows) = executor.executeQuery(ctx, astNode)
+      if success:
+        var qr = QueryResult(affectedRows: affectedRows, rowCount: affectedRows)
+        if stmt.kind == nkSelect:
+          qr.columns = @["key", "value"]
+          qr.rows = @[]
+        return (true, qr, "")
+      else:
+        return (false, QueryResult(), errMsg)
     else:
       return (false, QueryResult(), "Unsupported statement type: " & $stmt.kind)
   except Exception as e:
@@ -237,7 +166,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         let queryStr = readString(cast[seq[byte]](payload), pos)
         echo "[", clientId, "] Query: ", queryStr
 
-        let (success, result, errorMsg) = executeQuery(server.db, queryStr)
+        let (success, result, errorMsg) = executeQuery(server.db, server.ctx, queryStr)
         if success:
           if result.rows.len > 0:
             let dataMsg = serializeResult(result, header.requestId)

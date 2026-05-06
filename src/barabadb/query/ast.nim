@@ -11,8 +11,15 @@ type
     nkCreateType
     nkDropType
     nkAlterType
+    nkCreateTable
+    nkDropTable
+    nkAlterTable
     nkCreateIndex
     nkDropIndex
+    nkBeginTxn
+    nkCommitTxn
+    nkRollbackTxn
+    nkExplainStmt
 
     # Clauses
     nkFrom
@@ -63,10 +70,11 @@ type
     # Join
     nkJoin
 
-    # Type definitions
+    # Type definitions / DDL
     nkPropertyDef
     nkLinkDef
     nkIndexDef
+    nkColumnDef
     nkConstraintDef
 
     # Top-level
@@ -157,6 +165,41 @@ type
     of nkAlterType:
       atName*: string
       atOps*: seq[Node]
+    of nkCreateTable:
+      crtName*: string
+      crtColumns*: seq[Node]
+      crtConstraints*: seq[Node]
+      crtIfNotExists*: bool
+    of nkDropTable:
+      drtName*: string
+      drtIfExists*: bool
+    of nkAlterTable:
+      altName*: string
+      altOps*: seq[Node]
+    of nkColumnDef:
+      cdName*: string
+      cdType*: string
+      cdConstraints*: seq[Node]
+    of nkConstraintDef:
+      cstName*: string
+      cstType*: string
+      cstExpr*: Node
+      cstColumns*: seq[string]
+      cstRefTable*: string
+      cstRefColumns*: seq[string]
+      cstOnDelete*: string
+      cstOnUpdate*: string
+      cstCheck*: Node
+      cstDefault*: Node
+    of nkBeginTxn:
+      btxnMode*: string
+    of nkCommitTxn:
+      ctxnChain*: bool
+    of nkRollbackTxn:
+      rtxnChain*: bool
+    of nkExplainStmt:
+      expStmt*: Node
+      expAnalyze*: bool
     of nkCreateIndex:
       ciTarget*: string
       ciName*: string
@@ -301,9 +344,6 @@ type
       idName*: string
       idExpr*: Node
       idKind*: IndexKind
-    of nkConstraintDef:
-      cdName*: string
-      cdExpr*: Node
     of nkStatementList:
       stmts*: seq[Node]
 
@@ -314,5 +354,9 @@ proc newNode*(kind: NodeKind, line, col: int = 0): Node =
   of nkInsert: result.insFields = @[]; result.insValues = @[]
   of nkUpdate: result.updSet = @[]
   of nkDelete: discard
+  of nkCreateTable: result.crtColumns = @[]; result.crtConstraints = @[]
+  of nkAlterTable: result.altOps = @[]
+  of nkColumnDef: result.cdConstraints = @[]
+  of nkConstraintDef: result.cstColumns = @[]; result.cstRefColumns = @[]
   of nkStatementList: result.stmts = @[]
   else: discard
