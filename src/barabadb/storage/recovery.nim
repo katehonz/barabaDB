@@ -2,6 +2,7 @@
 import std/streams
 import std/os
 import ../storage/wal
+import ../storage/lsm
 
 type
   RecoveryState* = enum
@@ -50,7 +51,6 @@ proc scanWAL*(rec: CrashRecovery): seq[RecoveredEntry] =
   if stream == nil:
     return
 
-  # Read magic and version
   var magic: uint32 = 0
   var version: uint32 = 0
   if stream.readData(addr magic, 4) != 4:
@@ -67,7 +67,6 @@ proc scanWAL*(rec: CrashRecovery): seq[RecoveredEntry] =
   var txnId: uint64 = 0
   var entryCount = 0
 
-  # Read entries
   while not stream.atEnd():
     var kind: uint8 = 0
     var timestamp: uint64 = 0
@@ -110,16 +109,11 @@ proc analyze*(rec: CrashRecovery): RecoveryResult =
     rec.result = RecoveryResult(state: recDone, applied: false)
     return rec.result
 
-  # Find last successful checkpoint or committed txn
   var lastCommitted: uint64 = 0
-  var uncommittedEntries: seq[RecoveredEntry] = @[]
-
   for entry in rec.entries:
     if entry.txnId > lastCommitted:
       lastCommitted = entry.txnId
 
-  # Entries with txnId < lastCommitted are committed -> redo
-  # Entries with txnId == lastCommitted and no commit seen -> undo
   var redoCount = 0
   var undoCount = 0
 
@@ -141,15 +135,35 @@ proc analyze*(rec: CrashRecovery): RecoveryResult =
 
   return rec.result
 
-proc recover*(rec: CrashRecovery): RecoveryResult =
+proc recover*(rec: CrashRecovery, db: LSMTree = nil): RecoveryResult =
   let result = rec.analyze()
 
   if not result.applied:
     return result
 
-  # In a real system, would redo committed entries and undo uncommitted ones
-  # For now, provide the analysis result
-  return result
+  if db == nil:
+    return result
+
+  # REDO: apply committed entries (txnId < lastCommitted) to LSM-Tree
+  var redoCount = 0
+  var undoCount = 0
+  for entry in rec.entries:
+    if entry.txnId < result.lastTxn:
+      # Committed — redo
+      if entry.isDelete:
+        db.delete(entry.key)
+      else:
+        db.put(entry.key, entry.value)
+      inc redoCount
+    else:
+      # Uncommitted — skip (undo)
+      inc undoCount
+
+  rec.result.redone = redoCount
+  rec.result.undone = undoCount
+  rec.result.state = recDone
+
+  return rec.result
 
 proc totalEntries*(rec: CrashRecovery): int = rec.entries.len
 

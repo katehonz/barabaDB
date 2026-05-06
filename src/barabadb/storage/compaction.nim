@@ -3,6 +3,7 @@ import std/tables
 import std/algorithm
 import std/os
 import std/math
+import ../storage/lsm
 
 const
   MaxLevel* = 7
@@ -68,25 +69,63 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
     return CompactionResult()
 
   var entriesRead = 0
-  var allEntries: seq[(string, seq[byte], uint64, bool)] = @[]
+  var allEntries: seq[Entry] = @[]
 
+  # Read all entries from SSTable files
   for t in tables:
-    entriesRead += t.entryCount
-    # In real impl, would read SSTable file and merge
-    # For now, simulate the merge
+    try:
+      let sst = loadSSTable(t.path)
+      for key, offset in sst.index:
+        let (found, entry) = readSSTableEntry(sst, key)
+        if found:
+          allEntries.add(entry)
+          inc entriesRead
+    except:
+      discard
 
+  # Sort by key, then by timestamp (newest first for dedup)
+  allEntries.sort(proc(a, b: Entry): int =
+    let kc = cmp(a.key, b.key)
+    if kc != 0: return kc
+    return cmp(b.timestamp, a.timestamp)  # newest first
+  )
+
+  # Deduplicate: keep only the newest version of each key
+  var merged: seq[Entry] = @[]
+  var lastKey = ""
+  for entry in allEntries:
+    if entry.key != lastKey:
+      merged.add(entry)
+      lastKey = entry.key
+
+  # Filter out tombstones (deleted entries)
+  var final: seq[Entry] = @[]
+  for entry in merged:
+    if not entry.deleted:
+      final.add(entry)
+
+  # Write merged SSTable
   let outputPath = cs.dataDir / "sstables" / ("level_" & $level & "_" & $tables[0].createdAt & ".sst")
+  var sst = writeSSTable(final, outputPath, level + 1)
+
   let outputMeta = SSTableMeta(
     path: outputPath,
     level: level + 1,
-    minKey: tables[0].minKey,
-    maxKey: tables[^1].maxKey,
-    entryCount: entriesRead,
-    sizeBytes: entriesRead * 64,  # estimate
+    minKey: sst.minKey,
+    maxKey: sst.maxKey,
+    entryCount: final.len,
+    sizeBytes: final.len * 64,
     createdAt: tables[^1].createdAt,
   )
 
-  # Remove old tables from level
+  # Remove old SSTable files
+  for t in tables:
+    try:
+      removeFile(t.path)
+    except:
+      discard
+
+  # Update level arrays
   var newTables: seq[SSTableMeta] = @[]
   for t in cs.levels[level]:
     var found = false
@@ -98,7 +137,6 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
       newTables.add(t)
   cs.levels[level] = newTables
 
-  # Add to next level
   if level + 1 < MaxLevel:
     cs.levels[level + 1].add(outputMeta)
 
@@ -106,7 +144,7 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
     inputTables: tables,
     outputTables: @[outputMeta],
     entriesRead: entriesRead,
-    entriesWritten: entriesRead,
+    entriesWritten: final.len,
   )
 
 proc levelCount*(cs: CompactionStrategy): int =

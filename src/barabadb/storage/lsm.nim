@@ -31,13 +31,13 @@ type
 
   SSTable* = object
     path*: string
-    index: Table[string, int64]  # key -> file offset in data block
-    bloom: BloomFilter
-    level: int
-    minKey: string
-    maxKey: string
-    entryCount: int
-    mmapFile: MmapFile
+    index*: Table[string, int64]
+    bloom*: BloomFilter
+    level*: int
+    minKey*: string
+    maxKey*: string
+    entryCount*: int
+    mmapFile*: MmapFile
 
   LSMTree* = ref object
     dir: string

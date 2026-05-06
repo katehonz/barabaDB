@@ -9,6 +9,8 @@ binDir        = "build"
 
 # Dependencies
 requires "nim >= 2.2.0"
+requires "hunos >= 1.2.0"
+requires "jwt >= 2.1.0"
 
 # Tasks
 task build_debug, "Build debug version":
