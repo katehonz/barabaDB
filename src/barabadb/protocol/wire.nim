@@ -260,6 +260,31 @@ proc makeQueryMessage*(requestId: uint32, query: string): seq[byte] =
   )
   return serializeMessage(msg)
 
+proc makeQueryParamsMessage*(requestId: uint32, query: string, params: seq[WireValue]): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(query)
+  payload.add(byte(rfBinary))
+  payload.writeUint32(uint32(params.len))
+  for p in params:
+    payload.serializeValue(p)
+
+  var msg = WireMessage(
+    header: MessageHeader(kind: mkQueryParams, length: uint32(payload.len), requestId: requestId),
+    payload: payload,
+  )
+  return serializeMessage(msg)
+
+proc readQueryParamsMessage*(payload: openArray[byte]): (string, seq[WireValue]) =
+  var pos = 0
+  let queryStr = readString(payload, pos)
+  discard payload[pos]  # format byte
+  pos += 1
+  let paramCount = int(readUint32(payload, pos))
+  var params: seq[WireValue] = @[]
+  for i in 0..<paramCount:
+    params.add(deserializeValue(payload, pos))
+  return (queryStr, params)
+
 proc makeReadyMessage*(requestId: uint32): seq[byte] =
   var payload: seq[byte] = @[]
   payload.add(0'u8)  # idle state

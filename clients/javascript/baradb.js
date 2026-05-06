@@ -131,12 +131,131 @@ class Client {
     const view = new DataView(payload.buffer);
     view.setUint32(0, queryBytes.length, false); // big-endian
     payload.set(queryBytes, 4);
-    payload[4 + queryBytes.length] = ResultFormat.JSON;
+    payload[4 + queryBytes.length] = ResultFormat.BINARY;
 
     const msg = this._build(MsgKind.QUERY, payload);
     // await this.socket.write(msg);
+    // const header = await this.socket.read(12);
+    // ... parse response
 
     return new QueryResult();
+  }
+
+  /** Parse server response from header + payload buffers */
+  _parseResponse(header, payload) {
+    const view = new DataView(header.buffer);
+    const kind = view.getUint32(0, false);
+    const len = view.getUint32(4, false);
+    const reqId = view.getUint32(8, false);
+
+    const result = new QueryResult();
+
+    if (kind === MsgKind.ERROR && payload.length >= 8) {
+      const code = new DataView(payload.buffer).getUint32(0, false);
+      const msgLen = new DataView(payload.buffer).getUint32(4, false);
+      const msg = new TextDecoder().decode(payload.slice(8, 8 + msgLen));
+      throw new Error(`BaraDB error ${code}: ${msg}`);
+    }
+
+    if (kind === MsgKind.DATA) {
+      let pos = 0;
+      const colCount = new DataView(payload.buffer).getUint32(pos, false);
+      pos += 4;
+      const cols = [];
+      for (let i = 0; i < colCount; i++) {
+        const sLen = new DataView(payload.buffer).getUint32(pos, false);
+        pos += 4;
+        cols.push(new TextDecoder().decode(payload.slice(pos, pos + sLen)));
+        pos += sLen;
+      }
+      result.columns = cols;
+      const rowCount = new DataView(payload.buffer).getUint32(pos, false);
+      pos += 4;
+      for (let r = 0; r < rowCount; r++) {
+        const row = [];
+        for (let c = 0; c < colCount; c++) {
+          row.push(this._readValue(payload, pos));
+          pos = this._lastReadPos;
+        }
+        result.rows.push(row);
+      }
+      result.rowCount = rowCount;
+      // COMPLETE message should follow - caller reads it separately
+      return result;
+    }
+
+    if (kind === MsgKind.COMPLETE && payload.length >= 4) {
+      result.affectedRows = new DataView(payload.buffer).getUint32(0, false);
+    }
+
+    return result;
+  }
+
+  _readValue(payload, pos) {
+    const kind = payload[pos];
+    pos++;
+    let result;
+    switch (kind) {
+      case FieldKind.NULL: result = null; break;
+      case FieldKind.BOOL: result = payload[pos] !== 0; pos++; break;
+      case FieldKind.INT8: result = payload[pos] << 24 >> 24; pos++; break;
+      case FieldKind.INT16: result = new DataView(payload.buffer).getInt16(pos, false); pos += 2; break;
+      case FieldKind.INT32: result = new DataView(payload.buffer).getInt32(pos, false); pos += 4; break;
+      case FieldKind.INT64: result = new DataView(payload.buffer).getBigInt64(pos, false); pos += 8; break;
+      case FieldKind.FLOAT32: result = new DataView(payload.buffer).getFloat32(pos, false); pos += 4; break;
+      case FieldKind.FLOAT64: result = new DataView(payload.buffer).getFloat64(pos, false); pos += 8; break;
+      case FieldKind.STRING: {
+        const len = new DataView(payload.buffer).getUint32(pos, false);
+        pos += 4;
+        result = new TextDecoder().decode(payload.slice(pos, pos + len));
+        pos += len;
+        break;
+      }
+      case FieldKind.BYTES: {
+        const len = new DataView(payload.buffer).getUint32(pos, false);
+        pos += 4;
+        result = payload.slice(pos, pos + len);
+        pos += len;
+        break;
+      }
+      case FieldKind.ARRAY: {
+        const count = new DataView(payload.buffer).getUint32(pos, false);
+        pos += 4;
+        result = [];
+        for (let i = 0; i < count; i++) {
+          result.push(this._readValue(payload, pos));
+          pos = this._lastReadPos;
+        }
+        break;
+      }
+      case FieldKind.OBJECT: {
+        const count = new DataView(payload.buffer).getUint32(pos, false);
+        pos += 4;
+        result = {};
+        for (let i = 0; i < count; i++) {
+          const kLen = new DataView(payload.buffer).getUint32(pos, false);
+          pos += 4;
+          const key = new TextDecoder().decode(payload.slice(pos, pos + kLen));
+          pos += kLen;
+          result[key] = this._readValue(payload, pos);
+          pos = this._lastReadPos;
+        }
+        break;
+      }
+      case FieldKind.VECTOR: {
+        const dim = new DataView(payload.buffer).getUint32(pos, false);
+        pos += 4;
+        result = [];
+        for (let i = 0; i < dim; i++) {
+          result.push(new DataView(payload.buffer).getFloat32(pos, false));
+          pos += 4;
+        }
+        break;
+      }
+      default: result = null;
+    }
+    this._lastReadPos = pos;
+    return result;
   }
 
   /** Execute a BaraQL statement (INSERT, UPDATE, DELETE) */

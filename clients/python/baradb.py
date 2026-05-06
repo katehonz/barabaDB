@@ -146,7 +146,9 @@ class Client:
         msg = self._build_message(MsgKind.QUERY, payload)
         self._sock.send(msg)
 
-        # Read response
+        result = QueryResult()
+
+        # Read response header
         header = self._sock.recv(12)
         kind, length, req_id = struct.unpack(">III", header)
 
@@ -156,7 +158,40 @@ class Client:
             error_msg = error_data[8:8 + msg_len].decode()
             raise Exception(f"BaraDB error {code}: {error_msg}")
 
-        result = QueryResult()
+        if kind == MsgKind.DATA:
+            data = self._sock.recv(length)
+            pos = [0]
+            col_count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+            pos[0] += 4
+            cols = []
+            for _ in range(col_count):
+                s = self._read_string(data, pos)
+                cols.append(s)
+            row_count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+            pos[0] += 4
+            rows = []
+            for _ in range(row_count):
+                row = []
+                for _ in range(col_count):
+                    val = self._deserialize_value(data, pos)
+                    row.append(val)
+                rows.append(row)
+            result.columns = cols
+            result.rows = rows
+            result.row_count = row_count
+            # Read following COMPLETE message
+            comp_header = self._sock.recv(12)
+            ckind, clen, _ = struct.unpack(">III", comp_header)
+            if ckind == MsgKind.COMPLETE:
+                comp_data = self._sock.recv(clen)
+                result.affected_rows = struct.unpack(">I", comp_data[:4])[0]
+            return result
+
+        if kind == MsgKind.COMPLETE:
+            comp_data = self._sock.recv(length)
+            result.affected_rows = struct.unpack(">I", comp_data[:4])[0]
+            return result
+
         return result
 
     def execute(self, sql: str) -> int:
@@ -171,6 +206,82 @@ class Client:
     def _encode_string(s: str) -> bytes:
         data = s.encode("utf-8")
         return struct.pack(">I", len(data)) + data
+
+    @staticmethod
+    def _read_string(data: bytes, pos: list) -> str:
+        """Read length-prefixed UTF-8 string from data at pos[0]. Updates pos[0]."""
+        length = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+        pos[0] += 4
+        s = data[pos[0]:pos[0]+length].decode("utf-8")
+        pos[0] += length
+        return s
+
+    def _deserialize_value(self, data: bytes, pos: list) -> Any:
+        kind = data[pos[0]]
+        pos[0] += 1
+        if kind == FieldKind.NULL:
+            return None
+        elif kind == FieldKind.BOOL:
+            val = data[pos[0]] != 0
+            pos[0] += 1
+            return val
+        elif kind == FieldKind.INT8:
+            val = int.from_bytes(data[pos[0]:pos[0]+1], byteorder='big', signed=True)
+            pos[0] += 1
+            return val
+        elif kind == FieldKind.INT16:
+            val = int.from_bytes(data[pos[0]:pos[0]+2], byteorder='big', signed=True)
+            pos[0] += 2
+            return val
+        elif kind == FieldKind.INT32:
+            val = int.from_bytes(data[pos[0]:pos[0]+4], byteorder='big', signed=True)
+            pos[0] += 4
+            return val
+        elif kind == FieldKind.INT64:
+            val = int.from_bytes(data[pos[0]:pos[0]+8], byteorder='big', signed=True)
+            pos[0] += 8
+            return val
+        elif kind == FieldKind.FLOAT32:
+            val = struct.unpack(">f", data[pos[0]:pos[0]+4])[0]
+            pos[0] += 4
+            return val
+        elif kind == FieldKind.FLOAT64:
+            val = struct.unpack(">d", data[pos[0]:pos[0]+8])[0]
+            pos[0] += 8
+            return val
+        elif kind == FieldKind.STRING:
+            return self._read_string(data, pos)
+        elif kind == FieldKind.BYTES:
+            length = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+            pos[0] += 4
+            val = data[pos[0]:pos[0]+length]
+            pos[0] += length
+            return val
+        elif kind == FieldKind.ARRAY:
+            count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+            pos[0] += 4
+            arr = []
+            for _ in range(count):
+                arr.append(self._deserialize_value(data, pos))
+            return arr
+        elif kind == FieldKind.OBJECT:
+            count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+            pos[0] += 4
+            obj = {}
+            for _ in range(count):
+                key = self._read_string(data, pos)
+                val = self._deserialize_value(data, pos)
+                obj[key] = val
+            return obj
+        elif kind == FieldKind.VECTOR:
+            dim = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+            pos[0] += 4
+            vec = []
+            for _ in range(dim):
+                vec.append(struct.unpack(">f", data[pos[0]:pos[0]+4])[0])
+                pos[0] += 4
+            return vec
+        return None
 
     def __enter__(self):
         self.connect()

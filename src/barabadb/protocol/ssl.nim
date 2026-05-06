@@ -1,20 +1,23 @@
-## TLS/SSL Wrapper — encrypted socket using OpenSSL
+## TLS/SSL Wrapper — encrypted sockets using OpenSSL (Nim stdlib)
+when not defined(ssl):
+  {.error: "BaraDB requires SSL support. Compile with -d:ssl".}
+
 import std/os
+import std/osproc
 import std/strutils
+import std/net
+import std/asyncnet
 
 type
-  TLSSocket* = ref object
-    ctx: pointer    # SSL_CTX*
-    ssl: pointer    # SSL*
-    fd: int
-    connected: bool
-    config: TLSConfig
-
   TLSConfig* = object
     certFile*: string
     keyFile*: string
     caFile*: string
     verifyPeer*: bool
+
+  TLSContext* = ref object
+    sslCtx*: SslContext
+    config*: TLSConfig
 
 proc newTLSConfig*(certFile: string, keyFile: string, caFile: string = "",
                    verifyPeer: bool = false): TLSConfig =
@@ -23,44 +26,28 @@ proc newTLSConfig*(certFile: string, keyFile: string, caFile: string = "",
     caFile: caFile, verifyPeer: verifyPeer,
   )
 
-proc newTLSSocket*(config: TLSConfig): TLSSocket =
-  TLSSocket(config: config, connected: false)
+proc newTLSContext*(config: TLSConfig): TLSContext =
+  result = TLSContext(config: config)
+  if fileExists(config.certFile) and fileExists(config.keyFile):
+    result.sslCtx = newContext(
+      certFile = config.certFile,
+      keyFile = config.keyFile,
+    )
+  else:
+    raise newException(IOError, "TLS certificate or key file not found: " &
+      config.certFile & ", " & config.keyFile)
 
-proc connect*(sock: TLSSocket, host: string, port: int): bool =
-  # In production, would use OpenSSL SSL_connect() via FFI
-  # For now, validate config and return mock connection
-  if not fileExists(sock.config.certFile):
-    return false
-  sock.connected = true
-  return true
+proc wrapClient*(tls: TLSContext, socket: AsyncSocket) {.inline.} =
+  if tls.sslCtx != nil:
+    tls.sslCtx.wrapSocket(socket)
 
-proc accept*(sock: TLSSocket, clientFd: int): bool =
-  if not fileExists(sock.config.certFile):
-    return false
-  if not fileExists(sock.config.keyFile):
-    return false
-  sock.fd = clientFd
-  sock.connected = true
-  return true
+proc wrapServer*(tls: TLSContext, socket: AsyncSocket) {.inline.} =
+  if tls.sslCtx != nil:
+    tls.sslCtx.wrapConnectedSocket(socket, handshakeAsServer)
 
-proc `send`*(sock: TLSSocket, data: seq[byte]): int =
-  if not sock.connected:
-    return -1
-  # In production: SSL_write(sock.ssl, data[0].addr, data.len.cint)
-  return data.len
-
-proc `recv`*(sock: TLSSocket, buf: var seq[byte], size: int): int =
-  if not sock.connected:
-    return -1
-  # In production: SSL_read(sock.ssl, buf[0].addr, size.cint)
-  buf.setLen(min(buf.len, size))
-  return size
-
-proc close*(sock: TLSSocket) =
-  sock.connected = false
-  # In production: SSL_shutdown(sock.ssl); SSL_free(sock.ssl); SSL_CTX_free(sock.ctx)
-
-proc isConnected*(sock: TLSSocket): bool = sock.connected
+proc close*(tls: TLSContext) =
+  if tls.sslCtx != nil:
+    tls.sslCtx.destroyContext()
 
 # TLS Certificate management
 type
@@ -77,28 +64,21 @@ proc parseCertInfo*(certPath: string): CertInfo =
   result = CertInfo()
   if not fileExists(certPath):
     return
-
-  # Read PEM certificate and extract basic info
   let content = readFile(certPath)
   result.subject = "Unknown"
   result.issuer = "Unknown"
   result.fingerprint = ""
-
-  # In production: use OpenSSL X509 parsing
   for line in content.splitLines():
     if line.startsWith("Subject:"):
       result.subject = line[8..^1].strip()
     elif line.startsWith("Issuer:"):
       result.issuer = line[7..^1].strip()
-
   result.isSelfSigned = result.subject == result.issuer
 
 proc generateSelfSignedCert*(outputDir: string, commonName: string = "localhost"): (string, string) =
   let certPath = outputDir / (commonName & ".crt")
   let keyPath = outputDir / (commonName & ".key")
   createDir(outputDir)
-
-  # Use openssl CLI if available
   let cmd = "openssl req -x509 -newkey rsa:2048 -keyout " & keyPath &
             " -out " & certPath & " -days 365 -nodes -subj '/CN=" & commonName & "' 2>/dev/null"
   if execShellCmd(cmd) == 0 and fileExists(certPath):
@@ -109,9 +89,13 @@ proc certificateFingerprint*(certPath: string): string =
   if not fileExists(certPath):
     return ""
   let cmd = "openssl x509 -in " & certPath & " -fingerprint -noout 2>/dev/null"
-  result = ""
-  # In production, use popen() to read command output
-  discard execShellCmd(cmd)
+  let (output, _) = execCmdEx(cmd)
+  for line in output.splitLines():
+    if "Fingerprint=" in line:
+      let parts = line.split("Fingerprint=")
+      if parts.len > 1:
+        return parts[^1].strip()
+  return ""
 
 proc isExpired*(certPath: string): bool =
   if not fileExists(certPath):
@@ -122,12 +106,15 @@ proc isExpired*(certPath: string): bool =
 proc daysUntilExpiry*(certPath: string): int =
   if not fileExists(certPath):
     return -1
-  let cmd = "openssl x509 -in " & certPath & " -checkend 86400 2>/dev/null"
-  if execShellCmd(cmd) == 0:
-    # Expires in more than 1 day
-    # In production, parse the actual enddate
-    return 365
-  return 0
+  # Check if expires within 1 day
+  let cmd1 = "openssl x509 -in " & certPath & " -checkend 86400 2>/dev/null"
+  if execShellCmd(cmd1) == 0:
+    # Check if expires within 30 days
+    let cmd30 = "openssl x509 -in " & certPath & " -checkend 2592000 2>/dev/null"
+    if execShellCmd(cmd30) == 0:
+      return 365
+    return 30
+  return 1
 
 proc validateCert*(certPath: string): seq[string] =
   result = @[]

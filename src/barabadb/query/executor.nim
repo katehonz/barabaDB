@@ -5,11 +5,14 @@ import std/hashes
 import std/sequtils
 import std/algorithm
 import std/re
+import checksums/sha2
+import std/times
 import lexer as qlex
 import parser as qpar
 import ast
 import ir
 import ../core/types
+import ../protocol/wire
 import ../storage/lsm
 import ../storage/btree
 import ../core/mvcc
@@ -28,6 +31,23 @@ type
     key*: string
     data*: string
 
+  UserDef* = object
+    name*: string
+    passwordHash*: string
+    isSuperuser*: bool
+    roles*: seq[string]
+
+  PrivilegeDef* = object
+    tableName*: string
+    command*: string  # SELECT, INSERT, UPDATE, DELETE, ALL
+
+  PolicyDef* = object
+    name*: string
+    tableName*: string
+    command*: string   # ALL, SELECT, INSERT, UPDATE, DELETE
+    usingExpr*: Node   # parsed USING expression
+    withCheckExpr*: Node  # parsed WITH CHECK expression
+
   ExecutionContext* = ref object
     db*: LSMTree
     tables*: Table[string, TableDef]
@@ -36,6 +56,18 @@ type
     txnManager*: TxnManager
     pendingTxn*: Transaction
     onChange*: proc(ev: ChangeEvent) {.closure.}
+    users*: Table[string, UserDef]
+    policies*: Table[string, seq[PolicyDef]]  # table name -> policies
+    currentUser*: string
+    currentRole*: string
+
+  MigrationRecord* = object
+    name*: string
+    checksum*: string
+    appliedAt*: int64
+    appliedBy*: string
+    durationMs*: int
+    rolledBack*: bool
 
   ForeignKeyDef* = object
     refTable*: string
@@ -47,12 +79,19 @@ type
     expr*: string  # stored expression string
     checkNode*: Node  # AST for runtime evaluation
 
+  TriggerDef* = object
+    name*: string
+    timing*: string   # BEFORE, AFTER
+    event*: string    # INSERT, UPDATE, DELETE
+    action*: Node     # SQL statement AST
+
   TableDef* = object
     name*: string
     columns*: seq[ColumnDef]
     pkColumns*: seq[string]
     foreignKeys*: seq[ForeignKeyDef]
     checks*: seq[CheckDef]
+    triggers*: seq[TriggerDef]
 
   ColumnDef* = object
     name*: string
@@ -89,14 +128,16 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
   result = ExecutionContext(db: db, tables: initTable[string, TableDef](),
                    btrees: initTable[string, BTreeIndex[string, IndexEntry]](),
                    views: initTable[string, Node](),
+                   users: initTable[string, UserDef](),
+                   policies: initTable[string, seq[PolicyDef]](),
+                   currentUser: "", currentRole: "",
                    onChange: nil)
   restoreSchema(result)
 
 proc restoreSchema(ctx: ExecutionContext) =
-  let prefix = "_schema:migrations:"
   for entry in ctx.db.scanMemTable():
     if entry.deleted: continue
-    if not entry.key.startsWith(prefix): continue
+    if not entry.key.startsWith("_schema:"): continue
     let ddl = cast[string](entry.value)
     if ddl.len == 0: continue
     let tokens = qlex.tokenize(ddl)
@@ -106,7 +147,7 @@ proc restoreSchema(ctx: ExecutionContext) =
       case stmt.kind
       of nkCreateTable:
         var tbl = TableDef(name: stmt.crtName, columns: @[], pkColumns: @[],
-                           foreignKeys: @[], checks: @[])
+                           foreignKeys: @[], checks: @[], triggers: @[])
         for col in stmt.crtColumns:
           if col.kind == nkColumnDef:
             var colDef = ColumnDef(name: col.cdName, colType: col.cdType)
@@ -126,13 +167,103 @@ proc restoreSchema(ctx: ExecutionContext) =
         ctx.tables[stmt.crtName] = tbl
       of nkCreateView:
         ctx.views[stmt.cvName] = stmt.cvQuery
+      of nkCreateTrigger:
+        if stmt.trigTable in ctx.tables:
+          ctx.tables[stmt.trigTable].triggers.add(TriggerDef(
+            name: stmt.trigName,
+            timing: stmt.trigTiming,
+            event: stmt.trigEvent,
+            action: stmt.trigAction,
+          ))
+      of nkCreateUser:
+        ctx.users[stmt.cuName] = UserDef(name: stmt.cuName,
+            passwordHash: stmt.cuPassword, isSuperuser: stmt.cuSuperuser, roles: @[])
+      of nkCreatePolicy:
+        var pols = ctx.policies.getOrDefault(stmt.cpTable)
+        pols.add(PolicyDef(name: stmt.cpName, tableName: stmt.cpTable,
+                           command: stmt.cpCommand, usingExpr: stmt.cpUsing,
+                           withCheckExpr: stmt.cpWithCheck))
+        ctx.policies[stmt.cpTable] = pols
       else: discard
 
 proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
   ExecutionContext(db: ctx.db, tables: ctx.tables,
                    btrees: ctx.btrees, views: ctx.views,
+                   users: ctx.users, policies: ctx.policies,
                    txnManager: ctx.txnManager,
+                   currentUser: ctx.currentUser, currentRole: ctx.currentRole,
                    pendingTxn: nil, onChange: ctx.onChange)
+
+# ----------------------------------------------------------------------
+# Migration Helpers
+# ----------------------------------------------------------------------
+
+proc migrationLockKey(): string = "_schema:migrations:_lock"
+
+proc acquireMigrationLock(ctx: ExecutionContext): bool =
+  let lockKey = migrationLockKey()
+  let (locked, _) = ctx.db.get(lockKey)
+  if locked:
+    return false
+  ctx.db.put(lockKey, cast[seq[byte]]("locked"))
+  return true
+
+proc releaseMigrationLock(ctx: ExecutionContext) =
+  ctx.db.delete(migrationLockKey())
+
+proc migrationAppliedKey(name: string): string = "_schema:migrations:applied:" & name
+
+proc migrationRecordKey(name: string): string = "_schema:migrations:record:" & name
+
+proc isMigrationApplied(ctx: ExecutionContext, name: string): bool =
+  let (applied, _) = ctx.db.get(migrationAppliedKey(name))
+  return applied
+
+proc getMigrationRecord(ctx: ExecutionContext, name: string): MigrationRecord =
+  let (found, val) = ctx.db.get(migrationRecordKey(name))
+  if found:
+    let parts = cast[string](val).split("|")
+    if parts.len >= 5:
+      return MigrationRecord(
+        name: parts[0],
+        checksum: parts[1],
+        appliedAt: parseInt(parts[2]),
+        appliedBy: parts[3],
+        durationMs: parseInt(parts[4]),
+        rolledBack: if parts.len >= 6: parts[5] == "true" else: false
+      )
+  return MigrationRecord(name: name)
+
+proc setMigrationRecord(ctx: ExecutionContext, rec: MigrationRecord) =
+  let val = rec.name & "|" & rec.checksum & "|" & $rec.appliedAt & "|" &
+            rec.appliedBy & "|" & $rec.durationMs & "|" & (if rec.rolledBack: "true" else: "false")
+  ctx.db.put(migrationRecordKey(rec.name), cast[seq[byte]](val))
+
+proc computeChecksum(body: string): string =
+  let h = secureHash(Sha_256, body)
+  return $h
+
+proc listMigrations(ctx: ExecutionContext): seq[string] =
+  result = @[]
+  for entry in ctx.db.scanMemTable():
+    if entry.deleted: continue
+    if entry.key.startsWith("_schema:migration:") and not entry.key.contains(":applied:") and
+       not entry.key.contains(":record:") and not entry.key.contains(":_lock"):
+      let name = entry.key["_schema:migration:".len..^1]
+      result.add(name)
+  sort(result)
+
+proc getMigrationBody(ctx: ExecutionContext, name: string): (bool, string, string) =
+  let migKey = "_schema:migration:" & name
+  let (found, val) = ctx.db.get(migKey)
+  if found:
+    let ddl = cast[string](val)
+    let parts = ddl.split("|DOWN|", 1)
+    if parts.len == 2:
+      return (true, parts[0], parts[1])
+    else:
+      return (true, ddl, "")
+  return (false, "", "")
 
 # ----------------------------------------------------------------------
 # Helpers
@@ -161,7 +292,7 @@ proc parseRowData(valStr: string): Table[string, string] =
       let v = part[eqPos+1..^1].strip()
       result[k] = v
 
-proc evalExpr(expr: IRExpr, row: Table[string, string]): string =
+proc evalExpr*(expr: IRExpr, row: Table[string, string]): string =
   if expr == nil: return ""
   case expr.kind
   of irekLiteral:
@@ -174,6 +305,9 @@ proc evalExpr(expr: IRExpr, row: Table[string, string]): string =
     else: return ""
   of irekField:
     if expr.fieldPath.len > 0:
+      # Check full path first for joined columns (e.g. "u.name")
+      let fullPath = expr.fieldPath.join(".")
+      if fullPath in row: return row[fullPath]
       let colName = expr.fieldPath[^1]
       if colName in row: return row[colName]
       if "$key" in row and row["$key"].startsWith(colName & "="):
@@ -182,6 +316,8 @@ proc evalExpr(expr: IRExpr, row: Table[string, string]): string =
         let parsed = parseRowData(row["$value"])
         if colName in parsed: return parsed[colName]
     return ""
+  of irekStar:
+    return "*"
   of irekBinary:
     let left = evalExpr(expr.binLeft, row)
     let right = evalExpr(expr.binRight, row)
@@ -254,6 +390,56 @@ proc evalExpr(expr: IRExpr, row: Table[string, string]): string =
   of irekExists: return "false"
   else: return ""
 
+proc lowerExpr*(node: Node): IRExpr
+
+# ----------------------------------------------------------------------
+# Row-Level Security
+# ----------------------------------------------------------------------
+
+proc hasPrivilege(ctx: ExecutionContext, tableName, command: string): bool =
+  if ctx.currentUser.len == 0: return true
+  let user = ctx.users.getOrDefault(ctx.currentUser)
+  if user.isSuperuser: return true
+  # Check table-level policies for user or PUBLIC
+  # For now: if no policies exist, allow everything (backward compatible)
+  if tableName notin ctx.policies: return true
+  let policies = ctx.policies[tableName]
+  # If RLS is enabled (policies exist), check if user matches any policy
+  for pol in policies:
+    if pol.command == "ALL" or pol.command == command:
+      return true
+  return false
+
+proc passesPolicy(ctx: ExecutionContext, tableName, command: string, row: Row): bool =
+  if ctx.currentUser.len == 0: return true
+  let user = ctx.users.getOrDefault(ctx.currentUser)
+  if user.isSuperuser: return true
+  if tableName notin ctx.policies: return true
+  let policies = ctx.policies[tableName]
+  for pol in policies:
+    if pol.command != "ALL" and pol.command != command:
+      continue
+    if pol.usingExpr != nil:
+      let expr = lowerExpr(pol.usingExpr)
+      if evalExpr(expr, row) != "true":
+        return false
+  return true
+
+proc checkInsertPolicy(ctx: ExecutionContext, tableName: string, row: Row): bool =
+  if ctx.currentUser.len == 0: return true
+  let user = ctx.users.getOrDefault(ctx.currentUser)
+  if user.isSuperuser: return true
+  if tableName notin ctx.policies: return true
+  let policies = ctx.policies[tableName]
+  for pol in policies:
+    if pol.command != "ALL" and pol.command != "INSERT":
+      continue
+    if pol.withCheckExpr != nil:
+      let expr = lowerExpr(pol.withCheckExpr)
+      if evalExpr(expr, row) != "true":
+        return false
+  return true
+
 # ----------------------------------------------------------------------
 # Table scan and storage
 # ----------------------------------------------------------------------
@@ -276,7 +462,9 @@ proc execScan(ctx: ExecutionContext, table: string): seq[Row] =
     let eqPos = rest.find('=')
     if eqPos >= 0:
       row[rest[0..<eqPos]] = rest[eqPos+1..^1]
-    result.add(row)
+    # RLS filter
+    if passesPolicy(ctx, table, "SELECT", row):
+      result.add(row)
 
 proc execPointRead(ctx: ExecutionContext, table: string, key: string): seq[Row] =
   let fullKey = table & "." & key
@@ -295,6 +483,8 @@ proc execPointRead(ctx: ExecutionContext, table: string, key: string): seq[Row] 
   return @[]
 
 proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], values: seq[seq[string]]): int =
+  if not hasPrivilege(ctx, table, "INSERT"):
+    return 0
   var count = 0
   for rowVals in values:
     var key = ""
@@ -312,6 +502,14 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
     let valStr = valParts.join(",")
     let fullKey = table & "." & key
 
+    # Build row for RLS WITH CHECK
+    var row = initTable[string, string]()
+    for i, f in fields:
+      if i < rowVals.len:
+        row[f] = rowVals[i]
+    if not checkInsertPolicy(ctx, table, row):
+      continue
+
     if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
       discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](valStr))
     else:
@@ -328,9 +526,18 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
   return count
 
 proc execDelete*(ctx: ExecutionContext, table: string, key: string): int =
+  if not hasPrivilege(ctx, table, "DELETE"):
+    return 0
   let fullKey = table & "." & key
-  let (found, _) = ctx.db.get(fullKey)
+  let (found, existingVal) = ctx.db.get(fullKey)
   if found:
+    # RLS USING check on existing row
+    var oldRow = parseRowData(cast[string](existingVal))
+    let eqPos = key.find('=')
+    if eqPos >= 0:
+      oldRow[key[0..<eqPos]] = key[eqPos+1..^1]
+    if not passesPolicy(ctx, table, "DELETE", oldRow):
+      return 0
     if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
       discard ctx.txnManager.delete(ctx.pendingTxn, fullKey)
     else:
@@ -339,12 +546,24 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string): int =
   return 0
 
 proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Table[string, string]): int =
+  if not hasPrivilege(ctx, table, "UPDATE"):
+    return 0
   let fullKey = table & "." & key
   let (found, existing) = ctx.db.get(fullKey)
   if not found: return 0
+  var oldRow = parseRowData(cast[string](existing))
+  let eqPos = key.find('=')
+  if eqPos >= 0:
+    oldRow[key[0..<eqPos]] = key[eqPos+1..^1]
+  # RLS USING check on old row
+  if not passesPolicy(ctx, table, "UPDATE", oldRow):
+    return 0
   var parsed = parseRowData(cast[string](existing))
   for col, val in sets:
     parsed[col] = val
+  # RLS WITH CHECK on new row
+  if not checkInsertPolicy(ctx, table, parsed):
+    return 0
   var parts: seq[string] = @[]
   for col, val in parsed:
     parts.add(col & "=" & val)
@@ -377,7 +596,18 @@ proc validateType*(colType: string, value: string): (bool, string) =
       return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
   return (true, "")
 
-proc lowerExpr*(node: Node): IRExpr
+proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
+proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult
+
+proc fireTriggers*(ctx: ExecutionContext, tableName: string, timing: string, event: string, row: Table[string, string]) =
+  let tbl = ctx.getTableDef(tableName)
+  for trig in tbl.triggers:
+    if trig.timing == timing and trig.event == event:
+      if trig.action != nil:
+        let tokens = qlex.tokenize(trig.action.strVal)
+        let astNode = qpar.parse(tokens)
+        if astNode.stmts.len > 0:
+          discard executeQuery(ctx, astNode)
 
 proc validateConstraints*(ctx: ExecutionContext, tableName: string,
     fields: seq[string], values: seq[seq[string]]): (bool, string) =
@@ -556,6 +786,8 @@ proc lowerExpr*(node: Node): IRExpr =
     result.binRight = lowerExpr(node.inRight)
   of nkExists:
     result = IRExpr(kind: irekExists)
+  of nkStar:
+    result = IRExpr(kind: irekStar)
   else:
     result = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkNull))
 
@@ -564,6 +796,28 @@ proc lowerSelect*(node: Node): IRPlan =
   if node.selFrom != nil and node.selFrom.fromTable.len > 0:
     result.scanTable = node.selFrom.fromTable
     result.scanAlias = node.selFrom.fromAlias
+
+  # Build JOIN chain
+  for joinNode in node.selJoins:
+    if joinNode.kind == nkJoin:
+      let joinPlan = IRPlan(kind: irpkJoin)
+      case joinNode.joinKind
+      of jkInner: joinPlan.joinKind = irjkInner
+      of jkLeft: joinPlan.joinKind = irjkLeft
+      of jkRight: joinPlan.joinKind = irjkRight
+      of jkFull: joinPlan.joinKind = irjkFull
+      of jkCross: joinPlan.joinKind = irjkCross
+      joinPlan.joinLeft = result
+      joinPlan.joinRight = IRPlan(kind: irpkScan)
+      if joinNode.joinTarget != nil and joinNode.joinTarget.kind == nkFrom:
+        joinPlan.joinRight.scanTable = joinNode.joinTarget.fromTable
+        joinPlan.joinRight.scanAlias = joinNode.joinTarget.fromAlias
+      else:
+        joinPlan.joinRight.scanTable = ""
+      joinPlan.joinAlias = joinNode.joinAlias
+      if joinNode.joinOn != nil:
+        joinPlan.joinCond = lowerExpr(joinNode.joinOn)
+      result = joinPlan
 
   if node.selWhere != nil and node.selWhere.whereExpr != nil:
     let filterPlan = IRPlan(kind: irpkFilter)
@@ -587,8 +841,14 @@ proc lowerSelect*(node: Node): IRPlan =
   projectPlan.projectAliases = @[]
   for e in node.selResult:
     projectPlan.projectExprs.add(lowerExpr(e))
-    if e.kind == nkIdent: projectPlan.projectAliases.add(e.identName)
-    else: projectPlan.projectAliases.add("")
+    if e.exprAlias.len > 0:
+      projectPlan.projectAliases.add(e.exprAlias)
+    elif e.kind == nkIdent:
+      projectPlan.projectAliases.add(e.identName)
+    elif e.kind == nkPath and e.pathParts.len > 0:
+      projectPlan.projectAliases.add(e.pathParts[^1])
+    else:
+      projectPlan.projectAliases.add("")
   result = projectPlan
 
   if node.selOrderBy.len > 0:
@@ -633,14 +893,84 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
   of irpkProject:
     let sourceRows = executePlan(ctx, plan.projectSource)
     if plan.projectAliases.len == 0: return sourceRows
+
+    # Check if this projection contains aggregates without GROUP BY
+    var hasAggs = false
+    for expr in plan.projectExprs:
+      if expr != nil and expr.kind == irekAggregate:
+        hasAggs = true
+        break
+
+    if hasAggs:
+      # Produce exactly one row with aggregate values
+      var newRow: Table[string, string]
+      for i, alias in plan.projectAliases:
+        if i < plan.projectExprs.len:
+          let expr = plan.projectExprs[i]
+          if expr.kind == irekStar:
+            for k, v in sourceRows[0]:
+              if not k.startsWith("$") and not k.contains("."):
+                newRow[k] = v
+          elif expr.kind == irekAggregate:
+            case expr.aggOp
+            of irCount:
+              if expr.aggArgs.len == 0:
+                newRow[alias] = $sourceRows.len
+              else:
+                var count = 0
+                for row in sourceRows:
+                  let v = evalExpr(expr.aggArgs[0], row)
+                  if v.len > 0: count += 1
+                newRow[alias] = $count
+            of irSum:
+              var sum = 0.0
+              for row in sourceRows:
+                let v = evalExpr(expr.aggArgs[0], row)
+                try: sum += parseFloat(v) except: discard
+              newRow[alias] = $sum
+            of irAvg:
+              var sum = 0.0
+              var count = 0
+              for row in sourceRows:
+                let v = evalExpr(expr.aggArgs[0], row)
+                try: sum += parseFloat(v); count += 1 except: discard
+              newRow[alias] = if count > 0: $(sum / float(count)) else: "0"
+            of irMin:
+              var minVal = ""
+              for row in sourceRows:
+                let v = evalExpr(expr.aggArgs[0], row)
+                if minVal == "" or v < minVal: minVal = v
+              newRow[alias] = minVal
+            of irMax:
+              var maxVal = ""
+              for row in sourceRows:
+                let v = evalExpr(expr.aggArgs[0], row)
+                if maxVal == "" or v > maxVal: maxVal = v
+              newRow[alias] = maxVal
+            else:
+              newRow[alias] = ""
+          else:
+            let val = evalExpr(expr, if sourceRows.len > 0: sourceRows[0] else: initTable[string, string]())
+            if alias.len > 0: newRow[alias] = val
+            else: newRow["col" & $i] = val
+      result = @[newRow]
+      return result
+
     result = @[]
     for row in sourceRows:
       var newRow: Table[string, string]
       for i, alias in plan.projectAliases:
         if i < plan.projectExprs.len:
-          let val = evalExpr(plan.projectExprs[i], row)
-          if alias.len > 0: newRow[alias] = val
-          else: newRow["col" & $i] = val
+          let expr = plan.projectExprs[i]
+          if expr.kind == irekStar:
+            # Expand star to all columns in the row (excluding internal keys)
+            for k, v in row:
+              if not k.startsWith("$") and not k.contains("."):
+                newRow[k] = v
+          else:
+            let val = evalExpr(expr, row)
+            if alias.len > 0: newRow[alias] = val
+            else: newRow["col" & $i] = val
       if newRow.len > 0:
         result.add(newRow)
       else:
@@ -701,20 +1031,239 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
   of irpkJoin:
     let leftRows = executePlan(ctx, plan.joinLeft)
     let rightRows = executePlan(ctx, plan.joinRight)
-    return leftRows  # simplified: return left side
+    result = @[]
+
+    # Collect all unique column names from each side (excluding internal $ keys)
+    var leftCols, rightCols: seq[string]
+    for l in leftRows:
+      for k, _ in l:
+        if not k.startsWith("$") and k notin leftCols:
+          leftCols.add(k)
+    for r in rightRows:
+      for k, _ in r:
+        if not k.startsWith("$") and k notin rightCols:
+          rightCols.add(k)
+
+    proc mergeRow(left, right: Row, leftAlias, rightAlias: string): Row =
+      result = initTable[string, string]()
+      # Copy left keys first (left wins on collision for bare keys)
+      for k, v in left:
+        if not k.startsWith("$"):
+          result[k] = v
+      # Copy right keys that don't collide; colliding keys only get prefixed
+      for k, v in right:
+        if not k.startsWith("$") and k notin result:
+          result[k] = v
+      # Always add prefixed versions for disambiguation
+      if leftAlias.len > 0:
+        for k, v in left:
+          if not k.startsWith("$"):
+            result[leftAlias & "." & k] = v
+      if rightAlias.len > 0:
+        for k, v in right:
+          if not k.startsWith("$"):
+            result[rightAlias & "." & k] = v
+
+    let leftAlias = if plan.joinLeft != nil and plan.joinLeft.kind == irpkScan:
+                      plan.joinLeft.scanAlias else: ""
+    let rightAlias = if plan.joinRight != nil and plan.joinRight.kind == irpkScan:
+                       plan.joinRight.scanAlias else: ""
+
+    if plan.joinKind == irjkCross:
+      for l in leftRows:
+        for r in rightRows:
+          result.add(mergeRow(l, r, leftAlias, rightAlias))
+      return result
+
+    for l in leftRows:
+      var matched = false
+      for r in rightRows:
+        let merged = mergeRow(l, r, leftAlias, rightAlias)
+        if plan.joinCond == nil or evalExpr(plan.joinCond, merged) == "true":
+          result.add(merged)
+          matched = true
+      if not matched and (plan.joinKind == irjkLeft or plan.joinKind == irjkFull):
+        var padded = initTable[string, string]()
+        for k, v in l:
+          if not k.startsWith("$"):
+            padded[k] = v
+        for col in rightCols:
+          if col notin padded: padded[col] = ""
+        if leftAlias.len > 0:
+          for k, v in l:
+            if not k.startsWith("$"):
+              padded[leftAlias & "." & k] = v
+        if rightAlias.len > 0:
+          for col in rightCols:
+            padded[rightAlias & "." & col] = ""
+        result.add(padded)
+
+    if plan.joinKind == irjkRight or plan.joinKind == irjkFull:
+      for r in rightRows:
+        var found = false
+        for l in leftRows:
+          let merged = mergeRow(l, r, leftAlias, rightAlias)
+          if plan.joinCond == nil or evalExpr(plan.joinCond, merged) == "true":
+            found = true
+            break
+        if not found:
+          var padded = initTable[string, string]()
+          for k, v in r:
+            if not k.startsWith("$"):
+              padded[k] = v
+          for col in leftCols:
+            if col notin padded: padded[col] = ""
+          if rightAlias.len > 0:
+            for k, v in r:
+              if not k.startsWith("$"):
+                padded[rightAlias & "." & k] = v
+          if leftAlias.len > 0:
+            for col in leftCols:
+              padded[leftAlias & "." & col] = ""
+          result.add(padded)
+
+    return result
 
   else:
     return @[]
 
 # ----------------------------------------------------------------------
+# Parameter binding
+# ----------------------------------------------------------------------
+
+proc doBindParams(node: Node, params: seq[WireValue], idx: var int): Node =
+  if node == nil: return nil
+  case node.kind
+  of nkPlaceholder:
+    if idx < params.len:
+      let p = params[idx]
+      inc idx
+      case p.kind
+      of fkString:  return Node(kind: nkStringLit, strVal: p.strVal)
+      of fkInt64:   return Node(kind: nkIntLit, intVal: int(p.int64Val))
+      of fkInt32:   return Node(kind: nkIntLit, intVal: int(p.int32Val))
+      of fkInt16:   return Node(kind: nkIntLit, intVal: int(p.int16Val))
+      of fkInt8:    return Node(kind: nkIntLit, intVal: int(p.int8Val))
+      of fkFloat64: return Node(kind: nkFloatLit, floatVal: p.float64Val)
+      of fkFloat32: return Node(kind: nkFloatLit, floatVal: float(p.float32Val))
+      of fkBool:    return Node(kind: nkBoolLit, boolVal: p.boolVal)
+      of fkNull:    return Node(kind: nkNullLit)
+      else:         return Node(kind: nkNullLit)
+    else:
+      return Node(kind: nkNullLit)
+  of nkBinOp:
+    result = Node(kind: nkBinOp, binOp: node.binOp,
+                  line: node.line, col: node.col)
+    result.binLeft = doBindParams(node.binLeft, params, idx)
+    result.binRight = doBindParams(node.binRight, params, idx)
+  of nkUnaryOp:
+    result = Node(kind: nkUnaryOp, unOp: node.unOp,
+                  line: node.line, col: node.col)
+    result.unOperand = doBindParams(node.unOperand, params, idx)
+  of nkFuncCall:
+    result = Node(kind: nkFuncCall, funcName: node.funcName,
+                  line: node.line, col: node.col)
+    result.funcArgs = @[]
+    for arg in node.funcArgs:
+      result.funcArgs.add(doBindParams(arg, params, idx))
+  of nkArrayLit:
+    result = Node(kind: nkArrayLit, line: node.line, col: node.col)
+    result.arrayElems = @[]
+    for e in node.arrayElems:
+      result.arrayElems.add(doBindParams(e, params, idx))
+  of nkStatementList:
+    result = Node(kind: nkStatementList, line: node.line, col: node.col)
+    result.stmts = @[]
+    for s in node.stmts:
+      result.stmts.add(doBindParams(s, params, idx))
+  of nkSelect:
+    result = Node(kind: nkSelect, line: node.line, col: node.col)
+    result.selDistinct = node.selDistinct
+    result.selResult = @[]
+    for e in node.selResult:
+      result.selResult.add(doBindParams(e, params, idx))
+    result.selFrom = node.selFrom  # FROM doesn't have placeholders
+    result.selJoins = @[]
+    for j in node.selJoins:
+      var nj = Node(kind: nkJoin, joinKind: j.joinKind,
+                    joinTarget: j.joinTarget, joinAlias: j.joinAlias,
+                    line: j.line, col: j.col)
+      nj.joinOn = doBindParams(j.joinOn, params, idx)
+      result.selJoins.add(nj)
+    result.selWhere = doBindParams(node.selWhere, params, idx)
+    result.selGroupBy = @[]
+    for g in node.selGroupBy:
+      result.selGroupBy.add(doBindParams(g, params, idx))
+    result.selHaving = doBindParams(node.selHaving, params, idx)
+    result.selOrderBy = @[]
+    for o in node.selOrderBy:
+      var no = Node(kind: nkOrderBy, orderByDir: o.orderByDir,
+                    line: o.line, col: o.col)
+      no.orderByExpr = doBindParams(o.orderByExpr, params, idx)
+      result.selOrderBy.add(no)
+    result.selLimit = doBindParams(node.selLimit, params, idx)
+    result.selOffset = doBindParams(node.selOffset, params, idx)
+  of nkInsert:
+    result = Node(kind: nkInsert, insTarget: node.insTarget,
+                  line: node.line, col: node.col)
+    result.insFields = node.insFields
+    result.insValues = @[]
+    for v in node.insValues:
+      result.insValues.add(doBindParams(v, params, idx))
+    result.insReturning = node.insReturning
+  of nkUpdate:
+    result = Node(kind: nkUpdate, updTarget: node.updTarget,
+                  updAlias: node.updAlias, line: node.line, col: node.col)
+    result.updSet = @[]
+    for s in node.updSet:
+      var ns = Node(kind: nkBinOp, binOp: s.binOp, line: s.line, col: s.col)
+      ns.binLeft = s.binLeft
+      ns.binRight = doBindParams(s.binRight, params, idx)
+      result.updSet.add(ns)
+    result.updWhere = doBindParams(node.updWhere, params, idx)
+    result.updReturning = node.updReturning
+  of nkWhere:
+    result = Node(kind: nkWhere, line: node.line, col: node.col)
+    result.whereExpr = doBindParams(node.whereExpr, params, idx)
+  of nkHaving:
+    result = Node(kind: nkHaving, line: node.line, col: node.col)
+    result.havingExpr = doBindParams(node.havingExpr, params, idx)
+  of nkLimit:
+    result = Node(kind: nkLimit, line: node.line, col: node.col)
+    result.limitExpr = doBindParams(node.limitExpr, params, idx)
+  of nkOffset:
+    result = Node(kind: nkOffset, line: node.line, col: node.col)
+    result.offsetExpr = doBindParams(node.offsetExpr, params, idx)
+  of nkReturning:
+    result = Node(kind: nkReturning, line: node.line, col: node.col)
+    result.retExprs = @[]
+    for e in node.retExprs:
+      result.retExprs.add(doBindParams(e, params, idx))
+  of nkDelete:
+    result = Node(kind: nkDelete, delTarget: node.delTarget,
+                  delAlias: node.delAlias, line: node.line, col: node.col)
+    result.delWhere = doBindParams(node.delWhere, params, idx)
+    result.delReturning = node.delReturning
+  else:
+    result = node
+
+proc bindParams*(node: Node, params: seq[WireValue]): Node =
+  var idx = 0
+  result = doBindParams(node, params, idx)
+
+# ----------------------------------------------------------------------
 # High-level execute
 # ----------------------------------------------------------------------
 
-proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
+proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult =
   if astNode == nil or astNode.stmts.len == 0:
     return okResult()
 
-  let stmt = astNode.stmts[0]
+  var boundAst = astNode
+  if params.len > 0:
+    boundAst = bindParams(astNode, params)
+
+  let stmt = boundAst.stmts[0]
   case stmt.kind
   of nkSelect:
     # Expand view if FROM table is a view
@@ -823,7 +1372,18 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
     let (valid, errMsg) = validateConstraints(ctx, stmt.insTarget, mutableFields, mutableValues)
     if not valid: return errResult(errMsg)
 
+    # Fire BEFORE INSERT triggers
+    var row = initTable[string, string]()
+    for i, f in mutableFields:
+      if i < mutableValues[0].len:
+        row[f] = mutableValues[0][i]
+    fireTriggers(ctx, stmt.insTarget, "before", "insert", row)
+
     let count = execInsert(ctx, stmt.insTarget, mutableFields, mutableValues)
+
+    # Fire AFTER INSERT triggers
+    fireTriggers(ctx, stmt.insTarget, "after", "insert", row)
+
     if ctx.onChange != nil:
       for i in 0..<count:
         ctx.onChange(ChangeEvent(table: stmt.insTarget, kind: ckInsert, key: "", data: ""))
@@ -866,7 +1426,18 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
             updValues.add("")
         let (valid, errMsg) = validateConstraints(ctx, stmt.updTarget, updFields, @[updValues])
         if not valid: return errResult(errMsg)
+        # Fire BEFORE UPDATE triggers
+        var oldRow = row
+        var newRow = row
+        for col, val in sets:
+          newRow[col] = val
+        fireTriggers(ctx, stmt.updTarget, "before", "update", oldRow)
+
         count += execUpdateRow(ctx, stmt.updTarget, row["$key"], sets)
+
+        # Fire AFTER UPDATE triggers
+        fireTriggers(ctx, stmt.updTarget, "after", "update", newRow)
+
         if ctx.onChange != nil:
           ctx.onChange(ChangeEvent(table: stmt.updTarget, kind: ckUpdate, key: old, data: ""))
     return okResult(affected=count)
@@ -881,7 +1452,14 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
         if evalExpr(whereExpr, row) != "true": continue
       if "$key" in row:
         let old = row["$key"]
+        # Fire BEFORE DELETE triggers
+        fireTriggers(ctx, stmt.delTarget, "before", "delete", row)
+
         count += execDelete(ctx, stmt.delTarget, row["$key"])
+
+        # Fire AFTER DELETE triggers
+        fireTriggers(ctx, stmt.delTarget, "after", "delete", row)
+
         if ctx.onChange != nil:
           ctx.onChange(ChangeEvent(table: stmt.delTarget, kind: ckDelete, key: old, data: ""))
     return okResult(affected=count)
@@ -1035,32 +1613,189 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
     ctx.db.delete(viewKey)
     return okResult(msg="DROP VIEW " & stmt.dvName)
 
+  of nkCreateTrigger:
+    let tbl = ctx.getTableDef(stmt.trigTable)
+    var triggers = tbl.triggers
+    triggers.add(TriggerDef(
+      name: stmt.trigName,
+      timing: stmt.trigTiming,
+      event: stmt.trigEvent,
+      action: stmt.trigAction,
+    ))
+    ctx.tables[stmt.trigTable].triggers = triggers
+    # Persist trigger to LSM-Tree
+    let trigKey = "_schema:triggers:" & stmt.trigTable & ":" & stmt.trigName
+    let trigDdl = "CREATE TRIGGER " & stmt.trigName & " ON " & stmt.trigTable & " " &
+                  stmt.trigTiming & " " & stmt.trigEvent & " AS " & stmt.trigAction.strVal
+    ctx.db.put(trigKey, cast[seq[byte]](trigDdl))
+    return okResult(msg="CREATE TRIGGER " & stmt.trigName)
+
+  of nkDropTrigger:
+    let tbl = ctx.getTableDef(stmt.trigTable)
+    var newTriggers: seq[TriggerDef] = @[]
+    for trig in tbl.triggers:
+      if trig.name != stmt.trigDropName:
+        newTriggers.add(trig)
+    ctx.tables[stmt.trigTable].triggers = newTriggers
+    let trigKey = "_schema:triggers:" & stmt.trigTable & ":" & stmt.trigDropName
+    ctx.db.delete(trigKey)
+    return okResult(msg="DROP TRIGGER " & stmt.trigDropName)
+
   of nkCreateMigration:
-    # Store migration in LSM-Tree
     let migKey = "_schema:migration:" & stmt.cmName
-    ctx.db.put(migKey, cast[seq[byte]](stmt.cmBody))
-    return okResult(msg="CREATE MIGRATION " & stmt.cmName)
+    let checksum = computeChecksum(stmt.cmBody)
+    var storeBody = stmt.cmBody
+    if stmt.cmDownBody.len > 0:
+      storeBody = storeBody & "|DOWN|" & stmt.cmDownBody
+    ctx.db.put(migKey, cast[seq[byte]](storeBody))
+    var rec = getMigrationRecord(ctx, stmt.cmName)
+    rec.checksum = checksum
+    setMigrationRecord(ctx, rec)
+    return okResult(msg="CREATE MIGRATION " & stmt.cmName & " (checksum: " & checksum[0..<16] & ")")
 
   of nkApplyMigration:
-    # Check if already applied
-    let appliedKey = "_schema:migrations:applied:" & stmt.amName
-    let (alreadyApplied, _) = ctx.db.get(appliedKey)
-    if alreadyApplied:
+    if not acquireMigrationLock(ctx):
+      return errResult("Migration already in progress (lock held)")
+    defer: releaseMigrationLock(ctx)
+
+    if isMigrationApplied(ctx, stmt.amName):
       return okResult(msg="Migration '" & stmt.amName & "' already applied")
-    # Execute stored migration SQL
-    let migKey = "_schema:migration:" & stmt.amName
-    let (found, val) = ctx.db.get(migKey)
+
+    let (found, upBody, downBody) = getMigrationBody(ctx, stmt.amName)
     if not found:
       return errResult("Migration '" & stmt.amName & "' not found")
-    let sql = cast[string](val)
-    let tokens = qlex.tokenize(sql)
+
+    let storedRec = getMigrationRecord(ctx, stmt.amName)
+    let expectedChecksum = computeChecksum(upBody)
+    if storedRec.checksum.len > 0 and storedRec.checksum != expectedChecksum:
+      return errResult("Migration '" & stmt.amName & "' checksum mismatch! Stored: " &
+                       storedRec.checksum[0..<16] & ", Expected: " & expectedChecksum[0..<16])
+
+    let startTime = epochTime()
+    let result = executeMigrationSql(ctx, upBody)
+    let durationMs = int((epochTime() - startTime) * 1000)
+
+    if not result.success:
+      return errResult("Migration '" & stmt.amName & "' failed: " & result.message)
+
+    ctx.db.put(migrationAppliedKey(stmt.amName), cast[seq[byte]]("applied"))
+    setMigrationRecord(ctx, MigrationRecord(
+      name: stmt.amName,
+      checksum: expectedChecksum,
+      appliedAt: int64(epochTime()),
+      appliedBy: ctx.currentUser,
+      durationMs: durationMs,
+      rolledBack: false
+    ))
+    return okResult(msg="APPLY MIGRATION " & stmt.amName & " in " & $durationMs & "ms")
+
+  of nkMigrationStatus:
+    var rows: seq[Row] = @[]
+    var cols = @["name", "status", "applied_at", "applied_by", "duration_ms", "checksum"]
+    for name in listMigrations(ctx):
+      let applied = isMigrationApplied(ctx, name)
+      let rec = getMigrationRecord(ctx, name)
+      var row = initTable[string, string]()
+      row["name"] = name
+      row["status"] = if applied: "applied" else: "pending"
+      row["applied_at"] = if rec.appliedAt > 0: $rec.appliedAt else: ""
+      row["applied_by"] = rec.appliedBy
+      row["duration_ms"] = $rec.durationMs
+      row["checksum"] = if rec.checksum.len > 0: rec.checksum[0..<16] else: ""
+      rows.add(row)
+    return okResult(rows, cols, 0, "Migration status")
+
+  of nkMigrationUp:
+    if not acquireMigrationLock(ctx):
+      return errResult("Migration already in progress (lock held)")
+    defer: releaseMigrationLock(ctx)
+
+    var pending: seq[string] = @[]
+    for name in listMigrations(ctx):
+      if not isMigrationApplied(ctx, name):
+        pending.add(name)
+
+    if pending.len == 0:
+      return okResult(msg="No pending migrations")
+
+    var toApply = pending
+    if stmt.muCount > 0:
+      toApply = pending[0 ..< min(stmt.muCount, pending.len)]
+
+    var appliedCount = 0
+    var totalDuration = 0
+    for name in toApply:
+      let (found, upBody, downBody) = getMigrationBody(ctx, name)
+      if not found:
+        return errResult("Migration '" & name & "' not found during batch apply")
+      let startTime = epochTime()
+      let result = executeMigrationSql(ctx, upBody)
+      let durationMs = int((epochTime() - startTime) * 1000)
+      if not result.success:
+        return errResult("Migration '" & name & "' failed: " & result.message &
+                         " (" & $appliedCount & " migrations applied before failure)")
+      ctx.db.put(migrationAppliedKey(name), cast[seq[byte]]("applied"))
+      setMigrationRecord(ctx, MigrationRecord(
+        name: name,
+        checksum: computeChecksum(upBody),
+        appliedAt: int64(epochTime()),
+        appliedBy: ctx.currentUser,
+        durationMs: durationMs,
+        rolledBack: false
+      ))
+      appliedCount.inc
+      totalDuration += durationMs
+
+    return okResult(msg="Applied " & $appliedCount & " migrations in " & $totalDuration & "ms")
+
+  of nkMigrationDown:
+    if not acquireMigrationLock(ctx):
+      return errResult("Migration already in progress (lock held)")
+    defer: releaseMigrationLock(ctx)
+
+    var applied: seq[string] = @[]
+    for name in listMigrations(ctx):
+      if isMigrationApplied(ctx, name):
+        applied.add(name)
+
+    if applied.len == 0:
+      return okResult(msg="No applied migrations to rollback")
+
+    var toRollback = applied.reversed()
+    let rollbackCount = if stmt.mdCount > 0: stmt.mdCount else: 1
+    toRollback = toRollback[0 ..< min(rollbackCount, toRollback.len)]
+
+    var rolledBackCount = 0
+    for name in toRollback:
+      let (found, upBody, downBody) = getMigrationBody(ctx, name)
+      if not found:
+        return errResult("Migration '" & name & "' not found during rollback")
+      if downBody.len == 0:
+        return errResult("Migration '" & name & "' has no DOWN script")
+      let result = executeMigrationSql(ctx, downBody)
+      if not result.success:
+        return errResult("Rollback of '" & name & "' failed: " & result.message)
+      ctx.db.delete(migrationAppliedKey(name))
+      var rec = getMigrationRecord(ctx, name)
+      rec.rolledBack = true
+      setMigrationRecord(ctx, rec)
+      rolledBackCount.inc
+
+    return okResult(msg="Rolled back " & $rolledBackCount & " migrations")
+
+  of nkMigrationDryRun:
+    let (found, upBody, downBody) = getMigrationBody(ctx, stmt.mdrName)
+    if not found:
+      return errResult("Migration '" & stmt.mdrName & "' not found")
+    let tokens = qlex.tokenize(upBody)
     let astNode = qpar.parse(tokens)
-    var result = okResult(msg="APPLY MIGRATION " & stmt.amName)
-    if astNode.stmts.len > 0:
-      result = executeQuery(ctx, astNode)
-    # Mark as applied
-    ctx.db.put(appliedKey, cast[seq[byte]]("applied"))
-    return result
+    var msg = "DRY RUN " & stmt.mdrName & ":\n"
+    msg.add("  Statements: " & $astNode.stmts.len & "\n")
+    for i, s in astNode.stmts:
+      msg.add("  [" & $(i+1) & "] " & $s.kind & "\n")
+    msg.add("  DOWN script: " & (if downBody.len > 0: "yes" else: "no") & "\n")
+    msg.add("  Checksum: " & computeChecksum(upBody)[0..<16] & "\n")
+    return okResult(msg=msg)
 
   of nkCreateIndex:
     let idxName = if stmt.ciName.len > 0: stmt.ciName
@@ -1078,5 +1813,79 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
           ctx.btrees[key].insert(colVal, IndexEntry(lsmKey: stmt.ciTarget & "." & val, rowValue: ""))
     return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget)
 
+  of nkCreateUser:
+    ctx.users[stmt.cuName] = UserDef(name: stmt.cuName, passwordHash: stmt.cuPassword,
+                                     isSuperuser: stmt.cuSuperuser, roles: @[])
+    let userKey = "_schema:users:" & stmt.cuName
+    let userDdl = "CREATE USER " & stmt.cuName & " WITH PASSWORD '" & stmt.cuPassword & "'" &
+                  (if stmt.cuSuperuser: " SUPERUSER" else: " NOSUPERUSER")
+    ctx.db.put(userKey, cast[seq[byte]](userDdl))
+    return okResult(msg="CREATE USER " & stmt.cuName)
+
+  of nkDropUser:
+    if stmt.duName in ctx.users:
+      ctx.users.del(stmt.duName)
+    let userKey = "_schema:users:" & stmt.duName
+    ctx.db.delete(userKey)
+    return okResult(msg="DROP USER " & stmt.duName)
+
+  of nkCreatePolicy:
+    var pols = ctx.policies.getOrDefault(stmt.cpTable)
+    pols.add(PolicyDef(name: stmt.cpName, tableName: stmt.cpTable,
+                       command: stmt.cpCommand, usingExpr: stmt.cpUsing,
+                       withCheckExpr: stmt.cpWithCheck))
+    ctx.policies[stmt.cpTable] = pols
+    let polKey = "_schema:policies:" & stmt.cpTable & ":" & stmt.cpName
+    var polDdl = "CREATE POLICY " & stmt.cpName & " ON " & stmt.cpTable
+    if stmt.cpCommand != "ALL":
+      polDdl.add(" FOR " & stmt.cpCommand)
+    if stmt.cpUsing != nil:
+      polDdl.add(" USING (expr)")
+    if stmt.cpWithCheck != nil:
+      polDdl.add(" WITH CHECK (expr)")
+    ctx.db.put(polKey, cast[seq[byte]](polDdl))
+    return okResult(msg="CREATE POLICY " & stmt.cpName)
+
+  of nkDropPolicy:
+    if stmt.dpTable in ctx.policies:
+      var newPols: seq[PolicyDef] = @[]
+      for pol in ctx.policies[stmt.dpTable]:
+        if pol.name != stmt.dpName:
+          newPols.add(pol)
+      ctx.policies[stmt.dpTable] = newPols
+    let polKey = "_schema:policies:" & stmt.dpTable & ":" & stmt.dpName
+    ctx.db.delete(polKey)
+    return okResult(msg="DROP POLICY " & stmt.dpName)
+
+  of nkEnableRLS:
+    # Mark table as RLS-enabled by creating a sentinel key
+    let rlsKey = "_schema:rls:" & stmt.erlsTable
+    ctx.db.put(rlsKey, cast[seq[byte]]("enabled"))
+    return okResult(msg="ENABLE ROW LEVEL SECURITY on " & stmt.erlsTable)
+
+  of nkDisableRLS:
+    let rlsKey = "_schema:rls:" & stmt.drlsTable
+    ctx.db.delete(rlsKey)
+    return okResult(msg="DISABLE ROW LEVEL SECURITY on " & stmt.drlsTable)
+
+  of nkGrant:
+    # Store grant in LSM-Tree for persistence
+    let grantKey = "_schema:grants:" & stmt.grTable & ":" & stmt.grPrivilege & ":" & stmt.grGrantee
+    ctx.db.put(grantKey, cast[seq[byte]]("granted"))
+    return okResult(msg="GRANT " & stmt.grPrivilege & " ON " & stmt.grTable & " TO " & stmt.grGrantee)
+
+  of nkRevoke:
+    let grantKey = "_schema:grants:" & stmt.rvTable & ":" & stmt.rvPrivilege & ":" & stmt.rvGrantee
+    ctx.db.delete(grantKey)
+    return okResult(msg="REVOKE " & stmt.rvPrivilege & " ON " & stmt.rvTable & " FROM " & stmt.rvGrantee)
+
   else:
     return errResult("Unsupported statement type: " & $stmt.kind)
+
+
+proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult =
+  let tokens = qlex.tokenize(sql)
+  let astNode = qpar.parse(tokens)
+  if astNode.stmts.len > 0:
+    return executeQuery(ctx, astNode)
+  return okResult(msg="Empty migration body")

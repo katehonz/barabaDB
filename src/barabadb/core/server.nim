@@ -7,6 +7,7 @@ import std/os
 import std/endians
 import config
 import ../protocol/wire
+import ../protocol/ssl
 import ../query/lexer
 import ../query/parser
 import ../query/ast
@@ -16,11 +17,12 @@ import ../core/mvcc
 
 type
   Server* = ref object
-    config: BaraConfig
-    running: bool
-    db: LSMTree
-    ctx: ExecutionContext
-    txnManager: TxnManager
+    config*: BaraConfig
+    running*: bool
+    db*: LSMTree
+    ctx*: ExecutionContext
+    txnManager*: TxnManager
+    tls*: TLSContext
 
   ClientConnection = ref object
     socket: AsyncSocket
@@ -32,8 +34,12 @@ proc newServer*(config: BaraConfig): Server =
   let db = newLSMTree(dataDir)
   let ctx = newExecutionContext(db)
   ctx.txnManager = newTxnManager()
+  var tls: TLSContext = nil
+  if config.tlsEnabled and config.certFile.len > 0 and config.keyFile.len > 0:
+    let tlsConfig = newTLSConfig(config.certFile, config.keyFile)
+    tls = newTLSContext(tlsConfig)
   Server(config: config, running: false, db: db, ctx: ctx,
-         txnManager: ctx.txnManager)
+         txnManager: ctx.txnManager, tls: tls)
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
@@ -63,7 +69,7 @@ proc parseHeader(data: string): (bool, MessageHeader) =
 # Query Execution (pipeline-based)
 # ----------------------------------------------------------------------
 
-proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string): (bool, QueryResult, string) =
+proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[]): (bool, QueryResult, string) =
   try:
     let tokens = tokenize(query)
     let astNode = parse(tokens)
@@ -71,7 +77,7 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string): (bool, Que
     if astNode.stmts.len == 0:
       return (true, QueryResult(), "")
 
-    let result = executor.executeQuery(ctx, astNode)
+    let result = executor.executeQuery(ctx, astNode, params)
     if result.success:
       var qr = QueryResult(affectedRows: result.affectedRows, rowCount: result.rows.len)
       qr.columns = result.columns
@@ -186,6 +192,21 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           let errorMsg = serializeError(1, errorMsg, header.requestId)
           await client.send(cast[string](errorMsg))
 
+      of mkQueryParams:
+        let (queryStr, params) = readQueryParamsMessage(cast[seq[byte]](payload))
+        echo "[", clientId, "] QueryParams: ", queryStr, " (", params.len, " params)"
+
+        let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, params)
+        if success:
+          if result.rows.len > 0:
+            let dataMsg = serializeResult(result, header.requestId)
+            await client.send(cast[string](dataMsg))
+          let completeMsg = serializeComplete(result.affectedRows, header.requestId)
+          await client.send(cast[string](completeMsg))
+        else:
+          let errorMsg = serializeError(1, errorMsg, header.requestId)
+          await client.send(cast[string](errorMsg))
+
       of mkPing:
         var pongPayload: seq[byte] = @[]
         var pongMsg = WireMessage(
@@ -214,9 +235,19 @@ proc run*(server: Server) {.async.} =
   sock.setSockOpt(OptReuseAddr, true)
   sock.bindAddr(Port(server.config.port), server.config.address)
   sock.listen()
-  echo "BaraDB listening on ", server.config.address, ":", server.config.port
+  if server.config.tlsEnabled:
+    echo "BaraDB TLS listening on ", server.config.address, ":", server.config.port
+  else:
+    echo "BaraDB listening on ", server.config.address, ":", server.config.port
   while server.running:
     let client = await sock.accept()
+    if server.tls != nil:
+      try:
+        server.tls.wrapServer(client)
+      except Exception as e:
+        echo "TLS handshake failed: ", e.msg
+        client.close()
+        continue
     inc clientId
     asyncCheck server.handleClient(client, clientId)
 

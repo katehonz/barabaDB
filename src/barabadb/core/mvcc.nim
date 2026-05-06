@@ -3,6 +3,7 @@ import std/tables
 import std/locks
 import std/monotimes
 import std/sets
+import deadlock
 
 type
   TxnId* = distinct uint64
@@ -44,6 +45,7 @@ type
     committedTxns: seq[TxnId]
     globalVersions*: Table[string, seq[VersionedRecord]]
     txnTimeoutMs: int64
+    deadlockDetector*: DeadlockDetector
 
 proc `==`*(a, b: TxnId): bool {.borrow.}
 proc `==`*(a, b: Lsn): bool {.borrow.}
@@ -59,6 +61,7 @@ proc newTxnManager*(txnTimeoutMs: int64 = 30000): TxnManager =
   result.committedTxns = @[]
   result.globalVersions = initTable[string, seq[VersionedRecord]]()
   result.txnTimeoutMs = txnTimeoutMs
+  result.deadlockDetector = newDeadlockDetector()
 
 proc allocTxnId(tm: TxnManager): TxnId =
   result = TxnId(tm.nextTxnId)
@@ -167,7 +170,22 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
         otherTxn.state = tsAborted
         tm.activeTxns.del(otherId)
 
-  # Check for write-write conflict
+  # Check for write-write conflict against other active transactions' write sets
+  for otherId, otherTxn in tm.activeTxns:
+    if otherId != txn.id and otherTxn.state == tsActive:
+      if key in otherTxn.writeSet:
+        # Wait-for graph: txn is waiting for otherId to finish
+        tm.deadlockDetector.addWait(uint64(txn.id), uint64(otherId))
+        if tm.deadlockDetector.hasDeadlock():
+          let victimId = TxnId(tm.deadlockDetector.findDeadlockVictim())
+          tm.deadlockDetector.removeTxn(uint64(victimId))
+          if victimId in tm.activeTxns:
+            tm.activeTxns[victimId].state = tsAborted
+            tm.activeTxns.del(victimId)
+        release(tm.lock)
+        return false  # write-write conflict with uncommitted txn
+
+  # Check for write-write conflict with committed versions
   if key notin txn.writeSet:
     if key in tm.globalVersions:
       for version in tm.globalVersions[key]:
@@ -229,6 +247,7 @@ proc commit*(tm: TxnManager, txn: Transaction): bool =
   txn.state = tsCommitted
   tm.committedTxns.add(txn.id)
   tm.activeTxns.del(txn.id)
+  tm.deadlockDetector.removeTxn(uint64(txn.id))
   release(tm.lock)
   return true
 
@@ -239,6 +258,7 @@ proc abortTxn*(tm: TxnManager, txn: Transaction): bool =
     return false
   txn.state = tsAborted
   tm.activeTxns.del(txn.id)
+  tm.deadlockDetector.removeTxn(uint64(txn.id))
   release(tm.lock)
   return true
 

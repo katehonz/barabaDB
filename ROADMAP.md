@@ -158,7 +158,6 @@
 - [x] Nim client library (standalone nimble package — async/sync, query builder)
 - [x] Python client library (clients/python/baradb.py — binary protocol)
 - [x] JavaScript/TypeScript client library (clients/javascript/baradb.js)
-- [x] Go client library (clients/go/)
 - [x] Rust client library (clients/rust/)
 - [x] Import/Export (JSON, CSV, NDJSON)
 

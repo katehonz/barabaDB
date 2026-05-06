@@ -90,11 +90,20 @@ proc serializeValue*(buf: var seq[byte], val: WireValue) =
   case val.kind
   of fkNull: discard
   of fkBool: buf.add(if val.boolVal: 1'u8 else: 0'u8)
+  of fkInt8: buf.add(uint8(val.int8Val))
+  of fkInt16:
+    var bytes16: array[2, byte]
+    bigEndian16(addr bytes16, unsafeAddr val.int16Val)
+    buf.add(bytes16)
   of fkInt32: buf.writeUint32(uint32(val.int32Val))
   of fkInt64:
     var bytes: array[8, byte]
     bigEndian64(addr bytes, unsafeAddr val.int64Val)
     buf.add(bytes)
+  of fkFloat32:
+    var bytes32: array[4, byte]
+    copyMem(addr bytes32, unsafeAddr val.float32Val, 4)
+    buf.add(bytes32)
   of fkFloat64:
     var bytes: array[8, byte]
     copyMem(addr bytes, unsafeAddr val.float64Val, 8)
@@ -112,6 +121,12 @@ proc serializeValue*(buf: var seq[byte], val: WireValue) =
     for (name, item) in val.objVal:
       buf.writeString(name)
       buf.serializeValue(item)
+  of fkVector:
+    buf.writeUint32(uint32(val.vecVal.len))
+    for f in val.vecVal:
+      var fb: array[4, byte]
+      copyMem(addr fb, unsafeAddr f, 4)
+      buf.add(fb)
   else: discard
 
 proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
@@ -122,6 +137,16 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
   of fkBool:
     result = WireValue(kind: fkBool, boolVal: buf[pos] != 0)
     inc pos
+  of fkInt8:
+    result = WireValue(kind: fkInt8, int8Val: cast[int8](buf[pos]))
+    inc pos
+  of fkInt16:
+    var bytes16: array[2, byte]
+    for i in 0..1: bytes16[i] = buf[pos + i]
+    var v16: int16
+    bigEndian16(addr v16, unsafeAddr bytes16)
+    result = WireValue(kind: fkInt16, int16Val: v16)
+    pos += 2
   of fkInt32:
     result = WireValue(kind: fkInt32, int32Val: int32(readUint32(buf, pos)))
   of fkInt64:
@@ -131,6 +156,11 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
     bigEndian64(addr v, unsafeAddr bytes)
     result = WireValue(kind: fkInt64, int64Val: v)
     pos += 8
+  of fkFloat32:
+    var v32: float32
+    copyMem(addr v32, addr buf[pos], 4)
+    result = WireValue(kind: fkFloat32, float32Val: v32)
+    pos += 4
   of fkFloat64:
     var v: float64
     copyMem(addr v, addr buf[pos], 8)
@@ -138,6 +168,13 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
     pos += 8
   of fkString:
     result = WireValue(kind: fkString, strVal: readString(buf, pos))
+  of fkBytes:
+    let blen = int(readUint32(buf, pos))
+    var bval: seq[byte] = @[]
+    for i in 0..<blen:
+      bval.add(buf[pos + i])
+    result = WireValue(kind: fkBytes, bytesVal: bval)
+    pos += blen
   of fkArray:
     let count = int(readUint32(buf, pos))
     var arr: seq[WireValue] = @[]
@@ -152,6 +189,15 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
       let val = deserializeValue(buf, pos)
       obj.add((name, val))
     result = WireValue(kind: fkObject, objVal: obj)
+  of fkVector:
+    let dim = int(readUint32(buf, pos))
+    var vec: seq[float32] = @[]
+    for i in 0..<dim:
+      var fv: float32
+      copyMem(addr fv, addr buf[pos], 4)
+      vec.add(fv)
+      pos += 4
+    result = WireValue(kind: fkVector, vecVal: vec)
   else:
     result = WireValue(kind: fkNull)
 
@@ -216,14 +262,23 @@ proc isConnected*(client: BaraClient): bool = client.connected
 proc nextId(client: BaraClient): uint32 =
   inc client.requestId; client.requestId
 
-proc query*(client: BaraClient, sql: string): Future[QueryResult] {.async.} =
-  if not client.connected:
-    raise newException(IOError, "Not connected")
+proc wireValueToString*(wv: WireValue): string =
+  case wv.kind
+  of fkNull: return ""
+  of fkBool: return if wv.boolVal: "true" else: "false"
+  of fkInt8: return $wv.int8Val
+  of fkInt16: return $wv.int16Val
+  of fkInt32: return $wv.int32Val
+  of fkInt64: return $wv.int64Val
+  of fkFloat32: return $wv.float32Val
+  of fkFloat64: return $wv.float64Val
+  of fkString: return wv.strVal
+  of fkBytes: return "<bytes:" & $wv.bytesVal.len & ">"
+  of fkArray: return "<array:" & $wv.arrayVal.len & ">"
+  of fkObject: return "<object:" & $wv.objVal.len & ">"
+  of fkVector: return "<vector:" & $wv.vecVal.len & ">"
 
-  let msg = makeQueryMessage(client.nextId(), sql)
-  await client.socket.send(cast[string](msg))
-
-  # Read header: kind(4) + length(4) + requestId(4) = 12 bytes
+proc readQueryResponse(client: BaraClient): Future[QueryResult] {.async.} =
   let headerData = await client.socket.recv(12)
   if headerData.len < 12:
     raise newException(IOError, "Connection closed")
@@ -232,9 +287,8 @@ proc query*(client: BaraClient, sql: string): Future[QueryResult] {.async.} =
   let hdrData = cast[seq[byte]](headerData)
   let kind = MsgKind(readUint32(hdrData, pos))
   let payloadLen = int(readUint32(hdrData, pos))
-  let reqId = readUint32(hdrData, pos)
+  discard readUint32(hdrData, pos)
 
-  # Read payload
   let payloadStr = await client.socket.recv(payloadLen)
   var payload = cast[seq[byte]](payloadStr)
 
@@ -247,10 +301,56 @@ proc query*(client: BaraClient, sql: string): Future[QueryResult] {.async.} =
     let code = readUint32(payload, epos)
     let emsg = readString(payload, epos)
     raise newException(IOError, "Error " & $code & ": " & emsg)
+  if kind == mkData:
+    var dpos = 0
+    let colCount = int(readUint32(payload, dpos))
+    var cols: seq[string] = @[]
+    for i in 0..<colCount:
+      cols.add(readString(payload, dpos))
+    result.columns = cols
+    let rowCount = int(readUint32(payload, dpos))
+    for r in 0..<rowCount:
+      var row: seq[string] = @[]
+      for c in 0..<colCount:
+        let wv = deserializeValue(payload, dpos)
+        row.add(wireValueToString(wv))
+      result.rows.add(row)
+    result.rowCount = rowCount
+    # Read following mkComplete message
+    let compHeader = await client.socket.recv(12)
+    if compHeader.len >= 12:
+      var chPos = 0
+      let chData = cast[seq[byte]](compHeader)
+      let compKind = MsgKind(readUint32(chData, chPos))
+      let compLen = int(readUint32(chData, chPos))
+      discard readUint32(chData, chPos)
+      let compPayloadStr = await client.socket.recv(compLen)
+      if compKind == mkComplete:
+        var cpPos = 0
+        result.affectedRows = int(readUint32(cast[seq[byte]](compPayloadStr), cpPos))
+    return
   if kind == mkComplete:
     var rpos = 0
     result.affectedRows = int(readUint32(payload, rpos))
     return
+
+proc query*(client: BaraClient, sql: string): Future[QueryResult] {.async.} =
+  if not client.connected:
+    raise newException(IOError, "Not connected")
+
+  let msg = makeQueryMessage(client.nextId(), sql)
+  await client.socket.send(cast[string](msg))
+
+  return await client.readQueryResponse()
+
+proc query*(client: BaraClient, sql: string, params: seq[WireValue]): Future[QueryResult] {.async.} =
+  if not client.connected:
+    raise newException(IOError, "Not connected")
+
+  let msg = makeQueryParamsMessage(client.nextId(), sql, params)
+  await client.socket.send(cast[string](msg))
+
+  return await client.readQueryResponse()
 
 proc exec*(client: BaraClient, sql: string): Future[int] {.async.} =
   let qr = await client.query(sql)

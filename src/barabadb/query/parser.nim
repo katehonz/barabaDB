@@ -105,6 +105,12 @@ proc parsePrimary(p: var Parser): Node =
     let sub = p.parseSelect()
     discard p.expect(tkRParen)
     Node(kind: nkExists, existsExpr: sub, line: tok.line, col: tok.col)
+  of tkStar:
+    discard p.advance()
+    Node(kind: nkStar, line: tok.line, col: tok.col)
+  of tkPlaceholder:
+    discard p.advance()
+    Node(kind: nkPlaceholder, line: tok.line, col: tok.col)
   of tkNot:
     discard p.advance()
     let operand = p.parsePrimary()
@@ -309,9 +315,15 @@ proc parseSelect(p: var Parser): Node =
 
   # Parse SELECT list
   result.selResult = @[]
-  result.selResult.add(p.parseExpr())
+  var expr = p.parseExpr()
+  if p.match(tkAs):
+    expr.exprAlias = p.expect(tkIdent).value
+  result.selResult.add(expr)
   while p.match(tkComma):
-    result.selResult.add(p.parseExpr())
+    expr = p.parseExpr()
+    if p.match(tkAs):
+      expr.exprAlias = p.expect(tkIdent).value
+    result.selResult.add(expr)
 
   # Parse FROM
   result.selJoins = @[]
@@ -545,7 +557,7 @@ proc parseCreateTable(p: var Parser): Node =
     result.crtIfNotExists = true
 
   discard p.expect(tkTable)
-  if p.peek().kind == tkIdent and p.peek().value.toLower() == "if":
+  if p.peek().kind == tkIf:
     discard p.advance()  # if
     discard p.expect(tkNot)
     discard p.expect(tkExists)
@@ -685,8 +697,22 @@ proc parseDropTable(p: var Parser): Node =
 proc parseAlterTable(p: var Parser): Node =
   let tok = p.expect(tkAlter)
   discard p.expect(tkTable)
+  let tableName = p.expect(tkIdent).value
+  # Check for ENABLE/DISABLE ROW LEVEL SECURITY
+  if p.peek().kind == tkEnable:
+    discard p.advance()
+    discard p.expect(tkIdent)  # ROW
+    discard p.expect(tkIdent)  # LEVEL
+    discard p.expect(tkIdent)  # SECURITY
+    return Node(kind: nkEnableRLS, erlsTable: tableName, line: tok.line, col: tok.col)
+  elif p.peek().kind == tkDisable:
+    discard p.advance()
+    discard p.expect(tkIdent)  # ROW
+    discard p.expect(tkIdent)  # LEVEL
+    discard p.expect(tkIdent)  # SECURITY
+    return Node(kind: nkDisableRLS, drlsTable: tableName, line: tok.line, col: tok.col)
   result = Node(kind: nkAlterTable, line: tok.line, col: tok.col)
-  result.altName = p.expect(tkIdent).value
+  result.altName = tableName
   result.altOps = @[]
   if p.match(tkAdd):
     discard p.match(tkColumn)
@@ -764,13 +790,112 @@ proc parseDropView(p: var Parser): Node =
   result = Node(kind: nkDropView, dvName: name, dvIfExists: ifExists,
                 line: tok.line, col: tok.col)
 
+proc parseCreateTrigger(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  discard p.expect(tkTrigger)
+  let name = p.expect(tkIdent).value
+  # Parse timing: BEFORE | AFTER | INSTEAD OF
+  var timing = ""
+  let timingTok = p.peek()
+  if timingTok.kind == tkBefore:
+    discard p.advance()
+    timing = "before"
+  elif timingTok.kind == tkAfter:
+    discard p.advance()
+    timing = "after"
+  elif timingTok.kind == tkInstead:
+    discard p.advance()
+    discard p.expect(tkOf)
+    timing = "instead of"
+  else:
+    raise newException(ValueError, "Expected BEFORE, AFTER, or INSTEAD OF in TRIGGER definition")
+  # Parse event: INSERT | UPDATE | DELETE
+  var event = ""
+  let eventTok = p.peek()
+  if eventTok.kind == tkInsert:
+    discard p.advance()
+    event = "INSERT"
+  elif eventTok.kind == tkUpdate:
+    discard p.advance()
+    event = "UPDATE"
+  elif eventTok.kind == tkDelete:
+    discard p.advance()
+    event = "DELETE"
+  else:
+    raise newException(ValueError, "Expected INSERT, UPDATE, or DELETE in TRIGGER definition")
+  discard p.expect(tkOn)
+  let tableName = p.expect(tkIdent).value
+  discard p.expect(tkAs)
+  # Parse action as raw string until end of statement
+  var actionStr = ""
+  while p.pos < p.tokens.len and p.tokens[p.pos].kind != tkSemicolon:
+    actionStr.add(p.tokens[p.pos].value)
+    actionStr.add(" ")
+    discard p.advance()
+  let actionNode = Node(kind: nkStringLit, strVal: actionStr.strip())
+  result = Node(kind: nkCreateTrigger, trigName: name, trigTable: tableName,
+                trigTiming: timing, trigEvent: event, trigAction: actionNode,
+                line: tok.line, col: tok.col)
+
+proc parseDropTrigger(p: var Parser): Node =
+  let tok = p.expect(tkDrop)
+  discard p.expect(tkTrigger)
+  var ifExists = false
+  if p.peek().kind == tkIf:
+    discard p.advance()
+    discard p.expect(tkExists)
+    ifExists = true
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkDropTrigger, trigDropName: name, trigDropIfExists: ifExists,
+                line: tok.line, col: tok.col)
+
 proc parseCreateMigration(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkMigration)
   let name = p.expect(tkIdent).value
-  discard p.expect(tkAs)
-  let body = p.expect(tkStringLit).value
-  result = Node(kind: nkCreateMigration, cmName: name, cmBody: body,
+  var upBody = ""
+  var downBody = ""
+  if p.peek().kind == tkAs:
+    # Legacy syntax: CREATE MIGRATION name AS 'body'
+    discard p.advance()
+    upBody = p.expect(tkStringLit).value
+  elif p.peek().kind == tkLBrace:
+    # New syntax: CREATE MIGRATION name { UP: ...; DOWN: ...; }
+    discard p.advance()  # {
+    while p.peek().kind != tkRBrace and p.peek().kind != tkEof:
+      var section = ""
+      let sectionTok = p.peek()
+      if sectionTok.kind == tkUp:
+        discard p.advance()
+        section = "up"
+      elif sectionTok.kind == tkDown:
+        discard p.advance()
+        section = "down"
+      elif sectionTok.kind == tkIdent:
+        section = p.expect(tkIdent).value.toLower()
+      else:
+        raise newException(ValueError, "Expected UP or DOWN in migration body, got: " & $sectionTok.kind)
+      discard p.expect(tkColon)
+      var bodyStr = ""
+      while p.peek().kind != tkRBrace and p.peek().kind != tkEof:
+        # Check if next token starts a new section
+        let nextTok = p.peek()
+        if (nextTok.kind == tkUp or nextTok.kind == tkDown or
+            (nextTok.kind == tkIdent and (nextTok.value.toLower() == "up" or nextTok.value.toLower() == "down"))) and
+           p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkColon:
+          break
+        bodyStr.add(p.tokens[p.pos].value)
+        bodyStr.add(" ")
+        discard p.advance()
+      if section == "up":
+        upBody = bodyStr.strip()
+      elif section == "down":
+        downBody = bodyStr.strip()
+      else:
+        raise newException(ValueError, "Expected UP or DOWN in migration body, got: " & section)
+    discard p.expect(tkRBrace)
+  result = Node(kind: nkCreateMigration, cmName: name, cmBody: upBody,
+                cmDownBody: downBody, cmChecksum: "", cmAuthor: "", cmTimestamp: 0,
                 line: tok.line, col: tok.col)
 
 proc parseApplyMigration(p: var Parser): Node =
@@ -778,6 +903,146 @@ proc parseApplyMigration(p: var Parser): Node =
   discard p.expect(tkMigration)
   let name = p.expect(tkIdent).value
   result = Node(kind: nkApplyMigration, amName: name, line: tok.line, col: tok.col)
+
+proc parseMigrationStatus(p: var Parser): Node =
+  let tok = p.expect(tkMigration)
+  discard p.expect(tkStatus)
+  result = Node(kind: nkMigrationStatus, line: tok.line, col: tok.col)
+
+proc parseMigrationUp(p: var Parser): Node =
+  let tok = p.expect(tkMigration)
+  discard p.expect(tkUp)
+  var count = 0
+  if p.peek().kind == tkIntLit:
+    count = parseInt(p.expect(tkIntLit).value)
+  result = Node(kind: nkMigrationUp, muCount: count, line: tok.line, col: tok.col)
+
+proc parseMigrationDown(p: var Parser): Node =
+  let tok = p.expect(tkMigration)
+  discard p.expect(tkDown)
+  var count = 1
+  if p.peek().kind == tkIntLit:
+    count = parseInt(p.expect(tkIntLit).value)
+  result = Node(kind: nkMigrationDown, mdCount: count, line: tok.line, col: tok.col)
+
+proc parseMigrationDryRun(p: var Parser): Node =
+  let tok = p.expect(tkMigration)
+  discard p.expect(tkDryRun)
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkMigrationDryRun, mdrName: name, line: tok.line, col: tok.col)
+
+proc parseCreateUser(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  discard p.expect(tkUser)
+  let name = p.expect(tkIdent).value
+  var password = ""
+  var isSuper = false
+  if p.peek().kind == tkWith:
+    discard p.advance()
+    if p.peek().kind == tkIdent and p.peek().value.toLower() == "password":
+      discard p.advance()
+      password = p.expect(tkStringLit).value
+    while p.peek().kind == tkIdent:
+      let opt = p.peek().value.toLower()
+      if opt == "superuser":
+        discard p.advance()
+        isSuper = true
+      elif opt == "nosuperuser":
+        discard p.advance()
+        isSuper = false
+      else:
+        break
+  result = Node(kind: nkCreateUser, cuName: name, cuPassword: password,
+                cuSuperuser: isSuper, line: tok.line, col: tok.col)
+
+proc parseDropUser(p: var Parser): Node =
+  let tok = p.expect(tkDrop)
+  discard p.expect(tkUser)
+  var ifExists = false
+  if p.peek().kind == tkIf:
+    discard p.advance()
+    discard p.expect(tkExists)
+    ifExists = true
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkDropUser, duName: name, duIfExists: ifExists,
+                line: tok.line, col: tok.col)
+
+proc parseCreatePolicy(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  discard p.expect(tkPolicy)
+  let name = p.expect(tkIdent).value
+  discard p.expect(tkOn)
+  let tableName = p.expect(tkIdent).value
+  var cmd = "ALL"
+  var usingNode: Node = nil
+  var withCheckNode: Node = nil
+  if p.peek().kind == tkFor:
+    discard p.advance()
+    let cmdTok = p.peek()
+    if cmdTok.kind == tkIdent or cmdTok.kind == tkSelect or cmdTok.kind == tkInsert or
+       cmdTok.kind == tkUpdate or cmdTok.kind == tkDelete:
+      discard p.advance()
+      cmd = cmdTok.value.toUpper()
+    else:
+      raise newException(ValueError, "Expected ALL, SELECT, INSERT, UPDATE, or DELETE in POLICY definition")
+  if p.peek().kind == tkUsing:
+    discard p.advance()
+    usingNode = p.parseExpr()
+  if p.peek().kind == tkWith:
+    discard p.advance()
+    discard p.expect(tkCheck)
+    withCheckNode = p.parseExpr()
+  result = Node(kind: nkCreatePolicy, cpName: name, cpTable: tableName,
+                cpCommand: cmd, cpUsing: usingNode, cpWithCheck: withCheckNode,
+                line: tok.line, col: tok.col)
+
+proc parseDropPolicy(p: var Parser): Node =
+  let tok = p.expect(tkDrop)
+  discard p.expect(tkPolicy)
+  var ifExists = false
+  if p.peek().kind == tkIf:
+    discard p.advance()
+    discard p.expect(tkExists)
+    ifExists = true
+  let name = p.expect(tkIdent).value
+  discard p.expect(tkOn)
+  let tableName = p.expect(tkIdent).value
+  result = Node(kind: nkDropPolicy, dpName: name, dpTable: tableName,
+                dpIfExists: ifExists, line: tok.line, col: tok.col)
+
+proc parseGrant(p: var Parser): Node =
+  let tok = p.expect(tkGrant)
+  var priv = ""
+  let privTok = p.peek()
+  if privTok.kind == tkIdent or privTok.kind == tkSelect or privTok.kind == tkInsert or
+     privTok.kind == tkUpdate or privTok.kind == tkDelete:
+    discard p.advance()
+    priv = privTok.value.toUpper()
+  else:
+    raise newException(ValueError, "Expected privilege in GRANT")
+  discard p.expect(tkOn)
+  let tableName = p.expect(tkIdent).value
+  discard p.expect(tkTo)
+  let grantee = p.expect(tkIdent).value
+  result = Node(kind: nkGrant, grPrivilege: priv, grTable: tableName,
+                grGrantee: grantee, line: tok.line, col: tok.col)
+
+proc parseRevoke(p: var Parser): Node =
+  let tok = p.expect(tkRevoke)
+  var priv = ""
+  let privTok = p.peek()
+  if privTok.kind == tkIdent or privTok.kind == tkSelect or privTok.kind == tkInsert or
+     privTok.kind == tkUpdate or privTok.kind == tkDelete:
+    discard p.advance()
+    priv = privTok.value.toUpper()
+  else:
+    raise newException(ValueError, "Expected privilege in REVOKE")
+  discard p.expect(tkOn)
+  let tableName = p.expect(tkIdent).value
+  discard p.expect(tkFrom)
+  let grantee = p.expect(tkIdent).value
+  result = Node(kind: nkRevoke, rvPrivilege: priv, rvTable: tableName,
+                rvGrantee: grantee, line: tok.line, col: tok.col)
 
 proc parseStatement*(p: var Parser): Node =
   case p.peek().kind
@@ -796,8 +1061,14 @@ proc parseStatement*(p: var Parser): Node =
       elif next.kind == tkView or
            (next.kind == tkIdent and next.value.toLower() == "or"):
         p.parseCreateView()
+      elif next.kind == tkTrigger:
+        p.parseCreateTrigger()
       elif next.kind == tkMigration:
         p.parseCreateMigration()
+      elif next.kind == tkUser:
+        p.parseCreateUser()
+      elif next.kind == tkPolicy:
+        p.parseCreatePolicy()
       else:
         p.parseCreateType()
     else:
@@ -809,6 +1080,12 @@ proc parseStatement*(p: var Parser): Node =
         p.parseDropTable()
       elif next.kind == tkView:
         p.parseDropView()
+      elif next.kind == tkTrigger:
+        p.parseDropTrigger()
+      elif next.kind == tkUser:
+        p.parseDropUser()
+      elif next.kind == tkPolicy:
+        p.parseDropPolicy()
       else:
         let tok = p.advance()
         Node(kind: nkNullLit, line: tok.line, col: tok.col)
@@ -821,9 +1098,30 @@ proc parseStatement*(p: var Parser): Node =
     else:
       let tok = p.advance()
       Node(kind: nkNullLit, line: tok.line, col: tok.col)
+  of tkGrant:
+    p.parseGrant()
+  of tkRevoke:
+    p.parseRevoke()
   of tkApply:
     if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkMigration:
       p.parseApplyMigration()
+    else:
+      let tok = p.advance()
+      Node(kind: nkNullLit, line: tok.line, col: tok.col)
+  of tkMigration:
+    if p.pos + 1 < p.tokens.len:
+      let next = p.tokens[p.pos + 1]
+      if next.kind == tkStatus:
+        p.parseMigrationStatus()
+      elif next.kind == tkUp:
+        p.parseMigrationUp()
+      elif next.kind == tkDown:
+        p.parseMigrationDown()
+      elif next.kind == tkDryRun:
+        p.parseMigrationDryRun()
+      else:
+        let tok = p.advance()
+        Node(kind: nkNullLit, line: tok.line, col: tok.col)
     else:
       let tok = p.advance()
       Node(kind: nkNullLit, line: tok.line, col: tok.col)

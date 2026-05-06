@@ -6,6 +6,9 @@ type
     maxConnections*: int
     walEnabled*: bool
     compactionStrategy*: CompactionStrategy
+    tlsEnabled*: bool
+    certFile*: string
+    keyFile*: string
 
   CompactionStrategy* = enum
     csSizeTiered = "size_tiered"
@@ -19,6 +22,9 @@ proc defaultConfig*(): BaraConfig =
     maxConnections: 1000,
     walEnabled: true,
     compactionStrategy: csLeveled,
+    tlsEnabled: false,
+    certFile: "",
+    keyFile: "",
   )
 
 proc loadConfig*(): BaraConfig =

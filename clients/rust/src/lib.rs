@@ -19,18 +19,26 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 
 // Wire protocol constants
-const FK_NULL: u8 = 0x00;
-const FK_BOOL: u8 = 0x01;
-const FK_INT32: u8 = 0x04;
-const FK_INT64: u8 = 0x05;
-const FK_FLOAT64: u8 = 0x07;
-const FK_STRING: u8 = 0x08;
-
 const MK_QUERY: u32 = 0x02;
 const MK_READY: u32 = 0x81;
+const MK_DATA: u32 = 0x82;
 const MK_COMPLETE: u32 = 0x83;
 const MK_ERROR: u32 = 0x84;
 const MK_PING: u32 = 0x08;
+
+const FK_NULL: u8 = 0x00;
+const FK_BOOL: u8 = 0x01;
+const FK_INT8: u8 = 0x02;
+const FK_INT16: u8 = 0x03;
+const FK_INT32: u8 = 0x04;
+const FK_INT64: u8 = 0x05;
+const FK_FLOAT32: u8 = 0x06;
+const FK_FLOAT64: u8 = 0x07;
+const FK_STRING: u8 = 0x08;
+const FK_BYTES: u8 = 0x09;
+const FK_ARRAY: u8 = 0x0A;
+const FK_OBJECT: u8 = 0x0B;
+const FK_VECTOR: u8 = 0x0C;
 
 /// Connection configuration
 #[derive(Debug, Clone)]
@@ -151,6 +159,37 @@ impl Client {
 
         match kind {
             MK_READY => Ok(QueryResult { columns: vec![], rows: vec![], affected_rows: 0 }),
+            MK_DATA => {
+                let mut pos = 0usize;
+                let col_count = read_u32(&payload, &mut pos) as usize;
+                let mut columns = Vec::with_capacity(col_count);
+                for _ in 0..col_count {
+                    columns.push(read_string(&payload, &mut pos));
+                }
+                let row_count = read_u32(&payload, &mut pos) as usize;
+                let mut rows = Vec::with_capacity(row_count);
+                for _ in 0..row_count {
+                    let mut row = HashMap::new();
+                    for c in 0..col_count {
+                        let val = read_value(&payload, &mut pos);
+                        row.insert(columns[c].clone(), val);
+                    }
+                    rows.push(row);
+                }
+                // Read following COMPLETE message
+                let mut comp_header = [0u8; 12];
+                self.stream.read_exact(&mut comp_header)?;
+                let comp_kind = u32::from_be_bytes([comp_header[0], comp_header[1], comp_header[2], comp_header[3]]);
+                let comp_len = u32::from_be_bytes([comp_header[4], comp_header[5], comp_header[6], comp_header[7]]) as usize;
+                let mut comp_payload = vec![0u8; comp_len];
+                if comp_len > 0 {
+                    self.stream.read_exact(&mut comp_payload)?;
+                }
+                let affected = if comp_kind == MK_COMPLETE && comp_payload.len() >= 4 {
+                    u32::from_be_bytes([comp_payload[0], comp_payload[1], comp_payload[2], comp_payload[3]]) as usize
+                } else { 0 };
+                Ok(QueryResult { columns, rows, affected_rows: affected })
+            }
             MK_COMPLETE => {
                 let affected = if payload.len() >= 4 {
                     u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize
@@ -310,4 +349,90 @@ fn encode_string(s: &str) -> Vec<u8> {
     result.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
     result.extend_from_slice(bytes);
     result
+}
+
+
+fn read_u32(data: &[u8], pos: &mut usize) -> u32 {
+    let val = u32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+    *pos += 4;
+    val
+}
+
+fn read_string(data: &[u8], pos: &mut usize) -> String {
+    let len = read_u32(data, pos) as usize;
+    let s = String::from_utf8_lossy(&data[*pos..*pos + len]).to_string();
+    *pos += len;
+    s
+}
+
+fn read_value(data: &[u8], pos: &mut usize) -> String {
+    let kind = data[*pos];
+    *pos += 1;
+    match kind {
+        FK_NULL => String::new(),
+        FK_BOOL => {
+            let val = data[*pos] != 0;
+            *pos += 1;
+            val.to_string()
+        }
+        FK_INT8 => {
+            let val = data[*pos] as i8;
+            *pos += 1;
+            val.to_string()
+        }
+        FK_INT16 => {
+            let val = i16::from_be_bytes([data[*pos], data[*pos + 1]]);
+            *pos += 2;
+            val.to_string()
+        }
+        FK_INT32 => {
+            let val = i32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            val.to_string()
+        }
+        FK_INT64 => {
+            let val = i64::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3],
+                                          data[*pos + 4], data[*pos + 5], data[*pos + 6], data[*pos + 7]]);
+            *pos += 8;
+            val.to_string()
+        }
+        FK_FLOAT32 => {
+            let val = f32::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3]]);
+            *pos += 4;
+            val.to_string()
+        }
+        FK_FLOAT64 => {
+            let val = f64::from_be_bytes([data[*pos], data[*pos + 1], data[*pos + 2], data[*pos + 3],
+                                          data[*pos + 4], data[*pos + 5], data[*pos + 6], data[*pos + 7]]);
+            *pos += 8;
+            val.to_string()
+        }
+        FK_STRING => read_string(data, pos),
+        FK_BYTES => {
+            let len = read_u32(data, pos) as usize;
+            *pos += len;
+            format!("<bytes:{}>", len)
+        }
+        FK_ARRAY => {
+            let count = read_u32(data, pos);
+            for _ in 0..count {
+                let _ = read_value(data, pos);
+            }
+            format!("<array:{}>", count)
+        }
+        FK_OBJECT => {
+            let count = read_u32(data, pos);
+            for _ in 0..count {
+                let _ = read_string(data, pos);
+                let _ = read_value(data, pos);
+            }
+            format!("<object:{}>", count)
+        }
+        FK_VECTOR => {
+            let dim = read_u32(data, pos);
+            *pos += (dim * 4) as usize;
+            format!("<vector:{}>", dim)
+        }
+        _ => String::new(),
+    }
 }

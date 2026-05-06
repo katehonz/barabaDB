@@ -11,16 +11,17 @@ binDir        = "build"
 requires "nim >= 2.2.0"
 requires "hunos >= 1.2.0"
 requires "jwt >= 2.1.0"
+requires "checksums >= 0.2.0"
 
 # Tasks
 task build_debug, "Build debug version":
-  exec "nim c --debugger:native --linedir:on -o:build/baradadb src/baradadb.nim"
+  exec "nim c -d:ssl --debugger:native --linedir:on -o:build/baradadb src/baradadb.nim"
 
 task build_release, "Build release version":
-  exec "nim c -d:release --opt:speed -o:build/baradadb src/baradadb.nim"
+  exec "nim c -d:ssl -d:release --opt:speed -o:build/baradadb src/baradadb.nim"
 
 task test, "Run all tests":
-  exec "nim c -r tests/test_all.nim"
+  exec "nim c -d:ssl -r tests/test_all.nim"
 
 task bench, "Run benchmarks":
-  exec "nim c -d:release -r benchmarks/bench_storage.nim"
+  exec "nim c -d:ssl -d:release -r benchmarks/bench_storage.nim"

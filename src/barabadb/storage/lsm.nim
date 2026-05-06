@@ -7,7 +7,6 @@ import std/tables
 import std/monotimes
 import std/streams
 import std/locks
-import std/asyncdispatch
 import bloom
 import wal
 import mmap

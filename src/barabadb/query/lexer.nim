@@ -1,6 +1,7 @@
 ## BaraQL Lexer — tokenization
 import std/tables
 import std/strutils
+import std/unicode
 
 type
   TokenKind* = enum
@@ -91,8 +92,25 @@ type
     tkRollback
     tkExplain
     tkView
+    tkTrigger
+    tkBefore
+    tkAfter
+    tkInstead
+    tkOf
     tkMigration
     tkApply
+    tkStatus
+    tkUp
+    tkDown
+    tkDryRun
+    tkUser
+    tkPolicy
+    tkEnable
+    tkDisable
+    tkFor
+    tkUsing
+    tkGrant
+    tkRevoke
     tkCount
     tkSum
     tkAvg
@@ -141,6 +159,7 @@ type
     tkConcat
     tkCoalesce
     tkFloorDiv
+    tkPlaceholder
 
     # Special
     tkEof
@@ -237,8 +256,25 @@ const keywords*: Table[string, TokenKind] = {
   "rollback": tkRollback,
   "explain": tkExplain,
   "view": tkView,
+  "trigger": tkTrigger,
+  "before": tkBefore,
+  "after": tkAfter,
+  "instead": tkInstead,
+  "of": tkOf,
   "migration": tkMigration,
   "apply": tkApply,
+  "status": tkStatus,
+  "up": tkUp,
+  "down": tkDown,
+  "dryrun": tkDryRun,
+  "user": tkUser,
+  "policy": tkPolicy,
+  "enable": tkEnable,
+  "disable": tkDisable,
+  "for": tkFor,
+  "using": tkUsing,
+  "grant": tkGrant,
+  "revoke": tkRevoke,
   "count": tkCount,
   "sum": tkSum,
   "avg": tkAvg,
@@ -272,6 +308,32 @@ proc advance(l: var Lexer): char =
     l.col = 1
   else:
     inc l.col
+
+proc peekRune(l: Lexer): Rune =
+  if l.pos < l.input.len:
+    var p = l.pos
+    var r: Rune
+    fastRuneAt(l.input, p, r, true)
+    return r
+  return Rune(0)
+
+proc advanceRune(l: var Lexer): Rune =
+  if l.pos < l.input.len:
+    var r: Rune
+    fastRuneAt(l.input, l.pos, r, true)
+    if r == Rune('\n'):
+      inc l.line
+      l.col = 1
+    else:
+      inc l.col
+    return r
+  return Rune(0)
+
+proc isIdentStartRune(r: Rune): bool =
+  return isAlpha(r) or r == Rune('_')
+
+proc isIdentPartRune(r: Rune): bool =
+  return isAlpha(r) or (r.int >= ord('0') and r.int <= ord('9')) or r == Rune('_')
 
 proc skipWhitespace(l: var Lexer) =
   while l.pos < l.input.len and l.input[l.pos] in {' ', '\t', '\r', '\n'}:
@@ -326,9 +388,15 @@ proc readNumber(l: var Lexer, startLine, startCol: int): Token =
 
 proc readIdent(l: var Lexer, startLine, startCol: int): Token =
   var ident = ""
-  while l.pos < l.input.len and (l.input[l.pos] in IdentChars or l.input[l.pos] in Digits):
-    ident.add(l.input[l.pos])
-    discard l.advance()
+  while l.pos < l.input.len:
+    let r = l.peekRune()
+    if isIdentPartRune(r):
+      var run: Rune
+      fastRuneAt(l.input, l.pos, run, true)
+      ident.add($run)
+      inc l.col
+    else:
+      break
   let lowerIdent = ident.toLower()
   if lowerIdent in keywords:
     Token(kind: keywords[lowerIdent], value: ident, line: startLine, col: startCol)
@@ -428,7 +496,7 @@ proc nextToken*(l: var Lexer): Token =
       discard l.advance()
       return Token(kind: tkCoalesce, value: "??", line: startLine, col: startCol)
     discard l.advance()
-    return Token(kind: tkInvalid, value: "?", line: startLine, col: startCol)
+    return Token(kind: tkPlaceholder, value: "?", line: startLine, col: startCol)
   of '.':
     if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '<':
       discard l.advance()
@@ -479,7 +547,7 @@ proc nextToken*(l: var Lexer): Token =
   else:
     if ch in Digits:
       return l.readNumber(startLine, startCol)
-    elif ch in IdentStartChars:
+    elif ch in IdentStartChars or isIdentStartRune(l.peekRune()):
       return l.readIdent(startLine, startCol)
     else:
       discard l.advance()

@@ -49,6 +49,7 @@ type
     irekCast
     irekConditional
     irekExists
+    irekStar
 
   IRJoinKind* = enum
     irjkInner
@@ -163,6 +164,8 @@ type
       elseExpr*: IRExpr
     of irekExists:
       existsSubquery*: IRPlan
+    of irekStar:
+      discard
 
 type
   TypeChecker* = ref object
@@ -240,3 +243,5 @@ proc inferExpr*(tc: TypeChecker, expr: IRExpr, context: Table[string, IRType]): 
     return thenType
   of irekExists:
     return IRType(name: "bool", kind: itkScalar)
+  of irekStar:
+    return IRType(name: "star", kind: itkScalar)

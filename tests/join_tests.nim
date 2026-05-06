@@ -1,0 +1,75 @@
+import std/unittest
+import std/os
+import std/strutils
+import barabadb/core/types
+import barabadb/query/executor as qexec
+import barabadb/query/parser
+import barabadb/query/ast
+import barabadb/storage/lsm
+
+proc execSql(ctx: qexec.ExecutionContext, sql: string): qexec.ExecResult =
+  qexec.executeQuery(ctx, parse(sql))
+
+# ---------------------------------------------------------------------------
+suite "JOIN execution":
+  var db: LSMTree
+  var ctx: qexec.ExecutionContext
+
+  setup:
+    db = newLSMTree("")
+    ctx = qexec.newExecutionContext(db)
+    discard execSql(ctx, "CREATE TABLE users (id INT, name TEXT)")
+    discard execSql(ctx, "CREATE TABLE orders (id INT, user_id INT, total REAL)")
+    discard execSql(ctx, "INSERT INTO users (id, name) VALUES (1, 'Alice')")
+    discard execSql(ctx, "INSERT INTO users (id, name) VALUES (2, 'Bob')")
+    discard execSql(ctx, "INSERT INTO orders (id, user_id, total) VALUES (10, 1, 99.5)")
+    discard execSql(ctx, "INSERT INTO orders (id, user_id, total) VALUES (20, 1, 23.0)")
+    discard execSql(ctx, "INSERT INTO orders (id, user_id, total) VALUES (30, 3, 150.0)")
+
+  teardown:
+    discard
+
+  test "INNER JOIN returns matching rows only":
+    let r = execSql(ctx, "SELECT * FROM users u JOIN orders o ON u.id = o.user_id")
+    check r.rows.len == 2
+    check r.rows[0]["name"] == "Alice"
+    check r.rows[0]["total"] == "99.5"
+
+  test "LEFT JOIN keeps unmatched left rows":
+    let r = execSql(ctx, "SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id")
+    check r.rows.len == 3
+    check r.rows[0]["name"] == "Alice"
+    check r.rows[1]["name"] == "Alice"
+    check r.rows[2]["name"] == "Bob"
+    check r.rows[2]["total"] == ""  # NULL represented as empty string
+
+  test "RIGHT JOIN keeps unmatched right rows":
+    let r = execSql(ctx, "SELECT * FROM users u RIGHT JOIN orders o ON u.id = o.user_id")
+    check r.rows.len == 3
+    check r.rows[2]["id"] == "30"
+    check r.rows[2]["name"] == ""  # NULL
+    check r.rows[2]["total"] == "150.0"
+
+  test "FULL JOIN keeps all rows":
+    let r = execSql(ctx, "SELECT * FROM users u FULL JOIN orders o ON u.id = o.user_id")
+    check r.rows.len == 4
+
+  test "CROSS JOIN cartesian product":
+    let r = execSql(ctx, "SELECT * FROM users u CROSS JOIN orders o")
+    check r.rows.len == 6
+
+  test "aliased column projection":
+    let r = execSql(ctx, "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id")
+    check r.rows.len == 2
+    check r.rows[0]["name"] == "Alice"
+    check r.rows[0]["total"] == "99.5"
+    check "id" notin r.rows[0]
+
+  test "count after FULL JOIN":
+    let r = execSql(ctx, "SELECT COUNT(*) AS cnt FROM users u FULL JOIN orders o ON u.id = o.user_id")
+    check r.rows.len == 1
+    check r.rows[0]["cnt"] == "4"
+
+  test "count after CROSS JOIN":
+    let r = execSql(ctx, "SELECT COUNT(*) AS cnt FROM users u CROSS JOIN orders o")
+    check r.rows[0]["cnt"] == "6"

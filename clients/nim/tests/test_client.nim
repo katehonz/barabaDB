@@ -127,3 +127,58 @@ suite "Client async":
   test "Client nextId":
     let client = newClient()
     check not client.isConnected
+
+
+suite "Wire Protocol Extended":
+  test "Int8 value roundtrip":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkInt8, int8Val: -42)
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkInt8
+    check decoded.int8Val == -42
+
+  test "Int16 value roundtrip":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkInt16, int16Val: -1000)
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkInt16
+    check decoded.int16Val == -1000
+
+  test "Float32 value roundtrip":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkFloat32, float32Val: 3.14'f32)
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkFloat32
+    check decoded.float32Val == 3.14'f32
+
+  test "Bytes value roundtrip":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkBytes, bytesVal: @[1'u8, 2'u8, 3'u8])
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkBytes
+    check decoded.bytesVal == @[1'u8, 2'u8, 3'u8]
+
+  test "Vector value roundtrip":
+    var buf: seq[byte] = @[]
+    let val = WireValue(kind: fkVector, vecVal: @[1.0'f32, 2.0'f32, 3.0'f32])
+    buf.serializeValue(val)
+    var pos = 0
+    let decoded = buf.deserializeValue(pos)
+    check decoded.kind == fkVector
+    check decoded.vecVal.len == 3
+    check decoded.vecVal[0] == 1.0'f32
+
+  test "WireValue to string":
+    check wireValueToString(WireValue(kind: fkNull)) == ""
+    check wireValueToString(WireValue(kind: fkBool, boolVal: true)) == "true"
+    check wireValueToString(WireValue(kind: fkInt32, int32Val: 42)) == "42"
+    check wireValueToString(WireValue(kind: fkString, strVal: "hello")) == "hello"
+    check wireValueToString(WireValue(kind: fkVector, vecVal: @[1.0'f32])) == "<vector:1>"

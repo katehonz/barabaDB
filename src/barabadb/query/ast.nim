@@ -22,8 +22,22 @@ type
     nkExplainStmt
     nkCreateView
     nkDropView
+    nkCreateTrigger
+    nkDropTrigger
     nkCreateMigration
     nkApplyMigration
+    nkMigrationStatus
+    nkMigrationUp
+    nkMigrationDown
+    nkMigrationDryRun
+    nkCreateUser
+    nkDropUser
+    nkCreatePolicy
+    nkDropPolicy
+    nkEnableRLS
+    nkDisableRLS
+    nkGrant
+    nkRevoke
 
     # Clauses
     nkFrom
@@ -59,6 +73,8 @@ type
     nkBetweenExpr
     nkLikeExpr
     nkIsExpr
+    nkStar
+    nkPlaceholder
 
     # Graph-specific
     nkGraphTraversal
@@ -129,6 +145,7 @@ type
   Node* = ref object
     line*: int
     col*: int
+    exprAlias*: string
     case kind*: NodeKind
     of nkSelect:
       selDistinct*: bool
@@ -211,11 +228,61 @@ type
     of nkDropView:
       dvName*: string
       dvIfExists*: bool
+    of nkCreateTrigger:
+      trigName*: string
+      trigTable*: string
+      trigTiming*: string  # BEFORE, AFTER, INSTEAD OF
+      trigEvent*: string   # INSERT, UPDATE, DELETE
+      trigAction*: Node    # SQL statement to execute
+    of nkDropTrigger:
+      trigDropName*: string
+      trigDropIfExists*: bool
     of nkCreateMigration:
       cmName*: string
-      cmBody*: string
+      cmBody*: string      # UP migration body (SQL string)
+      cmDownBody*: string  # DOWN migration body (SQL string)
+      cmChecksum*: string  # SHA256 of cmBody
+      cmAuthor*: string
+      cmTimestamp*: int64
+    of nkCreateUser:
+      cuName*: string
+      cuPassword*: string
+      cuSuperuser*: bool
+    of nkDropUser:
+      duName*: string
+      duIfExists*: bool
+    of nkCreatePolicy:
+      cpName*: string
+      cpTable*: string
+      cpCommand*: string   # ALL, SELECT, INSERT, UPDATE, DELETE
+      cpUsing*: Node       # USING expression
+      cpWithCheck*: Node   # WITH CHECK expression
+    of nkDropPolicy:
+      dpName*: string
+      dpTable*: string
+      dpIfExists*: bool
+    of nkEnableRLS:
+      erlsTable*: string
+    of nkDisableRLS:
+      drlsTable*: string
+    of nkGrant:
+      grPrivilege*: string  # SELECT, INSERT, UPDATE, DELETE, ALL
+      grTable*: string
+      grGrantee*: string    # user, role, or PUBLIC
+    of nkRevoke:
+      rvPrivilege*: string
+      rvTable*: string
+      rvGrantee*: string
     of nkApplyMigration:
       amName*: string
+    of nkMigrationStatus:
+      discard  # no fields needed
+    of nkMigrationUp:
+      muCount*: int  # 0 = all, N = apply N pending migrations
+    of nkMigrationDown:
+      mdCount*: int  # 0 = 1, N = rollback N migrations
+    of nkMigrationDryRun:
+      mdrName*: string  # migration name to dry-run
     of nkCreateIndex:
       ciTarget*: string
       ciName*: string
@@ -344,6 +411,10 @@ type
       joinTarget*: Node
       joinOn*: Node
       joinAlias*: string
+    of nkStar:
+      discard
+    of nkPlaceholder:
+      discard
     of nkPropertyDef:
       pdName*: string
       pdType*: string
