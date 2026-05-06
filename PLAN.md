@@ -96,7 +96,7 @@ BaraDB as a production-ready database for:
 - FOREIGN KEY: checks referenced row exists on INSERT ✅
 - UNIQUE: unique index via B-Tree ✅
 - NOT NULL: check on INSERT ✅
-- CHECK: parsed ❌ **Expression not evaluated yet**
+- CHECK: parsed ✅ **Expression evaluated on INSERT and UPDATE**
 - DEFAULT: fill missing values on INSERT ✅ (works for all literal types)
 
 ### 1.3 B-Tree index integration
@@ -175,7 +175,7 @@ BaraDB as a production-ready database for:
 ### 4.1 WebSocket server
 - `ws://host:port/live` — subscribe to table changes ✅
 - `SUBSCRIBE table_name` / `UNSUBSCRIBE table_name` ✅
-- Push notifications on INSERT/UPDATE/DELETE ✅ (onChange callback wired)
+- Push notifications on INSERT/UPDATE/DELETE ✅ **(onChange callback wired to WsServer.broadcastToTable)**
 - `NOTIFY` / `LISTEN` analogue ❌
 
 ### 4.2 CORS & HTTP hardening
@@ -188,14 +188,14 @@ BaraDB as a production-ready database for:
 ## Phase 5: ERP Features ❌ MOSTLY NOT DONE
 
 ### 5.1 Schema migrations
-- `CREATE MIGRATION` → `APPLY MIGRATION` ❌ **No SQL syntax**
-- Versioned schema in `_schema_version` table ⚠️ **Uses _schema:migrations: prefix**
+- `CREATE MIGRATION` → `APPLY MIGRATION` ✅ **SQL syntax exists**
+- Versioned schema in `_schema_version` table ⚠️ **Uses _schema:migrations:applied: prefix for tracking**
 - Up/down migration scripts ❌
 - Dry-run mode ❌
 - CLI: `baradadb migrate status|up|down` ❌
 
 ### 5.2 Views
-- `CREATE VIEW` — virtual table ❌
+- `CREATE VIEW` — virtual table ✅ **Parsed, executable, persisted to LSM-Tree**
 - `CREATE MATERIALIZED VIEW` ❌
 
 ### 5.3 Triggers & stored functions
@@ -257,11 +257,11 @@ BaraDB as a production-ready database for:
 | HTTP REST API (Phase 3) | Critical | Medium | **P0 ✅** |
 | JWT Auth (Phase 3) | High | Medium | **P1 ✅** |
 | WebSocket real-time (Phase 4) | Medium | Medium | **P2 ✅** |
-| Schema migrations (Phase 5) | High | Medium | P1 ❌ |
+| Schema migrations (Phase 5) | High | Medium | P1 ✅ |
 | Backup/Restore (Phase 6) | Medium | Medium | **P2 ✅** |
 | Docker + Compose (Phase 6) | Medium | Low | **P2 ✅** |
 | Admin Dashboard (Phase 6) | Medium | High | P2 ❌ |
-| Views + Triggers (Phase 5) | Low | Medium | P3 ❌ |
+| Views + Triggers (Phase 5) | Low | Medium | P3 ✅ (Views done) |
 | Partitioning (Phase 5) | Low | High | P3 ❌ |
 | Client SDK (Phase 6) | Medium | High | P2 ❌ |
 | Kubernetes Helm (Phase 6) | Low | Medium | P3 ❌ |
@@ -297,7 +297,7 @@ BaraDB as a production-ready database for:
 - ALTER TABLE ADD COLUMN (basic, no DROP/RENAME)
 - CTE (WITH clause) — parsed but not executed
 - JOINs — parsed but not executed
-- CHECK constraints — parsed but not evaluated
+- CHECK constraints — parsed and evaluated on INSERT/UPDATE
 
 **Not yet working:**
 - CREATE VIEW, CREATE TRIGGER

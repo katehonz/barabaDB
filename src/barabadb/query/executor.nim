@@ -45,6 +45,7 @@ type
   CheckDef* = object
     name*: string
     expr*: string  # stored expression string
+    checkNode*: Node  # AST for runtime evaluation
 
   TableDef* = object
     name*: string
@@ -123,6 +124,8 @@ proc restoreSchema(ctx: ExecutionContext) =
                 else: discard
             tbl.columns.add(colDef)
         ctx.tables[stmt.crtName] = tbl
+      of nkCreateView:
+        ctx.views[stmt.cvName] = stmt.cvQuery
       else: discard
 
 proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
@@ -429,6 +432,20 @@ proc validateConstraints*(ctx: ExecutionContext, tableName: string,
           let idxName = tableName & "." & col.name
           if idxName in ctx.btrees and ctx.btrees[idxName].contains(uVal):
             return (false, "UNIQUE constraint violated: duplicate '" & uVal & "' for column '" & col.name & "'")
+
+    # CHECK constraints
+    for check in tbl.checks:
+      if check.checkNode != nil:
+        var row = initTable[string, string]()
+        for i, f in fields:
+          if i < rowVals.len:
+            row[f] = rowVals[i]
+          else:
+            row[f] = ""
+        let checkExpr = lowerExpr(check.checkNode)
+        let checkResult = evalExpr(checkExpr, row)
+        if checkResult != "true":
+          return (false, "CHECK constraint '" & check.name & "' violated")
 
   return (true, "")
 
@@ -834,6 +851,19 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
       # Get key from row
       if "$key" in row:
         let old = row["$key"]
+        # Build updated row for constraint validation
+        var updFields: seq[string] = @[]
+        var updValues: seq[string] = @[]
+        for col in ctx.getTableDef(stmt.updTarget).columns:
+          updFields.add(col.name)
+          if col.name in sets:
+            updValues.add(sets[col.name])
+          elif col.name in row:
+            updValues.add(row[col.name])
+          else:
+            updValues.add("")
+        let (valid, errMsg) = validateConstraints(ctx, stmt.updTarget, updFields, @[updValues])
+        if not valid: return errResult(errMsg)
         count += execUpdateRow(ctx, stmt.updTarget, row["$key"], sets)
         if ctx.onChange != nil:
           ctx.onChange(ChangeEvent(table: stmt.updTarget, kind: ckUpdate, key: old, data: ""))
@@ -877,7 +907,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
                 tbl.columns[i].fkTable = cstNode.cstRefTable
                 tbl.columns[i].fkColumn = if cstNode.cstRefColumns.len > 0: cstNode.cstRefColumns[0] else: ""
         elif cstNode.cstType == "check":
-          tbl.checks.add(CheckDef(name: "check_" & $tbl.checks.len))
+          tbl.checks.add(CheckDef(name: "check_" & $tbl.checks.len, checkNode: cstNode.cstCheck))
 
     # Second pass: column definitions
     for col in stmt.crtColumns:
@@ -904,7 +934,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
               colDef.fkTable = cst.cstRefTable
               colDef.fkColumn = if cst.cstRefColumns.len > 0: cst.cstRefColumns[0] else: ""
             of "check":
-              tbl.checks.add(CheckDef(name: "check_" & col.cdName))
+              tbl.checks.add(CheckDef(name: "check_" & col.cdName, checkNode: cst.cstCheck))
             else: discard
         tbl.columns.add(colDef)
     ctx.tables[stmt.crtName] = tbl
@@ -991,13 +1021,17 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
 
   of nkCreateView:
     ctx.views[stmt.cvName] = stmt.cvQuery
+    let viewKey = "_schema:views:" & stmt.cvName
+    let viewDdl = "CREATE VIEW " & stmt.cvName & " AS SELECT 1"  # placeholder; real AST serialization needed
+    ctx.db.put(viewKey, cast[seq[byte]](viewDdl))
     return okResult(msg="CREATE VIEW " & stmt.cvName)
 
   of nkDropView:
     if stmt.dvName in ctx.views:
       ctx.views.del(stmt.dvName)
-      return okResult(msg="DROP VIEW " & stmt.dvName)
-    return errResult("View '" & stmt.dvName & "' does not exist")
+    let viewKey = "_schema:views:" & stmt.dvName
+    ctx.db.delete(viewKey)
+    return okResult(msg="DROP VIEW " & stmt.dvName)
 
   of nkCreateMigration:
     # Store migration in LSM-Tree
@@ -1006,6 +1040,11 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
     return okResult(msg="CREATE MIGRATION " & stmt.cmName)
 
   of nkApplyMigration:
+    # Check if already applied
+    let appliedKey = "_schema:migrations:applied:" & stmt.amName
+    let (alreadyApplied, _) = ctx.db.get(appliedKey)
+    if alreadyApplied:
+      return okResult(msg="Migration '" & stmt.amName & "' already applied")
     # Execute stored migration SQL
     let migKey = "_schema:migration:" & stmt.amName
     let (found, val) = ctx.db.get(migKey)
@@ -1014,9 +1053,12 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node): ExecResult =
     let sql = cast[string](val)
     let tokens = qlex.tokenize(sql)
     let astNode = qpar.parse(tokens)
+    var result = okResult(msg="APPLY MIGRATION " & stmt.amName)
     if astNode.stmts.len > 0:
-      return executeQuery(ctx, astNode)
-    return okResult(msg="APPLY MIGRATION " & stmt.amName)
+      result = executeQuery(ctx, astNode)
+    # Mark as applied
+    ctx.db.put(appliedKey, cast[seq[byte]]("applied"))
+    return result
 
   of nkCreateIndex:
     let idxName = if stmt.ciName.len > 0: stmt.ciName

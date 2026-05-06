@@ -15,6 +15,7 @@ import ../query/executor
 import ../storage/lsm
 import ../core/mvcc
 import ../protocol/ratelimit
+import ../core/websocket
 import jwt as jwtlib
 
 type
@@ -25,6 +26,7 @@ type
     ctx: ExecutionContext
     metrics*: Metrics
     secretKey*: string
+    ws*: WsServer
 
   Metrics* = ref object
     queriesTotal*: int
@@ -38,9 +40,13 @@ proc newHttpServer*(config: BaraConfig): HttpServer =
   let db = newLSMTree(dataDir)
   let ctx = newExecutionContext(db)
   ctx.txnManager = newTxnManager()
+  let ws = newWsServer()
+  ctx.onChange = proc(ev: ChangeEvent) =
+    let msg = $ev.kind & " " & ev.table
+    asyncCheck ws.broadcastToTable(ev.table, msg)
   HttpServer(config: config, running: false, db: db, ctx: ctx,
              secretKey: "baradb-default-secret-change-in-production!",
-             metrics: Metrics())
+             metrics: Metrics(), ws: ws)
 
 # ----------------------------------------------------------------------
 # JWT helpers
@@ -293,8 +299,10 @@ proc run*(server: HttpServer, port: int = 8080) =
   let hunosServer = newServer(stack)
   echo "BaraDB HTTP listening on port ", port
   server.running = true
+  asyncCheck server.ws.run(port + 1)
   hunosServer.serve(Port(port))
 
 proc stop*(server: HttpServer) =
   server.running = false
+  server.ws.stop()
   server.db.close()
