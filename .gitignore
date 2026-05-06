@@ -13,3 +13,6 @@ data/
 # OS
 .DS_Store
 Thumbs.db
+
+# External references
+GEL/

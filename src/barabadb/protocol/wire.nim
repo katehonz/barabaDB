@@ -87,48 +87,48 @@ type
     rowCount*: int
     affectedRows*: int
 
-proc writeUint32(buf: var seq[byte], val: uint32) =
+proc writeUint32*(buf: var seq[byte], val: uint32) =
   var bytes: array[4, byte]
   bigEndian32(addr bytes, unsafeAddr val)
   buf.add(bytes)
 
-proc writeUint64(buf: var seq[byte], val: uint64) =
+proc writeUint64*(buf: var seq[byte], val: uint64) =
   var bytes: array[8, byte]
   bigEndian64(addr bytes, unsafeAddr val)
   buf.add(bytes)
 
-proc writeString(buf: var seq[byte], s: string) =
+proc writeString*(buf: var seq[byte], s: string) =
   buf.writeUint32(uint32(s.len))
   for ch in s:
     buf.add(byte(ch))
 
-proc writeBytes(buf: var seq[byte], data: openArray[byte]) =
+proc writeBytes*(buf: var seq[byte], data: openArray[byte]) =
   buf.writeUint32(uint32(data.len))
   for b in data:
     buf.add(b)
 
-proc readUint32(buf: openArray[byte], pos: var int): uint32 =
+proc readUint32*(buf: openArray[byte], pos: var int): uint32 =
   var bytes: array[4, byte]
   for i in 0..3:
     bytes[i] = buf[pos + i]
   bigEndian32(addr result, unsafeAddr bytes)
   pos += 4
 
-proc readUint64(buf: openArray[byte], pos: var int): uint64 =
+proc readUint64*(buf: openArray[byte], pos: var int): uint64 =
   var bytes: array[8, byte]
   for i in 0..7:
     bytes[i] = buf[pos + i]
   bigEndian64(addr result, unsafeAddr bytes)
   pos += 8
 
-proc readString(buf: openArray[byte], pos: var int): string =
+proc readString*(buf: openArray[byte], pos: var int): string =
   let len = int(readUint32(buf, pos))
   result = newString(len)
   for i in 0..<len:
     result[i] = char(buf[pos + i])
   pos += len
 
-proc readBytes(buf: openArray[byte], pos: var int): seq[byte] =
+proc readBytes*(buf: openArray[byte], pos: var int): seq[byte] =
   let len = int(readUint32(buf, pos))
   result = newSeq[byte](len)
   for i in 0..<len:

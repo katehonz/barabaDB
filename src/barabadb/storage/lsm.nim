@@ -403,3 +403,11 @@ proc close*(db: var LSMTree) =
 proc memTableSize*(db: LSMTree): int = db.memTable.len
 proc sstableCount*(db: LSMTree): int = db.sstables.len
 proc dir*(db: LSMTree): string = db.dir
+
+proc scanMemTable*(db: LSMTree): seq[Entry] =
+  ## Return all entries from memory (memTable + immutableMem)
+  result = @[]
+  for e in db.memTable.entries:
+    result.add(e)
+  for e in db.immutableMem.entries:
+    result.add(e)
