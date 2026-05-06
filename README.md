@@ -1,6 +1,6 @@
 # BaraDB
 
-![BaraDB Logo](baradb_b24a2740917f.jpeg)
+![BaraDB Logo](baabaaage.png)
 
 **A multimodal database engine written in Nim — 100% native, zero dependencies.**
 
