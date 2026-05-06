@@ -5,6 +5,12 @@ import std/deques
 import std/algorithm
 import std/random
 import std/monotimes
+import std/asyncdispatch
+import std/asyncnet
+import std/streams
+import std/strutils
+import std/endians
+import ../protocol/wire
 
 type
   RaftState* = enum
@@ -36,6 +42,8 @@ type
     electionTimeout*: int
     heartbeatTimeout*: int
     votesReceived*: HashSet[string]
+    peerAddrs*: Table[string, tuple[host: string, port: int]]
+    raftPort*: int
 
   RaftMessageKind* = enum
     rmkRequestVote
@@ -63,7 +71,7 @@ type
     nodes*: Table[string, RaftNode]
     messageQueue*: Deque[RaftMessage]
 
-proc newRaftNode*(id: string, peers: seq[string]): RaftNode =
+proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0): RaftNode =
   randomize()
   RaftNode(
     id: id,
@@ -80,6 +88,8 @@ proc newRaftNode*(id: string, peers: seq[string]): RaftNode =
     electionTimeout: 150 + rand(150),
     heartbeatTimeout: 50,
     votesReceived: initHashSet[string](),
+    peerAddrs: initTable[string, tuple[host: string, port: int]](),
+    raftPort: raftPort,
   )
 
 proc newRaftCluster*(): RaftCluster =
@@ -305,23 +315,234 @@ proc checkTimeout*(timer: ElectionTimer): bool =
   let elapsed = (getMonoTime().ticks() - timer.lastHeartbeat) div 1_000_000
   return elapsed > timer.timeoutMs
 
-proc startElection*(timer: ElectionTimer) =
+proc stop*(timer: ElectionTimer) =
+  timer.running = false
+
+# ---------------------------------------------------------------------------
+# Network Transport — async TCP communication for Raft
+# ---------------------------------------------------------------------------
+
+const
+  RaftMagic = "RAFT"
+  RaftProtoVersion = 1'u32
+
+proc writeString(s: Stream, str: string) =
+  s.write(uint32(str.len))
+  if str.len > 0:
+    s.writeData(str[0].unsafeAddr, str.len)
+
+proc readString(s: Stream): string =
+  let len = int(s.readUint32())
+  if len > 0:
+    result = newString(len)
+    discard s.readData(result[0].addr, len)
+  else:
+    result = ""
+
+proc writeLogEntry(s: Stream, entry: LogEntry) =
+  s.write(entry.term)
+  s.write(entry.index)
+  s.writeString(entry.command)
+  s.write(uint32(entry.data.len))
+  if entry.data.len > 0:
+    for b in entry.data:
+      s.write(char(b))
+
+proc readLogEntry(s: Stream): LogEntry =
+  result.term = s.readUint64()
+  result.index = s.readUint64()
+  result.command = s.readString()
+  let dataLen = int(s.readUint32())
+  result.data = newSeq[byte](dataLen)
+  for i in 0 ..< dataLen:
+    result.data[i] = byte(s.readChar())
+
+proc serialize*(msg: RaftMessage): seq[byte] =
+  let stream = newStringStream()
+  stream.write(RaftMagic)
+  stream.write(RaftProtoVersion)
+  stream.write(uint32(ord(msg.kind)))
+  stream.write(msg.term)
+  stream.writeString(msg.senderId)
+  stream.write(msg.lastLogIndex)
+  stream.write(msg.lastLogTerm)
+  stream.write(msg.prevLogIndex)
+  stream.write(msg.prevLogTerm)
+  stream.write(uint32(msg.entries.len))
+  for entry in msg.entries:
+    stream.writeLogEntry(entry)
+  stream.write(msg.leaderCommit)
+  stream.write(char(if msg.success: 1 else: 0))
+  stream.write(msg.matchIdx)
+  let strData = stream.data
+  result = newSeq[byte](strData.len)
+  for i in 0 ..< strData.len:
+    result[i] = byte(strData[i])
+  stream.close()
+
+proc deserializeRaftMessage*(data: seq[byte]): RaftMessage =
+  let stream = newStringStream(cast[string](data))
+  let magic = stream.readStr(4)
+  if magic != RaftMagic:
+    raise newException(ValueError, "Invalid Raft magic bytes")
+  let version = stream.readUint32()
+  if version != RaftProtoVersion:
+    raise newException(ValueError, "Unsupported Raft protocol version")
+  result.kind = RaftMessageKind(stream.readUint32())
+  result.term = stream.readUint64()
+  result.senderId = stream.readString()
+  result.lastLogIndex = stream.readUint64()
+  result.lastLogTerm = stream.readUint64()
+  result.prevLogIndex = stream.readUint64()
+  result.prevLogTerm = stream.readUint64()
+  let entryCount = int(stream.readUint32())
+  result.entries = newSeq[LogEntry](entryCount)
+  for i in 0 ..< entryCount:
+    result.entries[i] = stream.readLogEntry()
+  result.leaderCommit = stream.readUint64()
+  result.success = stream.readChar() != '\0'
+  result.matchIdx = stream.readUint64()
+  stream.close()
+
+# ---------------------------------------------------------------------------
+# RaftNetwork — async TCP transport
+# ---------------------------------------------------------------------------
+
+type
+  RaftNetwork* = ref object
+    node*: RaftNode
+    socket*: AsyncSocket
+    running*: bool
+    peerSockets*: Table[string, AsyncSocket]
+
+proc newRaftNetwork*(node: RaftNode): RaftNetwork =
+  RaftNetwork(
+    node: node,
+    running: false,
+    peerSockets: initTable[string, AsyncSocket](),
+  )
+
+proc connectToPeer(net: RaftNetwork, peerId: string) {.async.} =
+  if peerId notin net.node.peerAddrs:
+    return
+  let (host, port) = net.node.peerAddrs[peerId]
+  try:
+    let sock = newAsyncSocket()
+    await sock.connect(host, Port(port))
+    net.peerSockets[peerId] = sock
+  except:
+    discard
+
+proc send*(net: RaftNetwork, peerId: string, msg: RaftMessage) {.async.} =
+  if peerId notin net.peerSockets:
+    await net.connectToPeer(peerId)
+  if peerId in net.peerSockets:
+    let data = serialize(msg)
+    let payloadLen = uint32(data.len)
+    var header = newSeq[byte](4)
+    bigEndian32(addr header[0], unsafeAddr payloadLen)
+    try:
+      await net.peerSockets[peerId].send(cast[string](header) & cast[string](data))
+    except:
+      net.peerSockets.del(peerId)
+
+proc broadcast*(net: RaftNetwork, msgs: seq[RaftMessage]) {.async.} =
+  for i, peer in net.node.peers:
+    if i < msgs.len:
+      await net.send(peer, msgs[i])
+
+proc processMessage(net: RaftNetwork, msg: RaftMessage) {.async.} =
+  case msg.kind
+  of rmkRequestVote:
+    let reply = net.node.handleRequestVote(msg)
+    await net.send(msg.senderId, reply)
+  of rmkRequestVoteReply:
+    net.node.handleVoteReply(msg)
+  of rmkAppendEntries:
+    let reply = net.node.handleAppendEntries(msg)
+    await net.send(msg.senderId, reply)
+  of rmkAppendEntriesReply:
+    net.node.handleAppendReply(msg.senderId, msg)
+
+proc receiveLoop(net: RaftNetwork, client: AsyncSocket) {.async.} =
+  try:
+    while net.running:
+      let lenData = await client.recv(4)
+      if lenData.len < 4:
+        break
+      var pos = 0
+      let payloadLen = int(readUint32(cast[seq[byte]](lenData), pos))
+      let payloadStr = await client.recv(payloadLen)
+      if payloadStr.len < payloadLen:
+        break
+      var payload = newSeq[byte](payloadLen)
+      for i in 0 ..< payloadLen:
+        payload[i] = byte(payloadStr[i])
+      let msg = deserializeRaftMessage(payload)
+      asyncCheck net.processMessage(msg)
+  except:
+    discard
+  finally:
+    client.close()
+
+proc heartbeatLoop(net: RaftNetwork) {.async.} =
+  while net.running:
+    if net.node.state == rsLeader:
+      for peer in net.node.peers:
+        let msg = net.node.appendEntries(peer)
+        await net.send(peer, msg)
+    await sleepAsync(net.node.heartbeatTimeout)
+
+proc run*(net: RaftNetwork) {.async.} =
+  net.socket = newAsyncSocket()
+  net.socket.setSockOpt(OptReuseAddr, true)
+  net.socket.bindAddr(Port(net.node.raftPort), "127.0.0.1")
+  net.socket.listen()
+  net.running = true
+  asyncCheck net.heartbeatLoop()
+  while net.running:
+    try:
+      let client = await net.socket.accept()
+      asyncCheck net.receiveLoop(client)
+    except:
+      break
+
+proc stop*(net: RaftNetwork) =
+  net.running = false
+  if net.socket != nil:
+    net.socket.close()
+  for peerId, sock in net.peerSockets:
+    sock.close()
+  net.peerSockets.clear()
+
+# ---------------------------------------------------------------------------
+# ElectionTimer integration with network transport
+# ---------------------------------------------------------------------------
+
+proc startElection*(timer: ElectionTimer, net: RaftNetwork) =
   if timer.node.state != rsCandidate:
     timer.node.becomeCandidate()
+  if net != nil:
+    let msgs = timer.node.requestVote()
+    for i, peer in timer.node.peers:
+      if i < msgs.len:
+        asyncCheck net.send(peer, msgs[i])
 
-proc tick*(timer: ElectionTimer) =
+proc tick*(timer: ElectionTimer, net: RaftNetwork = nil) =
   case timer.node.state
   of rsFollower:
     if timer.checkTimeout():
-      timer.startElection()
+      timer.startElection(net)
       timer.resetTimeout()
   of rsCandidate:
     if timer.checkTimeout():
       # Election timed out — restart
       timer.node.becomeCandidate()
+      if net != nil:
+        let msgs = timer.node.requestVote()
+        for i, peer in timer.node.peers:
+          if i < msgs.len:
+            asyncCheck net.send(peer, msgs[i])
       timer.resetTimeout()
   of rsLeader:
     timer.resetTimeout()  # Keep alive
-
-proc stop*(timer: ElectionTimer) =
-  timer.running = false

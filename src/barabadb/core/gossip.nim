@@ -1,6 +1,5 @@
 ## Gossip Protocol — membership and failure detection
 import std/tables
-import std/sets
 import std/random
 import std/monotimes
 

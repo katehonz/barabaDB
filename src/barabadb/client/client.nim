@@ -2,7 +2,6 @@
 import std/asyncdispatch
 import std/asyncnet
 import std/strutils
-import std/json
 import ../protocol/wire
 
 type

@@ -1,6 +1,5 @@
 ## Distributed Transactions — cross-node atomic operations
 import std/tables
-import std/sets
 import std/locks
 import std/monotimes
 

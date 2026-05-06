@@ -2,7 +2,6 @@
 import std/asyncdispatch
 import std/asyncnet
 import std/strutils
-import std/sequtils
 import std/re
 import std/os
 import std/endians
@@ -100,7 +99,7 @@ proc execSelect(db: LSMTree, astNode: Node): QueryResult =
       result.rows.add(row)
     result.rowCount = result.rows.len
 
-proc execInsert(db: var LSMTree, query: string): QueryResult =
+proc execInsert(db: LSMTree, query: string): QueryResult =
   result = QueryResult()
   # Manual parsing for simple INSERT: INSERT table { field := 'value' }
   # We use the value as the key for simple KV semantics
@@ -121,7 +120,7 @@ proc execInsert(db: var LSMTree, query: string): QueryResult =
       db.put(key, cast[seq[byte]](value))
       result.affectedRows = 1
 
-proc execDelete(db: var LSMTree, astNode: Node): QueryResult =
+proc execDelete(db: LSMTree, astNode: Node): QueryResult =
   result = QueryResult()
   var keyFilter = ""
   if astNode.delWhere != nil and astNode.delWhere.whereExpr != nil:
@@ -130,7 +129,7 @@ proc execDelete(db: var LSMTree, astNode: Node): QueryResult =
     db.delete(keyFilter)
     result.affectedRows = 1
 
-proc executeQuery(db: var LSMTree, query: string): (bool, QueryResult, string) =
+proc executeQuery(db: LSMTree, query: string): (bool, QueryResult, string) =
   try:
     let tokens = tokenize(query)
     let astNode = parse(tokens)

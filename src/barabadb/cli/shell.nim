@@ -1,7 +1,6 @@
 ## BaraDB CLI — interactive query shell
 import std/terminal
 import std/strutils
-import std/tables
 import ../query/lexer
 import ../query/parser
 

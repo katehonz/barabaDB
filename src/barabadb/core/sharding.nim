@@ -1,8 +1,6 @@
 ## Sharding — hash-based and range-based data distribution
-import std/tables
 import std/hashes
 import std/algorithm
-import std/sets
 
 type
   ShardStrategy* = enum

@@ -1,5 +1,4 @@
 ## Multi-Language FTS — tokenizers for different languages
-import std/tables
 import std/unicode
 import std/strutils
 import std/sets

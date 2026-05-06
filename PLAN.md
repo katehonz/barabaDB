@@ -1,105 +1,187 @@
-# План за подобряване на BaraDB
+# BaraDB — План към Production (Web & ERP)
 
-## Цел
-Превърне BaraDB от добър proof-of-concept в солиден, изпълним проект с реална дълбочина на критичните компоненти.
+## Визия
+BaraDB да стане production-ready база данни, с която да се изграждат:
+- **Web приложения** (блогове, е-магазини, SaaS продукти)
+- **Малки ERP системи** (CRM, склад, счетоводство, invoicing)
 
----
-
-## Фаза 1: Честност и стабилна основа (1–2 седмици) ✅ ЗАВЪРШЕНА
-
-### 1.1 Поправи `README.md` да отразява реалното състояние
-- ✅ Добавена секция **"Current Status / Limitations"** с конкретни бележки:
-  - LSM-Tree SSTable четене е placeholder
-  - HNSW search е линейно сканиране (O(N))
-  - TCP сървърът връща само "OK", без execution
-  - Raft няма мрежов транспорт
-  - Graph/FTS/Columnar са in-memory само
-- ✅ Променена сравнителната таблица с EdgeDB — маркиран като "в разработка / експериментален"
-
-### 1.2 Поправи компилацията на benchmark-ите
-- ✅ В `benchmarks/bench_all.nim`: заменено `(getMonoTime() - start).ticks` с `(getMonoTime() - start).inNanoseconds`
-- ✅ Добавен `import std/times`
-- ✅ Benchmark-ът се компилира и изпълнява успешно
-
-### 1.3 Имплементирай реално SSTable четене в `storage/lsm.nim`
-**Беше:** `db.get()` намираше ключа в `sst.index`, но връщаше `(true, @[])` — празен масив.
-
-**Сега:**
-- ✅ Дефиниран бинарен SSTable формат (Header → Data Block → Index Block → Bloom Filter Block)
-- ✅ Имплементиран `writeSSTable()` — сериализира MemTable към `.sst` файл
-- ✅ Имплементиран `loadSSTable()` — зарежда съществуващ `.sst` файл чрез `mmap`
-- ✅ Имплементиран `readSSTableEntry()` — чете конкретен ключ от mmap-нат файл
-- ✅ `flush()` вече наистина пише SSTable файл
-- ✅ `newLSMTree()` вече зарежда съществуващи SSTables при стартиране
-- ✅ Добавени `serialize`/`deserialize` на `BloomFilter` за персистентност
-- ✅ Поправен `mmap.nim` да използва `posix.open` вместо грешния `system.open`
-- ✅ Всички 214 теста минават
-- ✅ Persistence тест: write → flush → close → reopen → read работи коректно
+> Целеви потребител: solo-dev / малък екип, който иска лесна за deploy и бърза локална база, без зависимост от PostgreSQL/MySQL.
 
 ---
 
-## Фаза 2: Дълбочина на core engine-ите (2–4 седмици)
+## Текущо състояние (база)
 
-### 2.1 Реализирай истински HNSW search в `vector/engine.nim`
-**Проблем:** `search()` прави линейно сканиране на всички нодове.
+| Компонент | Статус |
+|-----------|--------|
+| LSM-Tree KV store | ✅ Стабилен, thread-safe, persistent |
+| HNSW векторен search | ✅ Работи с recall > 0.9 |
+| TCP wire protocol | ✅ Бинарен, SELECT/INSERT/DELETE |
+| Raft consensus | ✅ TCP transport, leader election |
+| Graph engine | ✅ In-memory + persistence |
+| Thread-safety | ✅ Coarse-grained locks |
+| CI/CD | ✅ GitHub Actions |
 
-**Стъпки:**
-1. При `insert(id, vector, metadata)`:
-   - Изчисли `level` чрез `randomLevel()`
-   - Свържи нода с `m` най-близки съседи на всяко ниво
-   - Ако `level > maxLevel`, обнови `entryPoint`
-2. Имплементирай `searchLayer(entryPoint, query, ef, level)` — жадно разширяване на кандидати
-3. Имплементирай `search(query, k)`:
-   - Започни от `entryPoint` на най-високо ниво
-   - Слизай ниво по ниво, рефинирайки entry point
-   - На ниво 0, върни top-k от `ef` кандидати
-4. Тествай с 10K вектора dim=128, сравни recall@10 с brute-force
-5. Очакван резултат: recall > 0.9 при `efConstruction=200, m=16`
-
-### 2.2 Интегрирай wire protocol в TCP сървъра
-**Проблем:** `core/server.nim` връща `"OK\n"` за всяка заявка.
-
-**Стъпки:**
-1. В `handleClient` замени `recvLine()` с четене на бинарни съобщения от `protocol/wire.nim`
-2. За `QueryMessage`: извикай `tokenize` → `parse` → `codegen` → изпълни срещу LSM-Tree
-3. Върни `ResultMessage` с реални данни или `ErrorMessage` при грешка
-4. Тествай с клиент от `clients/nim/`
-
-### 2.3 Добави персистентност на поне един от Graph/FTS/Columnar
-**Предложение:** Започни с Graph engine, защото е най-прост за сериализация.
-- Добави `saveToFile(path)` и `loadFromFile(path)` в `graph/engine.nim`
-- Формат: NDJSON редове за нодове и edges, или прост бинарен формат
-- Тествай: рестарт на процеса, зареждане, проверка на целостта
+**Липсва за Web/ERP:** SQL съвместимост, ACID транзакции, HTTP API, auth, ORM, миграции, backup.
 
 ---
 
-## Фаза 3: Production hardening (2–3 седмици)
+## Фаза 1: Релационен engine + SQL (4–6 седмици)
 
-### 3.1 Thread-safety и concurrency
-- LSM-Tree: добави `lock` при `put/delete/flush`
-- Graph: добави `lock` при `addNode/addEdge/removeNode`
-- Или по-добре: използвай Nim's `atomic` типове и lock-free структури където е възможно
-- Добави тестове с `parallel` блокове в Nim за stress testing
+### 1.1 SQL парсър и AST
+- Имплементирай ANSI SQL подмножество (CREATE TABLE, ALTER TABLE, DROP TABLE)
+- INSERT с column list: `INSERT INTO users (name, email) VALUES ('...', '...')`
+- UPDATE: `UPDATE users SET name = '...' WHERE id = 1`
+- SELECT с JOIN, GROUP BY, HAVING, ORDER BY, LIMIT/OFFSET
+- DELETE с WHERE
+- Поддръжка на `RETURNING` клауза
 
-### 3.2 Raft мрежов транспорт
-- В `core/raft.nim` добави `RaftNetwork` тип с async TCP комуникация
-- `sendMessage(peerAddr, msg)` и `receiveLoop()`
-- Интегрирай с `ElectionTimer` — при timeout, изпрати реални `RequestVote` съобщения по мрежата
-- Тествай с 3 процеса на localhost на различни портове
+### 1.2 Типова система и constraints
+- `INTEGER`, `BIGINT`, `SERIAL` (auto-increment)
+- `VARCHAR(n)`, `TEXT`
+- `BOOLEAN`
+- `TIMESTAMP`, `DATE` (ISO 8601)
+- `JSON`, `JSONB` (in-memory + компресия)
+- `UUID` (v4)
+- Constraints: `PRIMARY KEY`, `FOREIGN KEY`, `UNIQUE`, `NOT NULL`, `CHECK`, `DEFAULT`
+- Foreign key каскади: `ON DELETE CASCADE/SET NULL`
 
-### 3.3 CI/CD и качество
-- Създай `.github/workflows/ci.yml`:
-  - `nim c --path:src -r tests/test_all.nim`
-  - `nim c -d:release benchmarks/bench_all.nim` (компилира, но не задължително пуска)
-  - Проверка за `XDeclaredButNotUsed` hints като warnings
-- Добави `tests/stress_test.nim`:
-  - 10 паралелни задачи, всяка прави 1000 произволни put/get/delete
-  - Проверка за data corruption
+### 1.3 B-Tree индекси + интеграция с query planner
+- `CREATE INDEX idx_name ON table(column)`
+- `CREATE UNIQUE INDEX`
+- Покриващ индекс (covering index) за чести колони
+- Query planner да избира индекс вместо full scan
+- `EXPLAIN` за анализ на заявки
 
-### 3.4 Изчисти проекта
-- Премахни `GEL/` директорията (EdgeDB клон, ненужен)
-- Провери дали всички `*.nim` файлове се използват — премахни dead code
-- Унифицирай дублирани модули (напр. `protocol/ssl.nim` и `protocol/tls.nim` изглеждат припокриващи се)
+### 1.4 Транзакции (ACID)
+- `BEGIN`, `COMMIT`, `ROLLBACK`
+- Isolation level: `READ COMMITTED` (първа фаза), `REPEATABLE READ` (втора)
+- Deadlock detection и timeout
+- MVCC интеграция с LSM-Tree (versioned reads)
+- WAL за crash recovery при транзакции
+
+---
+
+## Фаза 2: Web API & Authentication (3–4 седмици)
+
+### 2.1 HTTP REST API
+- `POST /query` — изпълнява SQL, връща JSON
+- `GET /health` — readiness/liveness probe
+- `GET /metrics` — брой заявки, latency, errors (Prometheus формат)
+- JSON request/response body:
+  ```json
+  { "query": "SELECT * FROM users WHERE id = 1", "params": [] }
+  ```
+- Batch queries: `POST /batch` — множество заявки в едно тяло
+- Content-Type: `application/json`
+
+### 2.2 Authentication & Authorization
+- JWT bearer token в HTTP header `Authorization`
+- `CREATE USER` / `DROP USER` / `ALTER USER`
+- `GRANT` / `REVOKE` за права на таблици
+- Row-Level Security (RLS): `CREATE POLICY`
+- Хеширане на пароли с bcrypt/argon2
+- Rate limiting per API key / IP
+
+### 2.3 WebSocket за real-time
+- `ws://host:port/live` — subscribe към таблица/ред
+- `NOTIFY` / `LISTEN` аналог
+- Пуш нотификации при INSERT/UPDATE/DELETE
+
+### 2.4 CORS и HTTP hardening
+- CORS headers за browser достъп
+- TLS termination (reuse `ssl.nim`)
+- Request size limits (10MB default)
+- Connection keep-alive и HTTP/2 readiness
+
+---
+
+## Фаза 3: ERP фичове (4–5 седмици)
+
+### 3.1 Schema migrations
+- `CREATE MIGRATION` / `APPLY MIGRATION`
+- Версиониране на схемата в `__schema_version` таблица
+- Up/down скриптове
+- Dry-run режим
+- CLI: `baradadb migrate status`, `baradadb migrate up`, `baradadb migrate down`
+
+### 3.2 Views и materialized views
+- `CREATE VIEW` — read-only virtual table
+- `CREATE MATERIALIZED VIEW` — кеширана snapshot + `REFRESH`
+- Поддръжка в query planner
+
+### 3.3 Triggers и stored functions
+- `CREATE TRIGGER` — `BEFORE`/`AFTER` INSERT/UPDATE/DELETE
+- Stored functions in Nim (compiled to UDF):
+  ```sql
+  CREATE FUNCTION total_price(quantity INT, price DECIMAL) RETURNS DECIMAL
+  AS 'quantity * price';
+  ```
+- Функции за ERP: `vat_calc`, `currency_convert`, `invoice_number_next`
+
+### 3.4 Full-text search за ERP документи
+- `CREATE FULLTEXT INDEX ON invoices(content)`
+- `WHERE content @@ 'търсене'`
+- Bulgarian stemming (reuse `fts/multilang.nim`)
+
+### 3.5 Partitioning
+- `CREATE TABLE orders (...) PARTITION BY RANGE (created_at)`
+- Автоматичен partition pruning в query planner
+- Полезно за ERP: архивиране на стари данни
+
+---
+
+## Фаза 4: Production readiness & DevEx (3–4 седмици)
+
+### 4.1 Backup & Restore
+- `baradadb backup --output backup.tar.gz`
+- `baradadb restore --input backup.tar.gz`
+- Incremental backup чрез WAL archiving
+- Point-in-time recovery (PITR)
+- Scheduled backups (cron integration)
+
+### 4.2 Docker и deployment
+- `Dockerfile` — multi-stage build с Nim
+- `docker-compose.yml` — single node + volume
+- `docker-compose.raft.yml` — 3-node cluster
+- Helm chart за Kubernetes (statefulset + PVC)
+- Environment-based config (`BARADB_PORT`, `BARADB_DATA_DIR`, `BARADB_RAFT_PEERS`)
+
+### 4.3 Monitoring и observability
+- Structured logging (JSON format)
+- Prometheus `/metrics` endpoint:
+  - `baradb_queries_total`, `baradb_query_duration_seconds`
+  - `baradb_connections_active`, `baradb_storage_size_bytes`
+  - `baradb_replication_lag_seconds`
+- OpenTelemetry tracing integration
+- Slow query log (threshold configurable)
+
+### 4.4 ORM / Client SDK
+- **Nim**: `baradb` nimble пакет — fluent query builder + миграции
+  ```nim
+  let users = db.table("users")
+    .where("active", "=", true)
+    .orderBy("created_at", "DESC")
+    .limit(10)
+    .all()
+  ```
+- **Python**: `pip install baradb` — async/sync client
+- **JavaScript/TypeScript**: `npm install baradb` — promise-based client
+- **Go**: `go get github.com/baradb/go-client`
+- Connection pooling във всички клиенти
+
+### 4.5 Admin Dashboard (Web UI)
+- Лек вграден админ панел на `http://host:port/admin`
+- SQL playground с резултати в таблица
+- Schema browser (таблици, колони, индекси)
+- Metrics charts (latency, throughput, storage)
+- User management UI
+
+### 4.6 Performance tuning
+- Prepared statements кеш
+- Query result cache (LRU, TTL-based)
+- Connection pool в сървъра (max 1000 конекции)
+- Auto-compaction scheduling
+- Configurable cache size за page cache
 
 ---
 
@@ -107,23 +189,28 @@
 
 | Задача | Влияние | Трудност | Приоритет |
 |--------|---------|----------|-----------|
-| SSTable реално четене | Критично | Средна | P0 ✅ |
-| README честност | Високо | Ниска | P0 ✅ |
-| HNSW истински search | Високо | Висока | P1 |
-| Wire protocol в сървъра | Високо | Средна | P1 |
-| Benchmark fix | Ниско | Ниска | P2 ✅ |
-| Graph персистентност | Средно | Ниска | P2 |
-| Raft мрежа | Средно | Висока | P2 |
-| Thread-safety | Средно | Средна | P2 |
-| CI/CD | Средно | Ниска | P3 |
-| Изчистване на проекта | Ниско | Ниска | P3 |
+| SQL парсър + AST | Критично | Висока | P0 |
+| ACID транзакции | Критично | Висока | P0 |
+| HTTP REST API | Критично | Средна | P0 |
+| B-Tree индекси | Високо | Средна | P1 |
+| JWT Auth + RLS | Високо | Средна | P1 |
+| Schema migrations | Високо | Средна | P1 |
+| Docker + Compose | Средно | Ниска | P2 |
+| Backup/Restore | Средно | Средна | P2 |
+| WebSocket real-time | Средно | Средна | P2 |
+| Admin Dashboard | Средно | Висока | P2 |
+| Views + Triggers | Ниско | Средна | P3 |
+| Client SDK (ORM) | Ниско | Висока | P3 |
+| Partitioning | Ниско | Висока | P3 |
+| Kubernetes Helm | Ниско | Средна | P3 |
 
 ---
 
-## Очакван резултат след изпълнение
+## Очакван резултат
 
-- **Фаза 1:** Проектът е честен, стабилен и benchmark-ите работят. LSM-Tree е валиден key-value store. ✅
-- **Фаза 2:** HNSW работи с реален approximate search. Сървърът изпълнява заявки. Има персистентност.
-- **Фаза 3:** Многонишкова безопасност, CI, по-чист код.
+- **Фаза 1:** BaraDB поддържа ANSI SQL subset с ACID транзакции. Може да замени SQLite/PostgreSQL за малки проекти.
+- **Фаза 2:** REST API + auth правят базата достъпна от всякакъв web stack. WebSocket добавя real-time възможности.
+- **Фаза 3:** ERP-ready фичове — migrations, views, triggers, partitioning. Може да поддържа реален бизнес софтуер.
+- **Фаза 4:** Production tooling — Docker, backup, monitoring, ORM, admin UI. Solo-dev може да deploy-не за 5 минути.
 
-**Крайна оценка след плана:** от 6.5/10 към 8.5/10.
+**Крайна оценка след плана:** от 8.5/10 към 9.5/10 — готова за production web/ERP.

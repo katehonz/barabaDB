@@ -3,6 +3,7 @@ import std/unittest
 import std/tables
 import std/strutils
 import std/os
+import std/asyncdispatch
 
 import barabadb/core/types
 import barabadb/core/mvcc
@@ -80,6 +81,7 @@ suite "Write-Ahead Log":
 
 suite "LSM-Tree Storage":
   test "Put and Get":
+    removeDir("/tmp/baradb_test_lsm")
     var db = newLSMTree("/tmp/baradb_test_lsm")
     let key = "testkey"
     let value = cast[seq[byte]]("testvalue")
@@ -90,6 +92,7 @@ suite "LSM-Tree Storage":
     db.close()
 
   test "Delete":
+    removeDir("/tmp/baradb_test_lsm2")
     var db = newLSMTree("/tmp/baradb_test_lsm2")
     let key = "delkey"
     let value = cast[seq[byte]]("delval")
@@ -100,6 +103,7 @@ suite "LSM-Tree Storage":
     db.close()
 
   test "Contains":
+    removeDir("/tmp/baradb_test_lsm3")
     var db = newLSMTree("/tmp/baradb_test_lsm3")
     let key = "exists"
     check not db.contains(key)
@@ -234,6 +238,34 @@ suite "Graph Engine":
     check dists[n1] == 0.0
     check dists[n2] == 1.0
     check dists[n3] == 3.0
+
+  test "Save and load graph":
+    var g = gengine.newGraph()
+    let n1 = gengine.addNode(g, "Person", {"name": "Alice"}.toTable)
+    let n2 = gengine.addNode(g, "Person", {"name": "Bob"}.toTable)
+    let n3 = gengine.addNode(g, "City", {"name": "Sofia"}.toTable)
+    discard gengine.addEdge(g, n1, n2, "knows", {"since": "2020"}.toTable, 1.5)
+    discard gengine.addEdge(g, n2, n3, "lives_in", weight = 2.0)
+
+    let path = "/tmp/baradb_test_graph.bin"
+    removeFile(path)
+    gengine.saveToFile(g, path)
+
+    let g2 = gengine.loadFromFile(path)
+    check gengine.nodeCount(g2) == 3
+    check gengine.edgeCount(g2) == 2
+    check gengine.neighbors(g2, n1).len == 1
+    check gengine.neighbors(g2, n1)[0] == n2
+    check gengine.neighbors(g2, n2)[0] == n3
+
+    let loadedNode = gengine.getNode(g2, n1)
+    check loadedNode.label == "Person"
+    check loadedNode.properties["name"] == "Alice"
+
+    let sp = gengine.shortestPath(g2, n1, n3)
+    check sp.len == 3
+
+    removeFile(path)
 
 suite "Full-Text Search":
   test "Tokenization":
@@ -1821,6 +1853,49 @@ suite "Raft Election Timer":
     check req.len == 1  # n2 requests vote from n1
     let reply = cluster.nodes["n1"].handleRequestVote(req[0])
     check reply.success
+
+suite "Raft Network Transport":
+  test "3-node election over TCP":
+    var n1 = newRaftNode("n1", @["n2", "n3"], raftPort = 19001)
+    var n2 = newRaftNode("n2", @["n1", "n3"], raftPort = 19002)
+    var n3 = newRaftNode("n3", @["n1", "n2"], raftPort = 19003)
+
+    n1.peerAddrs["n2"] = ("127.0.0.1", 19002)
+    n1.peerAddrs["n3"] = ("127.0.0.1", 19003)
+    n2.peerAddrs["n1"] = ("127.0.0.1", 19001)
+    n2.peerAddrs["n3"] = ("127.0.0.1", 19003)
+    n3.peerAddrs["n1"] = ("127.0.0.1", 19001)
+    n3.peerAddrs["n2"] = ("127.0.0.1", 19002)
+
+    let net1 = newRaftNetwork(n1)
+    let net2 = newRaftNetwork(n2)
+    let net3 = newRaftNetwork(n3)
+
+    asyncCheck net1.run()
+    asyncCheck net2.run()
+    asyncCheck net3.run()
+    waitFor sleepAsync(50)
+
+    var timer1 = newElectionTimer(n1, timeoutMs = 50)
+    var timer2 = newElectionTimer(n2, timeoutMs = 100)
+    var timer3 = newElectionTimer(n3, timeoutMs = 150)
+
+    for i in 0 ..< 30:
+      timer1.tick(net1)
+      timer2.tick(net2)
+      timer3.tick(net3)
+      waitFor sleepAsync(20)
+
+    net1.stop()
+    net2.stop()
+    net3.stop()
+    waitFor sleepAsync(50)
+
+    var leaderCount = 0
+    if n1.isLeader: inc leaderCount
+    if n2.isLeader: inc leaderCount
+    if n3.isLeader: inc leaderCount
+    check leaderCount == 1
 
 suite "CLI Autocomplete":
   test "Autocomplete commands":

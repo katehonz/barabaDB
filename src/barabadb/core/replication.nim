@@ -2,7 +2,6 @@
 import std/tables
 import std/sets
 import std/locks
-import std/monotimes
 
 type
   ReplicationMode* = enum

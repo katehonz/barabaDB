@@ -6,6 +6,7 @@ import std/strutils
 import std/tables
 import std/monotimes
 import std/streams
+import std/locks
 import bloom
 import wal
 import mmap
@@ -38,7 +39,7 @@ type
     entryCount: int
     mmapFile: MmapFile
 
-  LSMTree* = object
+  LSMTree* = ref object
     dir: string
     memTable: MemTable
     immutableMem: MemTable
@@ -46,8 +47,8 @@ type
     wal: WriteAheadLog
     memMaxSize: int
     currentSeq: uint64
-    readLocks: int
     nextSSTableId: int
+    lock: Lock
 
 proc newMemTable(maxSize: int = DefaultMemTableSize): MemTable =
   MemTable(entries: @[], size: 0, maxSize: maxSize)
@@ -312,19 +313,20 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
 
   sstables.sort(proc(a, b: SSTable): int = cmp(a.minKey, b.minKey))
 
-  LSMTree(
-    dir: dir,
-    memTable: newMemTable(memMaxSize),
-    immutableMem: newMemTable(0),
-    sstables: sstables,
-    wal: newWriteAheadLog(dir / "wal"),
-    memMaxSize: memMaxSize,
-    currentSeq: 0,
-    readLocks: 0,
-    nextSSTableId: nextId,
-  )
+  new(result)
+  initLock(result.lock)
+  result.dir = dir
+  result.memTable = newMemTable(memMaxSize)
+  result.immutableMem = newMemTable(0)
+  result.sstables = sstables
+  result.wal = newWriteAheadLog(dir / "wal")
+  result.memMaxSize = memMaxSize
+  result.currentSeq = 0
+  result.nextSSTableId = nextId
 
-proc put*(db: var LSMTree, key: string, value: seq[byte]) =
+proc put*(db: LSMTree, key: string, value: seq[byte]) =
+  acquire(db.lock)
+  defer: release(db.lock)
   let ts = uint64(getMonoTime().ticks())
   db.wal.writePut(cast[seq[byte]](key), value, ts)
   if not db.memTable.put(key, value, ts):
@@ -332,12 +334,14 @@ proc put*(db: var LSMTree, key: string, value: seq[byte]) =
     db.memTable = newMemTable(db.memMaxSize)
     discard db.memTable.put(key, value, ts)
 
-proc delete*(db: var LSMTree, key: string) =
+proc delete*(db: LSMTree, key: string) =
+  acquire(db.lock)
+  defer: release(db.lock)
   let ts = uint64(getMonoTime().ticks())
   db.wal.writeDelete(cast[seq[byte]](key), ts)
   discard db.memTable.put(key, @[], ts, deleted = true)
 
-proc get*(db: LSMTree, key: string): (bool, seq[byte]) =
+proc getUnsafe(db: LSMTree, key: string): (bool, seq[byte]) =
   let (found, entry) = db.memTable.get(key)
   if found:
     if entry.deleted:
@@ -365,11 +369,18 @@ proc get*(db: LSMTree, key: string): (bool, seq[byte]) =
 
   return (false, @[])
 
+proc get*(db: LSMTree, key: string): (bool, seq[byte]) =
+  acquire(db.lock)
+  defer: release(db.lock)
+  return getUnsafe(db, key)
+
 proc contains*(db: LSMTree, key: string): bool =
-  let (found, _) = db.get(key)
+  acquire(db.lock)
+  defer: release(db.lock)
+  let (found, _) = getUnsafe(db, key)
   return found
 
-proc flush*(db: var LSMTree) =
+proc flushUnsafe(db: LSMTree) =
   if db.immutableMem.len == 0 and db.memTable.len == 0:
     return
 
@@ -394,17 +405,37 @@ proc flush*(db: var LSMTree) =
   db.wal.writeCommit(uint64(getMonoTime().ticks()))
   db.wal.sync()
 
-proc close*(db: var LSMTree) =
-  db.flush()
+proc flush*(db: LSMTree) =
+  acquire(db.lock)
+  defer: release(db.lock)
+  flushUnsafe(db)
+
+proc close*(db: LSMTree) =
+  acquire(db.lock)
+  defer: release(db.lock)
+  flushUnsafe(db)
   for sst in db.sstables.mitems:
     sst.close()
   db.wal.close()
 
-proc memTableSize*(db: LSMTree): int = db.memTable.len
-proc sstableCount*(db: LSMTree): int = db.sstables.len
-proc dir*(db: LSMTree): string = db.dir
+proc memTableSize*(db: LSMTree): int =
+  acquire(db.lock)
+  defer: release(db.lock)
+  return db.memTable.len
+
+proc sstableCount*(db: LSMTree): int =
+  acquire(db.lock)
+  defer: release(db.lock)
+  return db.sstables.len
+
+proc dir*(db: LSMTree): string =
+  acquire(db.lock)
+  defer: release(db.lock)
+  return db.dir
 
 proc scanMemTable*(db: LSMTree): seq[Entry] =
+  acquire(db.lock)
+  defer: release(db.lock)
   ## Return all entries from memory (memTable + immutableMem)
   result = @[]
   for e in db.memTable.entries:

@@ -1,8 +1,6 @@
 ## Codegen — compile IR plan to storage operations
-import std/tables
 import std/strutils
 import ../query/ir
-import ../core/types
 
 type
   StorageOpKind* = enum

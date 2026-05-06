@@ -5,6 +5,8 @@ import std/algorithm
 import std/math
 import std/sets
 import std/hashes
+import std/streams
+import std/locks
 
 type
   EdgeId* = distinct uint64
@@ -36,6 +38,7 @@ type
     reverseAdj*: Table[NodeId, seq[AdjacencyEntry]]  # incoming
     nextNodeId: uint64
     nextEdgeId: uint64
+    lock: Lock
 
 proc `==`*(a, b: EdgeId): bool = uint64(a) == uint64(b)
 proc `==`*(a, b: NodeId): bool = uint64(a) == uint64(b)
@@ -43,16 +46,18 @@ proc hash*(x: EdgeId): Hash = hash(uint64(x))
 proc hash*(x: NodeId): Hash = hash(uint64(x))
 
 proc newGraph*(): Graph =
-  Graph(
-    nodes: initTable[NodeId, GraphNode](),
-    edges: initTable[EdgeId, Edge](),
-    adjacency: initTable[NodeId, seq[AdjacencyEntry]](),
-    reverseAdj: initTable[NodeId, seq[AdjacencyEntry]](),
-    nextNodeId: 1,
-    nextEdgeId: 1,
-  )
+  new(result)
+  initLock(result.lock)
+  result.nodes = initTable[NodeId, GraphNode]()
+  result.edges = initTable[EdgeId, Edge]()
+  result.adjacency = initTable[NodeId, seq[AdjacencyEntry]]()
+  result.reverseAdj = initTable[NodeId, seq[AdjacencyEntry]]()
+  result.nextNodeId = 1
+  result.nextEdgeId = 1
 
 proc addNode*(g: Graph, label: string, properties: Table[string, string] = initTable[string, string]()): NodeId =
+  acquire(g.lock)
+  defer: release(g.lock)
   let id = NodeId(g.nextNodeId)
   inc g.nextNodeId
   g.nodes[id] = GraphNode(id: id, label: label, properties: properties)
@@ -63,6 +68,8 @@ proc addNode*(g: Graph, label: string, properties: Table[string, string] = initT
 proc addEdge*(g: Graph, src, dst: NodeId, label: string = "",
               properties: Table[string, string] = initTable[string, string](),
               weight: float64 = 1.0): EdgeId =
+  acquire(g.lock)
+  defer: release(g.lock)
   let id = EdgeId(g.nextEdgeId)
   inc g.nextEdgeId
   g.edges[id] = Edge(id: id, src: src, dst: dst, label: label,
@@ -72,22 +79,32 @@ proc addEdge*(g: Graph, src, dst: NodeId, label: string = "",
   return id
 
 proc getNode*(g: Graph, id: NodeId): GraphNode =
-  g.nodes[id]
+  acquire(g.lock)
+  defer: release(g.lock)
+  return g.nodes[id]
 
 proc getEdge*(g: Graph, id: EdgeId): Edge =
-  g.edges[id]
+  acquire(g.lock)
+  defer: release(g.lock)
+  return g.edges[id]
 
 proc neighbors*(g: Graph, nodeId: NodeId): seq[NodeId] =
+  acquire(g.lock)
+  defer: release(g.lock)
   result = @[]
   for entry in g.adjacency.getOrDefault(nodeId, @[]):
     result.add(entry.neighbor)
 
 proc inNeighbors*(g: Graph, nodeId: NodeId): seq[NodeId] =
+  acquire(g.lock)
+  defer: release(g.lock)
   result = @[]
   for entry in g.reverseAdj.getOrDefault(nodeId, @[]):
     result.add(entry.neighbor)
 
 proc removeNode*(g: Graph, nodeId: NodeId) =
+  acquire(g.lock)
+  defer: release(g.lock)
   if nodeId notin g.nodes:
     return
 
@@ -112,6 +129,8 @@ proc removeNode*(g: Graph, nodeId: NodeId) =
   g.reverseAdj.del(nodeId)
 
 proc bfs*(g: Graph, start: NodeId, maxDepth: int = -1): seq[NodeId] =
+  acquire(g.lock)
+  defer: release(g.lock)
   result = @[]
   var visited = initHashSet[NodeId]()
   var queue = initDeque[(NodeId, int)]()
@@ -123,12 +142,14 @@ proc bfs*(g: Graph, start: NodeId, maxDepth: int = -1): seq[NodeId] =
     result.add(node)
     if maxDepth >= 0 and depth >= maxDepth:
       continue
-    for neighbor in g.neighbors(node):
-      if neighbor notin visited:
-        visited.incl(neighbor)
-        queue.addLast((neighbor, depth + 1))
+    for entry in g.adjacency.getOrDefault(node, @[]):
+      if entry.neighbor notin visited:
+        visited.incl(entry.neighbor)
+        queue.addLast((entry.neighbor, depth + 1))
 
 proc dfs*(g: Graph, start: NodeId, maxDepth: int = -1): seq[NodeId] =
+  acquire(g.lock)
+  defer: release(g.lock)
   result = @[]
   var visited = initHashSet[NodeId]()
   var stack: seq[(NodeId, int)] = @[(start, 0)]
@@ -141,11 +162,13 @@ proc dfs*(g: Graph, start: NodeId, maxDepth: int = -1): seq[NodeId] =
     result.add(node)
     if maxDepth >= 0 and depth >= maxDepth:
       continue
-    for neighbor in g.neighbors(node):
-      if neighbor notin visited:
-        stack.add((neighbor, depth + 1))
+    for entry in g.adjacency.getOrDefault(node, @[]):
+      if entry.neighbor notin visited:
+        stack.add((entry.neighbor, depth + 1))
 
 proc shortestPath*(g: Graph, start, target: NodeId): seq[NodeId] =
+  acquire(g.lock)
+  defer: release(g.lock)
   var visited = initHashSet[NodeId]()
   var parent = initTable[NodeId, NodeId]()
   var queue = initDeque[NodeId]()
@@ -163,15 +186,17 @@ proc shortestPath*(g: Graph, start, target: NodeId): seq[NodeId] =
       path.reverse()
       return path
 
-    for neighbor in g.neighbors(node):
-      if neighbor notin visited:
-        visited.incl(neighbor)
-        parent[neighbor] = node
-        queue.addLast(neighbor)
+    for entry in g.adjacency.getOrDefault(node, @[]):
+      if entry.neighbor notin visited:
+        visited.incl(entry.neighbor)
+        parent[entry.neighbor] = node
+        queue.addLast(entry.neighbor)
 
   return @[]
 
 proc dijkstra*(g: Graph, start: NodeId): Table[NodeId, float64] =
+  acquire(g.lock)
+  defer: release(g.lock)
   result = initTable[NodeId, float64]()
   var visited = initHashSet[NodeId]()
 
@@ -196,6 +221,8 @@ proc dijkstra*(g: Graph, start: NodeId): Table[NodeId, float64] =
         result[entry.neighbor] = newDist
 
 proc pageRank*(g: Graph, iterations: int = 20, dampingFactor: float64 = 0.85): Table[NodeId, float64] =
+  acquire(g.lock)
+  defer: release(g.lock)
   result = initTable[NodeId, float64]()
   let n = g.nodes.len
   if n == 0:
@@ -227,5 +254,131 @@ proc pageRank*(g: Graph, iterations: int = 20, dampingFactor: float64 = 0.85): T
 
     result = newRanks
 
-proc nodeCount*(g: Graph): int = g.nodes.len
-proc edgeCount*(g: Graph): int = g.edges.len
+proc nodeCount*(g: Graph): int =
+  acquire(g.lock)
+  defer: release(g.lock)
+  return g.nodes.len
+
+proc edgeCount*(g: Graph): int =
+  acquire(g.lock)
+  defer: release(g.lock)
+  return g.edges.len
+
+# ---------------------------------------------------------------------------
+# Persistence — binary save/load
+# ---------------------------------------------------------------------------
+
+const
+  GraphFileMagic = "BGRF"
+  GraphFileVersion = 1'u32
+
+proc writeString(s: Stream, str: string) =
+  s.write(uint32(str.len))
+  if str.len > 0:
+    s.writeData(str[0].unsafeAddr, str.len)
+
+proc readString(s: Stream): string =
+  let len = s.readUint32()
+  if len > 0:
+    result = newString(int(len))
+    discard s.readData(result[0].addr, int(len))
+  else:
+    result = ""
+
+proc saveToFile*(g: Graph, path: string) =
+  acquire(g.lock)
+  defer: release(g.lock)
+  let s = newFileStream(path, fmWrite)
+  if s.isNil:
+    raise newException(IOError, "Cannot open graph file for writing: " & path)
+
+  s.write(GraphFileMagic)
+  s.write(GraphFileVersion)
+  s.write(uint32(g.nodes.len))
+  s.write(uint32(g.edges.len))
+  s.write(g.nextNodeId)
+  s.write(g.nextEdgeId)
+
+  for nodeId, node in g.nodes:
+    s.write(uint64(nodeId))
+    s.writeString(node.label)
+    s.write(uint32(node.properties.len))
+    for key, val in node.properties:
+      s.writeString(key)
+      s.writeString(val)
+
+  for edgeId, edge in g.edges:
+    s.write(uint64(edgeId))
+    s.write(uint64(edge.src))
+    s.write(uint64(edge.dst))
+    s.writeString(edge.label)
+    s.write(edge.weight)
+    s.write(uint32(edge.properties.len))
+    for key, val in edge.properties:
+      s.writeString(key)
+      s.writeString(val)
+
+  s.close()
+
+proc loadFromFile*(path: string): Graph =
+  let s = newFileStream(path, fmRead)
+  if s.isNil:
+    raise newException(IOError, "Cannot open graph file for reading: " & path)
+
+  let magic = s.readStr(4)
+  if magic != GraphFileMagic:
+    raise newException(ValueError, "Invalid graph file magic bytes")
+
+  let version = s.readUint32()
+  if version != GraphFileVersion:
+    raise newException(ValueError, "Unsupported graph file version: " & $version)
+
+  let nodeCount = int(s.readUint32())
+  let edgeCount = int(s.readUint32())
+  let nextNodeId = s.readUint64()
+  let nextEdgeId = s.readUint64()
+
+  result = Graph(
+    nodes: initTable[NodeId, GraphNode](),
+    edges: initTable[EdgeId, Edge](),
+    adjacency: initTable[NodeId, seq[AdjacencyEntry]](),
+    reverseAdj: initTable[NodeId, seq[AdjacencyEntry]](),
+    nextNodeId: nextNodeId,
+    nextEdgeId: nextEdgeId,
+    lock: Lock(),
+  )
+  initLock(result.lock)
+
+  for i in 0 ..< nodeCount:
+    let id = NodeId(s.readUint64())
+    let label = s.readString()
+    let propCount = int(s.readUint32())
+    var props = initTable[string, string]()
+    for j in 0 ..< propCount:
+      let key = s.readString()
+      let val = s.readString()
+      props[key] = val
+    result.nodes[id] = GraphNode(id: id, label: label, properties: props)
+    result.adjacency[id] = @[]
+    result.reverseAdj[id] = @[]
+
+  for i in 0 ..< edgeCount:
+    let id = EdgeId(s.readUint64())
+    let src = NodeId(s.readUint64())
+    let dst = NodeId(s.readUint64())
+    let label = s.readString()
+    let weight = s.readFloat64()
+    let propCount = int(s.readUint32())
+    var props = initTable[string, string]()
+    for j in 0 ..< propCount:
+      let key = s.readString()
+      let val = s.readString()
+      props[key] = val
+    result.edges[id] = Edge(id: id, src: src, dst: dst, label: label,
+                            properties: props, weight: weight)
+    result.adjacency[src].add(AdjacencyEntry(edgeId: id, neighbor: dst,
+                                              weight: weight, label: label))
+    result.reverseAdj[dst].add(AdjacencyEntry(edgeId: id, neighbor: src,
+                                               weight: weight, label: label))
+
+  s.close()

@@ -1,7 +1,6 @@
 ## Adaptive Query Execution — runtime query plan adaptation
 import std/tables
 import std/monotimes
-import std/algorithm
 import std/strutils
 
 type

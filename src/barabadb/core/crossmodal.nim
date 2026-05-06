@@ -2,7 +2,6 @@
 import std/tables
 import std/os
 import std/sequtils
-import ../core/types
 import ../storage/lsm
 import ../vector/engine as vengine
 import ../graph/engine as gengine

@@ -1,7 +1,6 @@
 ## Crash Recovery — WAL replay with REDO/UNDO
 import std/streams
 import std/os
-import std/tables
 import ../storage/wal
 
 type

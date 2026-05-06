@@ -2,6 +2,15 @@
 build/
 nimcache/
 nimblecache/
+*.out
+
+# Binaries (compiled test executables)
+tests/test_all
+tests/stress_test
+benchmarks/bench_all
+benchmarks/compare
+clients/nim/tests/test_client
+src/baradadb
 
 # Temp
 *.tmp

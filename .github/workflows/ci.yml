@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: '2.2.10'
+
+      - name: Run tests
+        run: nim c --path:src -r tests/test_all.nim
+
+      - name: Compile benchmarks
+        run: nim c -d:release benchmarks/bench_all.nim
+
+      - name: Compile stress test
+        run: nim c --threads:on --path:src tests/stress_test.nim
+
+      - name: Run stress test
+        run: ./tests/stress_test
+
+      - name: Check for unused declarations and imports
+        run: |
+          nim c --path:src tests/test_all.nim 2>&1 | tee build.log || true
+          echo "--- Checking for XDeclaredButNotUsed hints ---"
+          grep -E "XDeclaredButNotUsed|UnusedImport" build.log | while read -r line; do
+            echo "::warning::$line"
+          done
+          echo "--- Done ---"
