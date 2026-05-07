@@ -12,6 +12,7 @@ import barabadb/core/logging
 import barabadb/protocol/ssl
 import barabadb/storage/lsm
 import barabadb/storage/compaction
+import barabadb/core/raft
 
 type
   CompactionManager* = ref object
@@ -80,6 +81,21 @@ proc main() =
   # Start background compaction loop
   let cm = newCompactionManager(httpServer.db)
   asyncCheck cm.startCompactionLoop()
+
+  # Start Raft cluster if enabled
+  if config.raftEnabled:
+    info("Starting Raft node " & config.raftNodeId & " on port " & $config.raftPort)
+    var raftNode = newRaftNode(config.raftNodeId, config.raftPeers, config.raftPort)
+    # Wire state machine to apply committed entries to the database
+    raftNode.applyCommand = proc(cmd: string, data: seq[byte]) {.gcsafe.} =
+      if cmd == "put":
+        let parts = cast[string](data).split("\x00")
+        if parts.len >= 2:
+          httpServer.db.put(parts[0], cast[seq[byte]](parts[1]))
+      elif cmd == "delete":
+        httpServer.db.delete(cast[string](data))
+    var raftNet = newRaftNetwork(raftNode)
+    asyncCheck raftNet.run()
 
   # Start TCP wire protocol server on main thread with async event loop
   waitFor runTcpServer(config)

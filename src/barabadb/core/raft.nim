@@ -32,6 +32,8 @@ type
     log*: seq[LogEntry]
     commitIndex*: uint64
     lastApplied*: uint64
+    # State machine callback
+    applyCommand*: proc(cmd: string, data: seq[byte]) {.gcsafe.}
     # Leader state
     nextIndex*: Table[string, uint64]
     matchIndex*: Table[string, uint64]
@@ -114,6 +116,15 @@ proc lastLogTerm*(node: RaftNode): uint64 =
   if node.log.len == 0:
     return 0
   return node.log[^1].term
+
+proc applyCommitted(node: RaftNode) =
+  while node.lastApplied < node.commitIndex:
+    let idx = int(node.lastApplied)
+    if idx < node.log.len:
+      let entry = node.log[idx]
+      if node.applyCommand != nil:
+        node.applyCommand(entry.command, entry.data)
+    inc node.lastApplied
 
 proc becomeFollower*(node: RaftNode, term: uint64) =
   node.state = rsFollower
@@ -198,6 +209,7 @@ proc handleAppendEntries*(node: RaftNode, msg: RaftMessage): RaftMessage =
   # Update commit index
   if msg.leaderCommit > node.commitIndex:
     node.commitIndex = min(msg.leaderCommit, node.lastLogIndex)
+    node.applyCommitted()
 
   reply.success = true
   reply.matchIdx = node.lastLogIndex
@@ -283,6 +295,7 @@ proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
       if medianIdx <= node.lastLogIndex and
          node.log[medianIdx - 1].term == node.currentTerm:
         node.commitIndex = medianIdx
+        node.applyCommitted()
   else:
     if node.nextIndex[peerId] > 1:
       dec node.nextIndex[peerId]
@@ -479,7 +492,10 @@ proc receiveLoop(net: RaftNetwork, client: AsyncSocket) {.async.} =
       for i in 0 ..< payloadLen:
         payload[i] = byte(payloadStr[i])
       let msg = deserializeRaftMessage(payload)
-      asyncCheck net.processMessage(msg)
+      try:
+        await net.processMessage(msg)
+      except:
+        discard
   except:
     discard
   finally:
@@ -496,7 +512,7 @@ proc heartbeatLoop(net: RaftNetwork) {.async.} =
 proc run*(net: RaftNetwork) {.async.} =
   net.socket = newAsyncSocket()
   net.socket.setSockOpt(OptReuseAddr, true)
-  net.socket.bindAddr(Port(net.node.raftPort), "127.0.0.1")
+  net.socket.bindAddr(Port(net.node.raftPort))
   net.socket.listen()
   net.running = true
   asyncCheck net.heartbeatLoop()

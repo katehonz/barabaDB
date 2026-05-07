@@ -29,6 +29,10 @@ type
     jwtSecret*: string
     rateLimitGlobal*: int
     rateLimitPerClient*: int
+    raftEnabled*: bool
+    raftPort*: int
+    raftPeers*: seq[string]
+    raftNodeId*: string
 
   CompactionStrategy* = enum
     csSizeTiered = "size_tiered"
@@ -61,6 +65,10 @@ proc defaultConfig*(): BaraConfig =
     jwtSecret: "",
     rateLimitGlobal: 10_000,
     rateLimitPerClient: 1_000,
+    raftEnabled: false,
+    raftPort: 9473,
+    raftPeers: @[],
+    raftNodeId: "",
   )
 
 # ----------------------------------------------------------------------
@@ -152,6 +160,12 @@ proc loadConfigFromEnv*(cfg: var BaraConfig) =
   cfg.jwtSecret = getEnv("BARADB_JWT_SECRET", cfg.jwtSecret)
   cfg.rateLimitGlobal = parseEnvInt(getEnv("BARADB_RATE_LIMIT_GLOBAL", ""), cfg.rateLimitGlobal)
   cfg.rateLimitPerClient = parseEnvInt(getEnv("BARADB_RATE_LIMIT_PER_CLIENT", ""), cfg.rateLimitPerClient)
+  cfg.raftEnabled = parseEnvBool(getEnv("BARADB_RAFT_ENABLED", ""), cfg.raftEnabled)
+  cfg.raftPort = parseEnvInt(getEnv("BARADB_RAFT_PORT", ""), cfg.raftPort)
+  let peersEnv = getEnv("BARADB_RAFT_PEERS", "")
+  if peersEnv.len > 0:
+    cfg.raftPeers = peersEnv.split(",")
+  cfg.raftNodeId = getEnv("BARADB_RAFT_NODE_ID", cfg.raftNodeId)
 
 # ----------------------------------------------------------------------
 # Master Loader

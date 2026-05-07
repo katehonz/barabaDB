@@ -1,6 +1,6 @@
 # BaraDB — PLAN
 
-> Всички задачи завършени. Базата е production-ready.
+> Базата е production-ready. Всички задачи завършени.
 
 ---
 
@@ -10,25 +10,26 @@
 
 | Модул | Промяна |
 |--------|---------|
-| `disttxn` | **2PC atomicity:** prepare failure → rollback на вече готови участници. Commit failure → rollback на вече commit-нати. Няма частичен commit. |
-| `disttxn` | **Server DISTTXN handler:** вече проверява транзакция в `DistTxnManager` и връща `OK`/`ERR` според реалното състояние. |
-| `disttxn` | **DistTxnManager wired:** създава се в `newServer()` и е достъпен чрез `server.distTxnManager`. |
-| `sharding` | **Range sharding:** връща `-1` вместо `0` за ключове извън дефинирани диапазони (няма hot-shard бъг). |
-| `sharding` | **Consistent hashing:** бинарно търсене вместо O(n) линейно. |
-| `gossip` | **Health check timer:** `startHealthCheck(intervalMs)` async loop. |
-| `gossip` | **Gossip round timer:** `startGossipRound(intervalMs)` async loop. |
+| `disttxn` | 2PC atomicity: prepare failure → rollback готови; commit failure → rollback |
+| `disttxn` | DISTTXN handler ползва реален `DistTxnManager` |
+| `disttxn` | `DistTxnManager` инициализиран в `newServer()` |
+| `sharding` | `getShardRange` връща `-1` за out-of-range keys |
+| `sharding` | Binary search в consistent hashing ring |
+| `gossip` | `startHealthCheck()` + `startGossipRound()` async loops |
+| `raft` | `applyCommand` callback — state machine прилага committed entries |
+| `raft` | `RaftNetwork.run()` стартира от `main()` ако `raftEnabled=true` |
+| `raft` | `asyncCheck` заменен с `try/await` в critical paths |
+| `raft` | `bindAddr` без hardcoded IP (приема на 0.0.0.0) |
+| `config` | Raft config: `raftEnabled`, `raftPort`, `raftPeers`, `raftNodeId` + env vars |
 
 ### ⚠️ Оставащи distributed gaps (non-critical за single-node)
 
 | Модул | Gap |
 |--------|-----|
-| `raft` | `RaftNetwork.run()` не се извиква от main() — няма Raft cluster при старт. |
-| `raft` | `lastApplied` не се инкрементира — commit-нати entries не се прилагат към state machine. |
-| `raft` | `asyncCheck` поглъща грешки. |
-| `replication` | `writeLsn` не изпраща данни към replicas — няма реален data shipping. |
-| `gossip` | Няма UDP/TCP transport за gossip messages — in-memory само. |
-| `sharding` | `rebalance` не мигрира данни — само променя node-to-shard mapping. |
-| `all` | Модулите не са интеграцни помежду си — няма raft→disttxn, gossip→sharding, replication→disttxn връзки. |
+| `replication` | `writeLsn` не изпраща данни към replicas |
+| `gossip` | Няма UDP/TCP transport — in-memory само |
+| `sharding` | `rebalance` не мигрира данни |
+| `inter-module` | Няма raft→disttxn, gossip→sharding, replication→disttxn връзки |
 
 ---
 
