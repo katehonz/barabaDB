@@ -7,6 +7,8 @@ srcDir        = "src"
 bin           = @["baradadb"]
 binDir        = "build"
 
+switch("define", "ssl")
+
 # Dependencies
 requires "nim >= 2.2.0"
 requires "https://github.com/katehonz/hunos >= 1.2.0"

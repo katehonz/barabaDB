@@ -118,9 +118,12 @@ type
     rows*: seq[Row]
     affectedRows*: int
     message*: string
+    keyValuePairs*: seq[(string, seq[byte])]
 
-proc okResult*(rows: seq[Row] = @[], cols: seq[string] = @[], affected: int = 0, msg: string = ""): ExecResult =
-  ExecResult(success: true, columns: cols, rows: rows, affectedRows: affected, message: msg)
+proc okResult*(rows: seq[Row] = @[], cols: seq[string] = @[], affected: int = 0, msg: string = "",
+               kvPairs: seq[(string, seq[byte])] = @[]): ExecResult =
+  ExecResult(success: true, columns: cols, rows: rows, affectedRows: affected, message: msg,
+             keyValuePairs: kvPairs)
 
 proc errResult*(msg: string): ExecResult =
   ExecResult(success: false, columns: @[], rows: @[], affectedRows: 0, message: msg)
@@ -688,7 +691,8 @@ proc execPointRead(ctx: ExecutionContext, table: string, key: string): seq[Row] 
     return @[row]
   return @[]
 
-proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], values: seq[seq[string]]): int =
+proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], values: seq[seq[string]],
+                  kvPairs: var seq[(string, seq[byte])]): int =
   if not hasPrivilege(ctx, table, "INSERT"):
     return 0
   var count = 0
@@ -720,6 +724,7 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
       discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](valStr))
     else:
       ctx.db.put(fullKey, cast[seq[byte]](valStr))
+      kvPairs.add((fullKey, cast[seq[byte]](valStr)))
 
     for colName in ctx.btrees.keys.toSeq():
       if colName.startsWith(table & "."):
@@ -746,7 +751,8 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
     inc count
   return count
 
-proc execDelete*(ctx: ExecutionContext, table: string, key: string): int =
+proc execDelete*(ctx: ExecutionContext, table: string, key: string,
+                  kvPairs: var seq[(string, seq[byte])]): int =
   if not hasPrivilege(ctx, table, "DELETE"):
     return 0
   let fullKey = table & "." & key
@@ -763,6 +769,7 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string): int =
       discard ctx.txnManager.delete(ctx.pendingTxn, fullKey)
     else:
       ctx.db.delete(fullKey)
+      kvPairs.add((fullKey, @[]))
     # Update FTS indexes
     for ftsKey, ftsIdx in ctx.ftsIndexes:
       if ftsKey.startsWith(table & "."):
@@ -773,7 +780,8 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string): int =
     return 1
   return 0
 
-proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Table[string, string]): int =
+proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Table[string, string],
+                     kvPairs: var seq[(string, seq[byte])]): int =
   if not hasPrivilege(ctx, table, "UPDATE"):
     return 0
   let fullKey = table & "." & key
@@ -819,6 +827,7 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
     discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](newVal))
   else:
     ctx.db.put(fullKey, cast[seq[byte]](newVal))
+    kvPairs.add((fullKey, cast[seq[byte]](newVal)))
   # Update FTS indexes: remove old doc, add new
   for ftsKey, ftsIdx in ctx.ftsIndexes:
     if ftsKey.startsWith(table & "."):
@@ -1953,7 +1962,8 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         row[f] = mutableValues[0][i]
     fireTriggers(ctx, stmt.insTarget, "before", "insert", row)
 
-    let count = execInsert(ctx, stmt.insTarget, mutableFields, mutableValues)
+    var kvPairs: seq[(string, seq[byte])]
+    let count = execInsert(ctx, stmt.insTarget, mutableFields, mutableValues, kvPairs)
 
     # Fire AFTER INSERT triggers
     fireTriggers(ctx, stmt.insTarget, "after", "insert", row)
@@ -1961,7 +1971,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     if ctx.onChange != nil:
       for i in 0..<count:
         ctx.onChange(ChangeEvent(table: stmt.insTarget, kind: ckInsert, key: "", data: ""))
-    return okResult(affected=count)
+    return okResult(affected=count, kvPairs=kvPairs)
 
   of nkUpdate:
     if stmt.updSet.len == 0: return okResult()
@@ -1979,6 +1989,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     # Scan and apply
     let rows = execScan(ctx, stmt.updTarget)
     var count = 0
+    var kvPairs: seq[(string, seq[byte])]
     for row in rows:
       # Check WHERE
       if stmt.updWhere != nil and stmt.updWhere.whereExpr != nil:
@@ -2007,19 +2018,20 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
           newRow[col] = val
         fireTriggers(ctx, stmt.updTarget, "before", "update", oldRow)
 
-        count += execUpdateRow(ctx, stmt.updTarget, row["$key"], sets)
+        count += execUpdateRow(ctx, stmt.updTarget, row["$key"], sets, kvPairs)
 
         # Fire AFTER UPDATE triggers
         fireTriggers(ctx, stmt.updTarget, "after", "update", newRow)
 
         if ctx.onChange != nil:
           ctx.onChange(ChangeEvent(table: stmt.updTarget, kind: ckUpdate, key: old, data: ""))
-    return okResult(affected=count)
+    return okResult(affected=count, kvPairs=kvPairs)
 
   of nkDelete:
     # Delete all rows matching WHERE
     let rows = execScan(ctx, stmt.delTarget)
     var count = 0
+    var kvPairs: seq[(string, seq[byte])]
     for row in rows:
       if stmt.delWhere != nil and stmt.delWhere.whereExpr != nil:
         let whereExpr = lowerExpr(stmt.delWhere.whereExpr)
@@ -2029,14 +2041,14 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         # Fire BEFORE DELETE triggers
         fireTriggers(ctx, stmt.delTarget, "before", "delete", row)
 
-        count += execDelete(ctx, stmt.delTarget, row["$key"])
+        count += execDelete(ctx, stmt.delTarget, row["$key"], kvPairs)
 
         # Fire AFTER DELETE triggers
         fireTriggers(ctx, stmt.delTarget, "after", "delete", row)
 
         if ctx.onChange != nil:
           ctx.onChange(ChangeEvent(table: stmt.delTarget, kind: ckDelete, key: old, data: ""))
-    return okResult(affected=count)
+    return okResult(affected=count, kvPairs=kvPairs)
 
   of nkCreateTable:
     var tbl = TableDef(name: stmt.crtName, columns: @[], pkColumns: @[],
@@ -2125,12 +2137,14 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
 
   of nkCommitTxn:
     if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
+      var kvPairs: seq[(string, seq[byte])]
       for key, version in ctx.pendingTxn.writeSet:
         if version.value == @[]: ctx.db.delete(key)
         else: ctx.db.put(key, version.value)
+        kvPairs.add((key, version.value))
       discard ctx.txnManager.commit(ctx.pendingTxn)
       ctx.pendingTxn = nil
-      return okResult(msg="Transaction committed")
+      return okResult(msg="Transaction committed", kvPairs=kvPairs)
     return errResult("No active transaction to commit")
 
   of nkRollbackTxn:

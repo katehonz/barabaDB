@@ -18,6 +18,7 @@ import ../query/executor
 import ../storage/lsm
 import ../core/mvcc
 import ../core/disttxn
+import ../core/replication
 import jwt as jwtlib
 
 type
@@ -28,6 +29,7 @@ type
     ctx*: ExecutionContext
     txnManager*: TxnManager
     distTxnManager*: DistTxnManager
+    replicationManager*: ReplicationManager
     tls*: TLSContext
     activeConnections*: int
 
@@ -46,7 +48,8 @@ proc newServer*(config: BaraConfig): Server =
     let tlsConfig = newTLSConfig(config.certFile, config.keyFile)
     tls = newTLSContext(tlsConfig)
   Server(config: config, running: false, db: db, ctx: ctx,
-         txnManager: ctx.txnManager, distTxnManager: newDistTxnManager(), tls: tls)
+         txnManager: ctx.txnManager, distTxnManager: newDistTxnManager(),
+         replicationManager: newReplicationManager(), tls: tls)
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
@@ -111,7 +114,8 @@ proc valueToWire(val: string, colType: string): WireValue =
     return WireValue(kind: fkJson, jsonVal: val)
   return WireValue(kind: fkString, strVal: val)
 
-proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[]): (bool, QueryResult, string) =
+proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[],
+                   replication: ReplicationManager = nil): (bool, QueryResult, string) =
   try:
     let tokens = tokenize(query)
     let astNode = parse(tokens)
@@ -121,6 +125,14 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
 
     let result = executor.executeQuery(ctx, astNode, params)
     if result.success:
+      # Ship written key-value pairs to replicas
+      if replication != nil and result.keyValuePairs.len > 0:
+        for (key, value) in result.keyValuePairs:
+          var data = newSeq[byte](key.len + 1 + value.len)
+          for i, c in key: data[i] = byte(c)
+          data[key.len] = byte(0)
+          for i, c in value: data[key.len + 1 + i] = c
+          discard replication.writeLsn(data)
       var qr = QueryResult(affectedRows: result.affectedRows, rowCount: result.rows.len)
       qr.columns = result.columns
 
@@ -304,6 +316,38 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           await client.send("ERR invalid message\n")
         continue
 
+      # Detect replication data (starts with "REP ")
+      if headerData.len >= 4 and headerData[0..3] == "REP ":
+        var rest = headerData[4..^1]
+        while '\n' notin rest:
+          let more = await client.recv(1024)
+          if more.len == 0: break
+          rest.add(more)
+        let parts = rest.strip().split(" ")
+        if parts.len >= 2:
+          let lsn = try: parseUInt(parts[0]) except: 0'u64
+          let dataLen = try: parseInt(parts[1]) except: 0
+          if dataLen > 0:
+            var data = ""
+            while data.len < dataLen:
+              let chunk = await client.recv(dataLen - data.len)
+              if chunk.len == 0: break
+              data.add(chunk)
+            # Apply replicated data to database
+            if data.len > 0:
+              let nullPos = data.find('\0')
+              if nullPos >= 0:
+                let key = data[0..<nullPos]
+                let value = data[nullPos+1..^1]
+                if value.len > 0:
+                  server.db.put(key, cast[seq[byte]](value))
+                else:
+                  server.db.delete(key)
+          await client.send("ACK " & $lsn & "\n")
+        else:
+          await client.send("ERR\n")
+        continue
+
       let (ok, header) = parseHeader(headerData)
       if not ok:
         break
@@ -338,7 +382,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         info("[" & $clientId & "] Query: " & queryStr)
 
         let startTicks = getMonoTime().ticks()
-        let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr)
+        let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, replication=server.replicationManager)
         let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
         if durationMs >= slowThreshold:
@@ -359,7 +403,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         info("[" & $clientId & "] QueryParams: " & queryStr & " (" & $params.len & " params)")
 
         let startTicks = getMonoTime().ticks()
-        let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, params)
+        let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, params, replication=server.replicationManager)
         let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
         if durationMs >= slowThreshold:

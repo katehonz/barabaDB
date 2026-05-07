@@ -58,10 +58,10 @@ proc newHttpServer*(config: BaraConfig): HttpServer =
 proc createToken*(server: HttpServer, userId, role: string): string =
   let header = %*{"alg": "HS256", "typ": "JWT"}
   var claims = newTable[string, Claim]()
-  claims["sub"] = newStringClaim(userId)
-  claims["role"] = newStringClaim(role)
-  claims["iat"] = newTimeClaim(getTime())
-  claims["exp"] = newTimeClaim(getTime() + 24.hours)
+  claims["sub"] = newSUB(%userId)
+  claims["role"] = newClaim(GENERAL, %role)
+  claims["iat"] = newIAT(getTime().toUnix())
+  claims["exp"] = newEXP((getTime() + 24.hours).toUnix())
   var token = initJWT(header, claims)
   token.sign(server.secretKey)
   return $token
