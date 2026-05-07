@@ -72,6 +72,7 @@ type
     tkUnion
     tkIntersect
     tkExcept
+    tkAll
     tkExists
     tkBetween
     tkLike
@@ -121,6 +122,9 @@ type
     tkVector
     tkGraph
     tkDocument
+    tkArrowR       # ->
+    tkArrowRR      # ->>
+    tkFtsMatch     # @@
     tkSimilar
     tkNearest
     tkTo
@@ -237,6 +241,7 @@ const keywords*: Table[string, TokenKind] = {
   "union": tkUnion,
   "intersect": tkIntersect,
   "except": tkExcept,
+  "all": tkAll,
   "exists": tkExists,
   "between": tkBetween,
   "like": tkLike,
@@ -433,6 +438,14 @@ proc nextToken*(l: var Lexer): Token =
     discard l.advance()
     return Token(kind: tkPlus, value: "+", line: startLine, col: startCol)
   of '-':
+    if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '>':
+      discard l.advance()
+      if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '>':
+        discard l.advance()
+        discard l.advance()
+        return Token(kind: tkArrowRR, value: "->>", line: startLine, col: startCol)
+      discard l.advance()
+      return Token(kind: tkArrowR, value: "->", line: startLine, col: startCol)
     discard l.advance()
     return Token(kind: tkMinus, value: "-", line: startLine, col: startCol)
   of '*':
@@ -499,6 +512,13 @@ proc nextToken*(l: var Lexer): Token =
       return Token(kind: tkCoalesce, value: "??", line: startLine, col: startCol)
     discard l.advance()
     return Token(kind: tkPlaceholder, value: "?", line: startLine, col: startCol)
+  of '@':
+    if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '@':
+      discard l.advance()
+      discard l.advance()
+      return Token(kind: tkFtsMatch, value: "@@", line: startLine, col: startCol)
+    discard l.advance()
+    return Token(kind: tkInvalid, value: "@", line: startLine, col: startCol)
   of '.':
     if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '<':
       discard l.advance()

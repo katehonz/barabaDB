@@ -53,6 +53,7 @@ type
     # Expressions
     nkBinOp
     nkUnaryOp
+    nkJsonPath      # column->'key' or column->>'key'
     nkFuncCall
     nkTypeCast
     nkPath
@@ -86,6 +87,9 @@ type
     # Vector-specific
     nkVectorSimilar
     nkVectorNearest
+
+    # Set operations
+    nkSetOp
 
     # Join
     nkJoin
@@ -124,6 +128,9 @@ type
     bkCoalesce = "??"
     bkAssign = ":="
     bkArrow = "=>"
+    bkJsonPath = "->"
+    bkJsonPathText = "->>"
+    bkFtsMatch = "@@"
 
   UnaryOpKind* = enum
     ukNeg = "-"
@@ -137,6 +144,11 @@ type
     jkRight
     jkFull
     jkCross
+
+  SetOpKind* = enum
+    sdkUnion
+    sdkIntersect
+    sdkExcept
 
   SortDir* = enum
     sdAsc
@@ -318,6 +330,10 @@ type
     of nkUnaryOp:
       unOp*: UnaryOpKind
       unOperand*: Node
+    of nkJsonPath:
+      jpLeft*: Node
+      jpKey*: string
+      jpAsText*: bool   # true for ->>, false for ->
     of nkFuncCall:
       funcName*: string
       funcArgs*: seq[Node]
@@ -412,6 +428,11 @@ type
       joinTarget*: Node
       joinOn*: Node
       joinAlias*: string
+    of nkSetOp:
+      setOpKind*: SetOpKind
+      setOpAll*: bool
+      setOpLeft*: Node
+      setOpRight*: Node
     of nkStar:
       discard
     of nkPlaceholder:

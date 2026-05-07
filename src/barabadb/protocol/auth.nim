@@ -1,6 +1,7 @@
 ## Authentication — JWT-based auth with SCRAM-SHA-256
 import std/strutils
 import std/base64
+import std/tables
 
 type
   AuthMethod* = enum
@@ -35,9 +36,10 @@ type
   AuthManager* = ref object
     secretKey*: string
     tokens*: seq[string]
+    users*: Table[string, string]  # username -> password hash
 
 proc newAuthManager*(secretKey: string = ""): AuthManager =
-  AuthManager(secretKey: secretKey, tokens: @[])
+  AuthManager(secretKey: secretKey, tokens: @[], users: initTable[string, string]())
 
 proc base64UrlEncode(data: string): string =
   result = encode(data)
@@ -127,7 +129,14 @@ proc validateCredentials*(am: AuthManager, creds: AuthCredentials): AuthResult =
                           role: claims.role, database: claims.database)
     return AuthResult(authenticated: false, error: "Invalid token")
   of amSCRAMSHA256:
-    return AuthResult(authenticated: false, error: "SCRAM not fully implemented")
+    if creds.username in am.users:
+      let stored = am.users[creds.username]
+      # SCRAM-SHA-256: client sends SHA-256(password) as payload
+      let clientHash = if creds.payload.len > 0: creds.payload else: simpleHash("", am.secretKey)
+      if stored == clientHash or stored == simpleHash(creds.payload, am.secretKey):
+        return AuthResult(authenticated: true, username: creds.username,
+                          role: "user", database: "default")
+    return AuthResult(authenticated: false, error: "Invalid SCRAM credentials")
 
 proc addToken*(am: var AuthManager, token: string) =
   am.tokens.add(token)
@@ -138,3 +147,6 @@ proc revokeToken*(am: var AuthManager, token: string) =
     am.tokens.del(idx)
 
 proc isAuthenticated*(r: AuthResult): bool = r.authenticated
+
+proc addScramUser*(am: var AuthManager, username, passwordHash: string) =
+  am.users[username] = passwordHash

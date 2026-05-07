@@ -26,6 +26,7 @@ type
     irLike, irILike
     irBetween
     irIsNull, irIsNotNull
+    irFtsMatch
 
   IRAggregate* = enum
     irCount, irSum, irAvg, irMin, irMax
@@ -50,6 +51,7 @@ type
     irekConditional
     irekExists
     irekStar
+    irekJsonPath
 
   IRJoinKind* = enum
     irjkInner
@@ -166,6 +168,10 @@ type
       existsSubquery*: IRPlan
     of irekStar:
       discard
+    of irekJsonPath:
+      jpExpr*: IRExpr
+      jpKey*: string
+      jpAsText*: bool
 
 type
   TypeChecker* = ref object
@@ -209,7 +215,8 @@ proc inferExpr*(tc: TypeChecker, expr: IRExpr, context: Table[string, IRType]): 
       return nil
     case expr.unOp
     of irEq, irNeq, irLt, irLte, irGt, irGte, irAnd, irOr, irNot,
-       irIsNull, irIsNotNull, irIn, irNotIn, irLike, irILike, irBetween:
+       irIsNull, irIsNotNull, irIn, irNotIn, irLike, irILike, irBetween,
+       irFtsMatch:
       return IRType(name: "bool", kind: itkScalar)
     else:
       return nil
@@ -245,3 +252,6 @@ proc inferExpr*(tc: TypeChecker, expr: IRExpr, context: Table[string, IRType]): 
     return IRType(name: "bool", kind: itkScalar)
   of irekStar:
     return IRType(name: "star", kind: itkScalar)
+  of irekJsonPath:
+    if expr.jpAsText: return IRType(name: "str", kind: itkScalar)
+    return IRType(name: "json", kind: itkScalar)

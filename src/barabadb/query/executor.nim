@@ -138,6 +138,110 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
                    onChange: nil)
   restoreSchema(result)
 
+# ----------------------------------------------------------------------
+# AST to SQL serializer (for VIEW DDL persistence)
+# ----------------------------------------------------------------------
+
+proc exprToSql(node: Node): string =
+  if node == nil:
+    return ""
+  case node.kind
+  of nkIntLit:
+    return $node.intVal
+  of nkFloatLit:
+    return $node.floatVal
+  of nkStringLit:
+    return "'" & node.strVal & "'"
+  of nkBoolLit:
+    return if node.boolVal: "true" else: "false"
+  of nkNullLit:
+    return "null"
+  of nkIdent:
+    return node.identName
+  of nkStar:
+    return "*"
+  of nkBinOp:
+    let opStr = case node.binOp
+      of bkEq: "="
+      of bkNotEq: "!="
+      of bkLt: "<"
+      of bkLtEq: "<="
+      of bkGt: ">"
+      of bkGtEq: ">="
+      of bkAnd: " AND "
+      of bkOr: " OR "
+      of bkAdd: " + "
+      of bkSub: " - "
+      of bkMul: " * "
+      of bkDiv: " / "
+      else: " " & $node.binOp & " "
+    return exprToSql(node.binLeft) & opStr & exprToSql(node.binRight)
+  of nkFuncCall:
+    return node.funcName & "(" & exprToSql(node.funcArgs[0]) & ")"
+  of nkUnaryOp:
+    return $node.unOp & " " & exprToSql(node.unOperand)
+  else:
+    return $node.kind
+
+proc selectToSql(node: Node): string =
+  if node == nil:
+    return ""
+  result = "SELECT "
+  # Column list
+  for i, e in node.selResult:
+    if i > 0: result.add(", ")
+    result.add(exprToSql(e))
+    if e.exprAlias.len > 0:
+      result.add(" AS " & e.exprAlias)
+  # FROM
+  if node.selFrom != nil and node.selFrom.fromTable.len > 0:
+    result.add(" FROM " & node.selFrom.fromTable)
+    if node.selFrom.fromAlias.len > 0:
+      result.add(" AS " & node.selFrom.fromAlias)
+  # JOINs
+  for j in node.selJoins:
+    if j.kind == nkJoin:
+      let jkStr = case j.joinKind
+        of jkInner: "INNER JOIN"
+        of jkLeft: "LEFT JOIN"
+        of jkRight: "RIGHT JOIN"
+        of jkFull: "FULL JOIN"
+        of jkCross: "CROSS JOIN"
+      result.add(" " & jkStr & " " & j.joinTarget.fromTable)
+      if j.joinAlias.len > 0:
+        result.add(" AS " & j.joinAlias)
+      if j.joinOn != nil:
+        result.add(" ON " & exprToSql(j.joinOn))
+  # WHERE
+  if node.selWhere != nil and node.selWhere.whereExpr != nil:
+    result.add(" WHERE " & exprToSql(node.selWhere.whereExpr))
+  # GROUP BY
+  if node.selGroupBy.len > 0:
+    result.add(" GROUP BY ")
+    for i, g in node.selGroupBy:
+      if i > 0: result.add(", ")
+      result.add(exprToSql(g))
+  # HAVING
+  if node.selHaving != nil and node.selHaving.havingExpr != nil:
+    result.add(" HAVING " & exprToSql(node.selHaving.havingExpr))
+  # ORDER BY
+  if node.selOrderBy.len > 0:
+    result.add(" ORDER BY ")
+    for i, o in node.selOrderBy:
+      if i > 0: result.add(", ")
+      result.add(exprToSql(o.orderByExpr))
+      if o.orderByDir == sdDesc:
+        result.add(" DESC")
+  # LIMIT / OFFSET
+  if node.selLimit != nil and node.selLimit.limitExpr.kind == nkIntLit:
+    result.add(" LIMIT " & $node.selLimit.limitExpr.intVal)
+  if node.selOffset != nil and node.selOffset.offsetExpr.kind == nkIntLit:
+    result.add(" OFFSET " & $node.selOffset.offsetExpr.intVal)
+
+# ----------------------------------------------------------------------
+# Schema restore
+# ----------------------------------------------------------------------
+
 proc restoreSchema(ctx: ExecutionContext) =
   for entry in ctx.db.scanMemTable():
     if entry.deleted: continue
@@ -323,6 +427,29 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string]): string =
     return ""
   of irekStar:
     return "*"
+  of irekJsonPath:
+    let srcVal = evalExpr(expr.jpExpr, row)
+    if srcVal.len == 0: return ""
+    try:
+      let node = parseJson(srcVal)
+      if node.hasKey(expr.jpKey):
+        let val = node[expr.jpKey]
+        if expr.jpAsText:
+          case val.kind
+          of JString: return val.getStr()
+          of JInt: return $val.getInt()
+          of JFloat: return $val.getFloat()
+          of JBool: return $val.getBool()
+          of JNull: return "null"
+          else: return $val
+        else:
+          case val.kind
+          of JString: return "\"" & val.getStr() & "\""
+          of JNull: return "null"
+          else: return $val
+      return ""
+    except:
+      return ""
   of irekBinary:
     let left = evalExpr(expr.binLeft, row)
     let right = evalExpr(expr.binRight, row)
@@ -410,6 +537,16 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string]): string =
         return if lv != rv: "true" else: "false"
       except: discard
       return if left != right: "true" else: "false"
+    of irFtsMatch:
+      # Simple full-text search: case-insensitive phrase containment
+      let colVal = left.toLower()
+      let query = right.toLower()
+      # Split query into terms and check each term is in column
+      let terms = query.split()
+      for term in terms:
+        if term.len > 0 and term notin colVal:
+          return "false"
+      return "true"
     else: return "false"
   of irekUnary:
     case expr.unOp
@@ -796,6 +933,11 @@ proc lowerExpr*(node: Node): IRExpr =
   of nkPath:
     result = IRExpr(kind: irekField)
     result.fieldPath = node.pathParts
+  of nkJsonPath:
+    result = IRExpr(kind: irekJsonPath)
+    result.jpExpr = lowerExpr(node.jpLeft)
+    result.jpKey = node.jpKey
+    result.jpAsText = node.jpAsText
   of nkBinOp:
     result = IRExpr(kind: irekBinary)
     var irOp: IROperator
@@ -813,6 +955,7 @@ proc lowerExpr*(node: Node): IRExpr =
     of bkGtEq: irOp = irGte
     of bkAnd: irOp = irAnd
     of bkOr: irOp = irOr
+    of bkFtsMatch: irOp = irFtsMatch
     else: irOp = irEq
     result.binOp = irOp
     result.binLeft = lowerExpr(node.binLeft)
@@ -1360,8 +1503,68 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     if stmt.selWith.len > 0:
       for (cteName, cteQuery, isRecursive) in stmt.selWith:
         if isRecursive:
-          # Recursive CTE: not yet fully implemented
-          ctx.cteTables[cteName] = @[]
+          # Recursive CTE: must be UNION ALL with anchor + recursive member
+          if cteQuery.kind == nkSetOp and cteQuery.setOpKind == sdkUnion:
+            var allRows: seq[Row] = @[]
+
+            # Step 1: Execute the non-recursive anchor (left side of UNION)
+            var innerLeft = Node(kind: nkStatementList, stmts: @[])
+            innerLeft.stmts.add(cteQuery.setOpLeft)
+            let anchorRes = executeQuery(ctx, innerLeft)
+            for row in anchorRes.rows:
+              allRows.add(row)
+
+            var workTable = anchorRes.rows
+            const maxIterations = 1000
+            var iteration = 0
+
+            # Step 2: Iteratively execute the recursive member
+            while workTable.len > 0 and iteration < maxIterations:
+              # Save CTE state; recursive member's executeQuery will clear it via defer
+              let savedCte = ctx.cteTables
+              ctx.cteTables = {cteName: workTable}.toTable()
+
+              var innerRight = Node(kind: nkStatementList, stmts: @[])
+              innerRight.stmts.add(cteQuery.setOpRight)
+              let rightRes = executeQuery(ctx, innerRight)
+
+              ctx.cteTables = savedCte
+
+              var newRows: seq[Row] = @[]
+              if not cteQuery.setOpAll:
+                # UNION: deduplicate against all already-accumulated rows
+                var seen = initTable[string, bool]()
+                for existing in allRows:
+                  let key = if "$value" in existing: existing["$value"] else: $existing
+                  if key.len > 0:
+                    seen[key] = true
+                for row in rightRes.rows:
+                  let key = if "$value" in row: row["$value"] else: $row
+                  if not seen.getOrDefault(key, false):
+                    if key.len > 0:
+                      seen[key] = true
+                    newRows.add(row)
+              else:
+                newRows = rightRes.rows
+
+              if newRows.len == 0:
+                break
+
+              for row in newRows:
+                allRows.add(row)
+              workTable = newRows
+              iteration += 1
+
+            ctx.cteTables[cteName] = allRows
+          else:
+            # Recursive CTE without UNION — treat as non-recursive fallback
+            var inner = Node(kind: nkStatementList, stmts: @[])
+            inner.stmts.add(cteQuery)
+            let cteRes = executeQuery(ctx, inner)
+            var cteRows: seq[Row] = @[]
+            for row in cteRes.rows:
+              cteRows.add(row)
+            ctx.cteTables[cteName] = cteRows
         else:
           var inner = Node(kind: nkStatementList, stmts: @[])
           inner.stmts.add(cteQuery)
@@ -1419,13 +1622,18 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         let w = stmt.selWhere.whereExpr
         # Multi-column exact match: AND chain of =
         var eqConds: seq[(string, string)] = @[]
+        var rangeCond: tuple[col: string, op: BinOpKind, val: string] = ("", bkEq, "")
         proc collectEq(node: Node) =
           if node.kind == nkBinOp and node.binOp == bkEq and node.binLeft.kind == nkIdent and node.binRight.kind == nkStringLit:
             eqConds.add((node.binLeft.identName, node.binRight.strVal))
           elif node.kind == nkBinOp and node.binOp == bkAnd:
             collectEq(node.binLeft)
             collectEq(node.binRight)
+          elif node.kind == nkBinOp and node.binOp in {bkGt, bkGtEq, bkLt, bkLtEq} and
+               node.binLeft.kind == nkIdent and node.binRight.kind == nkStringLit:
+            rangeCond = (node.binLeft.identName, node.binOp, node.binRight.strVal)
         collectEq(w)
+        # Multi-column exact match
         if eqConds.len >= 2:
           var idxCols: seq[string] = @[]
           for c in eqConds: idxCols.add(c[0])
@@ -1446,6 +1654,46 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
               for c in tbl.columns: cols.add(c.name)
               if cols.len == 0: cols = @["key", "value"]
               return okResult(rows, cols)
+        # Multi-column range scan: exact match on prefix + range on last column
+        if eqConds.len >= 1 and rangeCond.col.len > 0:
+          var idxCols: seq[string] = @[]
+          for c in eqConds: idxCols.add(c[0])
+          idxCols.add(rangeCond.col)
+          let idxName = stmt.selFrom.fromTable & "." & idxCols.join(".")
+          if idxName in ctx.btrees:
+            var prefix: string = ""
+            for c in eqConds:
+              if prefix.len > 0: prefix.add("|")
+              prefix.add(c[1])
+            if prefix.len > 0: prefix.add("|")
+            var startKey, endKey: string
+            case rangeCond.op
+            of bkGt:
+              startKey = prefix & rangeCond.val & "\x01"  # just above the value
+              endKey = prefix & "\xFF"
+            of bkGtEq:
+              startKey = prefix & rangeCond.val
+              endKey = prefix & "\xFF"
+            of bkLt:
+              startKey = prefix
+              endKey = prefix & rangeCond.val
+            of bkLtEq:
+              startKey = prefix
+              endKey = prefix & rangeCond.val & "\x01"
+            else:
+              startKey = prefix; endKey = prefix
+            let scanned = ctx.btrees[idxName].scan(startKey, endKey)
+            var rows: seq[Row] = @[]
+            for (k, entries) in scanned:
+              for entry in entries:
+                let (found, val) = ctx.db.get(entry.lsmKey)
+                if found:
+                  rows.add(parseRowData(cast[string](val)))
+            let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
+            var cols: seq[string] = @[]
+            for c in tbl.columns: cols.add(c.name)
+            if cols.len == 0: cols = @["key", "value"]
+            return okResult(rows, cols)
         if w.kind == nkBinOp and w.binOp == bkEq:
           if w.binLeft.kind == nkIdent and w.binRight.kind == nkStringLit:
             let colName = w.binLeft.identName
@@ -1453,6 +1701,23 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
             if idxName in ctx.btrees:
               let entries = ctx.btrees[idxName].get(w.binRight.strVal)
               if entries.len > 0:
+                # Check for covering index: SELECT list matches index column
+                var isCovered = true
+                var coveredCols: seq[string] = @[]
+                for e in stmt.selResult:
+                  if e.kind == nkIdent:
+                    coveredCols.add(e.identName)
+                    if e.identName != colName:
+                      isCovered = false
+                  elif e.kind != nkStar:
+                    isCovered = false
+                if isCovered and coveredCols.len > 0:
+                  var rows: seq[Row] = @[]
+                  for entry in entries:
+                    var row = initTable[string, string]()
+                    row[colName] = w.binRight.strVal
+                    rows.add(row)
+                  return okResult(rows, coveredCols)
                 # Fetch actual row data from LSM
                 let rows = execPointRead(ctx, stmt.selFrom.fromTable, colName & "=" & w.binRight.strVal)
                 let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
@@ -1523,6 +1788,59 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     for c in tbl.columns: cols.add(c.name)
     if cols.len == 0 and rows.len > 0:
       for k, _ in rows[0]: cols.add(k)
+    return okResult(rows, cols)
+
+  of nkSetOp:
+    # Execute left and right queries
+    var innerLeft = Node(kind: nkStatementList, stmts: @[])
+    innerLeft.stmts.add(stmt.setOpLeft)
+    let leftRes = executeQuery(ctx, innerLeft)
+
+    var innerRight = Node(kind: nkStatementList, stmts: @[])
+    innerRight.stmts.add(stmt.setOpRight)
+    let rightRes = executeQuery(ctx, innerRight)
+
+    # Derive columns from left side
+    var cols = leftRes.columns
+    if cols.len == 0:
+      cols = rightRes.columns
+
+    var rows: seq[Row] = @[]
+    case stmt.setOpKind
+    of sdkUnion:
+      rows = leftRes.rows
+      if stmt.setOpAll:
+        # UNION ALL: simple concatenation
+        for row in rightRes.rows:
+          rows.add(row)
+      else:
+        # UNION: deduplicate
+        var seen: Table[string, bool]
+        for row in leftRes.rows:
+          seen[row["$value"]] = true
+        for row in rightRes.rows:
+          if not seen.getOrDefault(row["$value"], false):
+            seen[row["$value"]] = true
+            rows.add(row)
+
+    of sdkIntersect:
+      var leftSet: Table[string, bool]
+      for row in leftRes.rows:
+        leftSet[row["$value"]] = true
+      for row in rightRes.rows:
+        if leftSet.getOrDefault(row["$value"], false):
+          rows.add(row)
+          if not stmt.setOpAll:
+            leftSet.del(row["$value"])  # remove to prevent duplicates for INTERSECT (not ALL)
+
+    of sdkExcept:
+      var rightSet: Table[string, bool]
+      for row in rightRes.rows:
+        rightSet[row["$value"]] = true
+      for row in leftRes.rows:
+        if not rightSet.getOrDefault(row["$value"], false):
+          rows.add(row)
+
     return okResult(rows, cols)
 
   of nkInsert:
@@ -1790,7 +2108,8 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
   of nkCreateView:
     ctx.views[stmt.cvName] = stmt.cvQuery
     let viewKey = "_schema:views:" & stmt.cvName
-    let viewDdl = "CREATE VIEW " & stmt.cvName & " AS SELECT 1"  # placeholder; real AST serialization needed
+    let viewSql = selectToSql(stmt.cvQuery)
+    let viewDdl = "CREATE VIEW " & stmt.cvName & " AS " & viewSql
     ctx.db.put(viewKey, cast[seq[byte]](viewDdl))
     return okResult(msg="CREATE VIEW " & stmt.cvName)
 
@@ -2005,6 +2324,26 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         let lsmKey = if "$key" in row: stmt.ciTarget & "." & row["$key"] else: ""
         ctx.btrees[colKey].insert(idxVal, IndexEntry(lsmKey: lsmKey, rowValue: ""))
     return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget)
+
+  of nkDropIndex:
+    # Find and remove index by name from ctx.btrees
+    var found = false
+    var targetKey = ""
+    for key, _ in ctx.btrees:
+      # Index key format: table.col or table.col1.col2
+      # Try matching by the full key or by the table.indexName convention
+      if key == stmt.diName or key.endsWith("." & stmt.diName):
+        targetKey = key
+        found = true
+        break
+    if found:
+      ctx.btrees.del(targetKey)
+      return okResult(msg="DROP INDEX " & stmt.diName)
+    else:
+      # Also remove from schema storage
+      let idxKey = "_schema:indexes:" & stmt.diName
+      ctx.db.delete(idxKey)
+      return okResult(msg="DROP INDEX " & stmt.diName)
 
   of nkCreateUser:
     ctx.users[stmt.cuName] = UserDef(name: stmt.cuName, passwordHash: stmt.cuPassword,

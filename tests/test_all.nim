@@ -2400,5 +2400,64 @@ suite "Parameterized queries":
     check ast.stmts[0].selWith[0][0] == "nums"
     check ast.stmts[0].selWith[0][2] == true
 
+  test "UNION ALL parse":
+    let ast = parse("SELECT 1 AS n UNION ALL SELECT 2 AS n")
+    check ast.stmts[0].kind == nkSetOp
+    check ast.stmts[0].setOpKind == sdkUnion
+    check ast.stmts[0].setOpAll == true
+    check ast.stmts[0].setOpLeft.kind == nkSelect
+    check ast.stmts[0].setOpRight.kind == nkSelect
+
+  test "UNION ALL execution":
+    discard qexec.executeQuery(ctx, parse("INSERT INTO users (name, age, active) VALUES ('union_a', '30', 'true')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO users (name, age, active) VALUES ('union_b', '25', 'false')"))
+    let ast = parse("SELECT name FROM users WHERE name = 'union_a' UNION ALL SELECT name FROM users WHERE name = 'union_b'")
+    let r = qexec.executeQuery(ctx, ast)
+    check r.success
+    check r.rows.len == 2
+
+  test "Simple recursive CTE execution":
+    let ast = parse("WITH RECURSIVE nums AS (SELECT 0 AS n FROM users LIMIT 1 UNION ALL SELECT n + 1 FROM nums WHERE n < 2) SELECT n FROM nums ORDER BY n ASC")
+    let r = qexec.executeQuery(ctx, ast)
+    check r.success
+
+  test "DROP INDEX parse":
+    let ast = parse("DROP INDEX myidx")
+    check ast.stmts[0].kind == nkDropIndex
+    check ast.stmts[0].diName == "myidx"
+
+  test "DROP INDEX execution":
+    let tbl = ctx.tables["users"]
+    let colKey = "users.name"
+    ctx.btrees[colKey] = newBTreeIndex[string, IndexEntry]()
+    let dropAst = parse("DROP INDEX users.name")
+    let r = qexec.executeQuery(ctx, dropAst)
+    check r.success
+
+  test "JSON path operators parse":
+    let ast = parse("SELECT data->'name' FROM users")
+    check ast.stmts[0].kind == nkSelect
+
+  test "JSON path operator ->> parse":
+    let ast = parse("SELECT data->>'name' FROM users")
+    check ast.stmts[0].kind == nkSelect
+
+  test "JSON path execution":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE IF NOT EXISTS jsontest (id INT PRIMARY KEY, data JSON)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO jsontest (id, data) VALUES (1, '{\"name\": \"Alice\", \"age\": 30}')"))
+    let r = qexec.executeQuery(ctx, parse("SELECT data->'name' AS json_name, data->>'name' AS text_name FROM jsontest"))
+    check r.success
+    check r.rows.len >= 1
+
+  test "FTS match operator @@ parse":
+    let ast = parse("SELECT * FROM docs WHERE content @@ 'hello'")
+    check ast.stmts[0].kind == nkSelect
+
+  test "FTS match operator @@ execution":
+    discard qexec.executeQuery(ctx, parse("INSERT INTO users (name, age, active) VALUES ('full text search', '30', 'true')"))
+    let r = qexec.executeQuery(ctx, parse("SELECT name FROM users WHERE name @@ 'text'"))
+    check r.success
+    # Should find the row because 'text' is in 'full text search'
+
 # JOIN tests
 include "join_tests"

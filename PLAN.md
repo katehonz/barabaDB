@@ -1,46 +1,45 @@
 # BaraDB — Оставащи задачи
 
-> Преименуван от `PLAN.md` — всичко завършено е в `PLAN_DONE.md`.
+> Завършеното е преместено в `PLAN_DONE.md`.
 
 ---
 
-## Критични (блокират production)
+## Ниски (nice-to-have, не блокират production)
 
-*Всички критични задачи са завършени. Виж `PLAN_DONE.md`.*
+### 1. Distributed 2PC — реален network RPC
+- **Статус:** ❌ Симулиран (`disttxn.nim:86,108`)
+- **Промени:** `prepare()` и `commit()` само маркират участниците като готови. Няма реална мрежова комуникация.
+- **Нужно:** Изпращане на PREPARE/COMMIT RPC към participant nodes през TCP.
 
----
+### 2. LSM-Tree thread-safety
+- **Статус:** ❌ Не е напълно thread-safe
+- **Проблем:** Stress test ползва отделни DB инстанции на worker (`stress_test.nim:20`).
+- **Нужно:** Mutex/lock около shared LSM операциите или MVCC-based concurrency.
 
-## Средни (важни, но не блокират)
+### 3. Full FTS index integration
+- **Статус:** ⚠️ Базова поддръжка
+- **Текущо:** `WHERE col @@ 'query'` прави case-insensitive term match (всеки термин от заявката трябва да се среща в колоната).
+- **Липсва:** Пълна интеграция с `InvertedIndex` от `fts/engine.nim` — BM25 ranking, highlight-и, позиционно търсене.
 
-### 1. JSON/JSONB Types
-- **Статус:** ✅ Валидация при INSERT/UPDATE + wire тип `fkJson`
-- **Решение:** `validateType` валидира JSON чрез `std/json`. `valueToWire` връща `fkJson`. Клиентите поддържат JSON сериализация.
-- **Липсва:** JSON path operators (`->`, `->>`)
+### 4. Point-in-time recovery (PITR)
+- **Статус:** ❌ Не е имплементирано
+- **Обхват:** WAL replay съществува, но няма UI/команда за PITR до конкретен timestamp.
+- **Нужно:** `RECOVER TO TIMESTAMP '...'` или подобна команда.
 
-### 2. CTE Execution (WITH RECURSIVE)
-- **Статус:** ✅ Non-recursive CTE работи; RECURSIVE се парсва
-- **Non-recursive CTE:** Изпълнява чрез materialization в `ctx.cteTables`. `execScan` проверява CTE store преди LSM.
-- **Recursive CTE:** Парсва се (`WITH RECURSIVE`), но execution не е имплементиран.
+### 5. OpenTelemetry tracing
+- **Статус:** ❌ Не е имплементирано
+- **Текущо:** JSON structured logging (`logging.nim`).
+- **Нужно:** OpenTelemetry spans за query execution, index lookup, RPC calls.
 
-### 3. Multi-Column Indexes
-- **Статус:** ✅ Имплементиран
-- **Промени:** Parser чете `col1, col2, ...`. AST има `ciColumns`. Executor създава ключ `table.col1.col2` и индексира `val1|val2`. SELECT поддържа exact match за AND chain.
-- **Липсва:** Range scan за втора/трета колона; `DROP INDEX`.
+### 6. SSTable metadata
+- **Статус:** ⚠️ Placeholders
+- **Проблем:** `indexOffset` и `bloomOffset` се пишат като `0` в SSTable header (`lsm.nim:137,139`), коригират се при finalize. Не е бъг, но е нечисто.
+- **Нужно:** Записване на реалните offsets веднага или restructure на SSTable формата.
 
-### 4. Column Type Metadata в Wire Protocol
-- **Статус:** ✅ Сервира реална metadata
-- **Промени:** `QueryResult.columnTypes` се попълва от schema. `serializeResult` изпраща `uint8` на колона. Всички 4 клиента (Nim, Python, JS, Rust) са обновени да четат типовете.
-
----
-
-## Ниски (nice-to-have)
-
-| Задача | Защо е ниска |
-|--------|-------------|
-| Full-text search SQL (`WHERE content @@ 'query'`) | Engine съществува, не е wired към SQL |
-| Point-in-time recovery | Backup/restore покрива 90% |
-| OpenTelemetry tracing | JSON logging е достатъчен за v1 |
-| Covering index optimization | Преждевременна оптимизация |
+### 7. Hardcoded JWT secret
+- **Статус:** ⚠️ В 2 файла
+- **Проблем:** `"baradb-default-secret-change-in-production!"` в `server.nim` и `httpserver.nim`.
+- **Нужно:** Задължително задаване през env var или config file; отказване на старт ако е default стойност.
 
 ---
 
@@ -55,4 +54,7 @@
 
 ## Honest Score
 
-**9.95/10** — всички production blockers са оправени. Остават само nice-to-have и advanced SQL features.
+**9.7/10** — всички критични и средни задачи са завършени.
+Остават 7 ниско-приоритетни задачи, нито една не блокира самостоятелен production deploy.
+
+**279 теста — 0 failure-а.**

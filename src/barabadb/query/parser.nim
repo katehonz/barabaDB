@@ -157,8 +157,17 @@ proc parsePrimary(p: var Parser): Node =
     discard p.advance()
     Node(kind: nkNullLit, line: tok.line, col: tok.col)
 
-proc parseMulDiv(p: var Parser): Node =
+proc parsePostfix(p: var Parser): Node =
   result = p.parsePrimary()
+  while p.peek().kind in {tkArrowR, tkArrowRR}:
+    let isText = p.peek().kind == tkArrowRR
+    discard p.advance()
+    let key = p.expect(tkStringLit).value
+    result = Node(kind: nkJsonPath, jpLeft: result, jpKey: key, jpAsText: isText,
+                  line: p.peek().line, col: p.peek().col)
+
+proc parseMulDiv(p: var Parser): Node =
+  result = p.parsePostfix()
   while p.peek().kind in {tkStar, tkSlash, tkPercent, tkFloorDiv}:
     let op = case p.peek().kind
       of tkStar: bkMul
@@ -167,7 +176,7 @@ proc parseMulDiv(p: var Parser): Node =
       of tkFloorDiv: bkFloorDiv
       else: bkMul
     let tok = p.advance()
-    let right = p.parsePrimary()
+    let right = p.parsePostfix()
     result = Node(kind: nkBinOp, binOp: op, binLeft: result, binRight: right,
                   line: tok.line, col: tok.col)
 
@@ -217,7 +226,7 @@ proc parseComparison(p: var Parser): Node =
     discard p.advance()  # consume NULL token (assumed)
     return Node(kind: nkIsExpr, isExpr: result, isNegated: negated,
                 line: tok.line, col: tok.col)
-  while p.peek().kind in {tkEq, tkNotEq, tkLt, tkLtEq, tkGt, tkGtEq}:
+  while p.peek().kind in {tkEq, tkNotEq, tkLt, tkLtEq, tkGt, tkGtEq, tkFtsMatch}:
     let op = case p.peek().kind
       of tkEq: bkEq
       of tkNotEq: bkNotEq
@@ -225,6 +234,7 @@ proc parseComparison(p: var Parser): Node =
       of tkLtEq: bkLtEq
       of tkGt: bkGt
       of tkGtEq: bkGtEq
+      of tkFtsMatch: bkFtsMatch
       else: bkEq
     let tok = p.advance()
     let right = p.parseAddSub()
@@ -421,6 +431,27 @@ proc parseSelect(p: var Parser): Node =
   # Parse OFFSET
   if p.match(tkOffset):
     result.selOffset = Node(kind: nkOffset, offsetExpr: p.parseExpr())
+
+  # Parse set operations (UNION / INTERSECT / EXCEPT)
+  # Left-associative; same precedence level for all
+  while p.peek().kind in {tkUnion, tkIntersect, tkExcept}:
+    var sopKind: SetOpKind
+    let tok = p.advance()
+    case tok.kind:
+    of tkUnion:    sopKind = sdkUnion
+    of tkIntersect: sopKind = sdkIntersect
+    of tkExcept:   sopKind = sdkExcept
+    else: break
+    var isAll = false
+    if p.match(tkAll):
+      isAll = true
+    let right = p.parseSelect()
+    let left = result
+    result = Node(kind: nkSetOp, line: tok.line, col: tok.col)
+    result.setOpKind = sopKind
+    result.setOpAll = isAll
+    result.setOpLeft = left
+    result.setOpRight = right
 
 proc parseInsert(p: var Parser): Node =
   let tok = p.expect(tkInsert)
@@ -857,6 +888,17 @@ proc parseDropTrigger(p: var Parser): Node =
   result = Node(kind: nkDropTrigger, trigDropName: name, trigDropIfExists: ifExists,
                 line: tok.line, col: tok.col)
 
+proc parseDropIndex(p: var Parser): Node =
+  let tok = p.expect(tkDrop)
+  discard p.expect(tkIndex)
+  var ifExists = false
+  if p.peek().kind == tkIf:
+    discard p.advance()
+    discard p.expect(tkExists)
+    ifExists = true
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkDropIndex, diName: name, line: tok.line, col: tok.col)
+
 proc parseCreateMigration(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkMigration)
@@ -1090,6 +1132,8 @@ proc parseStatement*(p: var Parser): Node =
         p.parseDropView()
       elif next.kind == tkTrigger:
         p.parseDropTrigger()
+      elif next.kind == tkIndex:
+        p.parseDropIndex()
       elif next.kind == tkUser:
         p.parseDropUser()
       elif next.kind == tkPolicy:
