@@ -149,9 +149,9 @@ jobs:
       - name: Start BaraDB server
         run: |
           docker run -d --name baradb-ci -p 9472:9472 baradb:latest
-          sleep 5
+          sleep 3
           docker logs baradb-ci
-          until nc -z localhost 9472; do sleep 1; done
+          until [ "$(docker inspect --format='{{.State.Health.Status}}' baradb-ci 2>/dev/null)" = "healthy" ]; do sleep 1; done
 
       - name: Setup Nim
         uses: jiro4989/setup-nim-action@v1
@@ -187,9 +187,9 @@ jobs:
       - name: Start BaraDB server
         run: |
           docker run -d --name baradb-ci -p 9472:9472 baradb:latest
-          sleep 5
+          sleep 3
           docker logs baradb-ci
-          until nc -z localhost 9472; do sleep 1; done
+          until [ "$(docker inspect --format='{{.State.Health.Status}}' baradb-ci 2>/dev/null)" = "healthy" ]; do sleep 1; done
 
       - name: Run Rust tests
         working-directory: clients/rust
