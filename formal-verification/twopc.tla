@@ -4,9 +4,11 @@
   protocol as implemented in BaraDB (core/disttxn.nim).
 
   Key properties verified:
-    - Atomicity      : all participants commit, or all abort.
-    - NoOrphanBlocks : a prepared participant never remains blocked forever
-                       once the coordinator decides.
+    - Atomicity               : all participants commit, or all abort.
+    - NoOrphanBlocks          : a committed txn implies all participants committed.
+    - CoordinatorConsistency  : once decided, the coordinator never changes decision.
+    - NoDecideWithoutConsensus: coordinator only decides when all votes are collected.
+    - ParticipantStateValid   : participant state transitions are valid.
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -139,11 +141,30 @@ Atomicity ==
     ~(\E p1, p2 \in Participants :
         participantState[t][p1] = "Committed" /\ participantState[t][p2] = "Aborted")
 
-\* No orphan blocks: once a transaction is fully committed, every participant is committed.
+\* No orphan blocks: once a transaction is committed, every participant is committed.
 NoOrphanBlocks ==
   \A t \in 1..MaxTxnId :
     txnState[t] = "Committed" =>
       \A p \in Participants : participantState[t][p] = "Committed"
+
+\* Once coordinator decides, the decision is immutable.
+CoordinatorConsistency ==
+  \A t \in 1..MaxTxnId :
+    coordinatorDecided[t] = TRUE =>
+      (decidedAction[t] = "Commit" => txnState[t] \in {"Committing", "Committed"})
+      /\ (decidedAction[t] = "Abort" => txnState[t] \in {"Aborting", "Aborted"})
+
+\* Coordinator only decides when all participants have responded.
+NoDecideWithoutConsensus ==
+  \A t \in 1..MaxTxnId :
+    coordinatorDecided[t] = TRUE => AllPrepared(t) \/ AnyPrepareFailed(t)
+
+\* Participant state transitions are consistent with coordinator.
+ParticipantStateValid ==
+  \A t \in 1..MaxTxnId :
+    \A p \in Participants :
+      (participantState[t][p] = "Committed" => decidedAction[t] = "Commit")
+      /\ (participantState[t][p] = "Aborted" /\ decidedAction[t] /= Nil => decidedAction[t] = "Abort")
 
 \* Type invariant
 TypeOk ==

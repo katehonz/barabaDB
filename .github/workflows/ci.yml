@@ -43,3 +43,18 @@ jobs:
             echo "::warning::$line"
           done
           echo "--- Done ---"
+
+  verify:
+    runs-on: ubuntu-latest
+    container:
+      image: eclipse-temurin:21-jre
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run TLA+ model checker on all specs
+        run: |
+          cd formal-verification
+          for spec in raft twopc mvcc replication gossip deadlock sharding; do
+            echo "=== Verifying ${spec}.tla ==="
+            java -cp tla2tools.jar tlc2.TLC -config models/${spec}.cfg ${spec}.tla
+          done

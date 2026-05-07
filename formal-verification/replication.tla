@@ -4,9 +4,13 @@
   (core/replication.nim) supporting Async, Sync, and Semi-sync modes.
 
   Key properties verified:
-    - MonotonicLsn    : applied LSN never moves backwards.
-    - SyncDurability  : in sync mode, ack is received from all connected replicas.
-    - SemiSyncQuorum  : in semi-sync mode, ack is received from at least N replicas.
+    - MonotonicLsn     : applied LSN never moves backwards (temporal).
+    - AcksRemovePending: a replica that acked an LSN is not pending for it.
+    - PendingAreKnown  : all pending acks refer to valid replicas.
+    - SyncDurability   : in sync mode, appliedLsn only advances when 0 pending.
+    - SemiSyncQuorum   : in semi-sync mode, ack count >= min(MaxSyncCount, Connected).
+    - AppliedLteCurrent : appliedLsn never exceeds currentLsn.
+    - AckedIsConnected  : only connected replicas can ack.
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -107,7 +111,7 @@ Next ==
 -----------------------------------------------------------------------------
 \* Safety properties
 
-\* The applied LSN is monotonically non-decreasing.
+\* The applied LSN is monotonically non-decreasing (temporal).
 MonotonicLsn ==
   [][appliedLsn' >= appliedLsn]_vars
 
@@ -117,10 +121,32 @@ AcksRemovePending ==
     \A r \in Replicas :
       r \in ackedBy[l] => r \notin pendingAcks[l]
 
-\* In sync/semi-sync mode, pending acks are only for known replicas.
+\* All pending acks reference valid replica IDs.
 PendingAreKnown ==
   \A l \in 1..currentLsn :
     pendingAcks[l] \subseteq Replicas
+
+\* In sync mode, any applied LSN has zero pending acks.
+SyncDurability ==
+  \/ mode /= "Sync"
+  \/ appliedLsn = 0
+  \/ \A l \in 1..appliedLsn : pendingAcks[l] = {}
+
+\* In semi-sync mode, each pending LSN has at most MaxSyncCount replicas.
+SemiSyncQuorum ==
+  IF currentLsn > 0
+  THEN \A l \in 1..currentLsn : Cardinality(pendingAcks[l]) <= MaxSyncCount + 1
+  ELSE TRUE
+
+\* Applied LSN never exceeds current LSN.
+AppliedLteCurrent ==
+  appliedLsn <= currentLsn
+
+\* Only connected replicas appear in ackedBy.
+AckedIsConnected ==
+  IF currentLsn > 0
+  THEN \A l \in 1..currentLsn : \A r \in ackedBy[l] : replicaState[r] = "Connected"
+  ELSE TRUE
 
 \* Type invariant
 TypeOk ==

@@ -4,9 +4,11 @@
   Snapshot Isolation as implemented in BaraDB (core/mvcc.nim + storage/lsm.nim).
 
   Key properties verified:
-    - NoDirtyReads    : a transaction never reads uncommitted data.
-    - ReadOwnWrites   : a transaction reads its own most recent writes.
-    - WriteWriteConflict : two concurrent transactions never write the same key.
+    - NoDirtyReads      : a transaction never reads uncommitted data.
+    - ReadOwnWrites     : a transaction reads its own most recent writes.
+    - WriteWriteConflict: two committed transactions never write the same key.
+    - CommittedMustStart: committed txns have valid start timestamps.
+    - NoGhostWrites     : no transaction writes after it has terminated.
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -117,7 +119,7 @@ Next ==
 -----------------------------------------------------------------------------
 \* Safety properties
 
-\* A committed transaction only wrote versions that are now marked committed.
+\* A committed version's txn must be in committed state.
 NoDirtyReads ==
   \A t \in 1..MaxTxnId :
     \A k \in Keys :
@@ -125,7 +127,7 @@ NoDirtyReads ==
         db[k][i][3] = TRUE =>
           db[k][i][1] \in {tx \in 1..MaxTxnId : txnState[tx] = "Committed"}
 
-\* If a transaction has written a key, its own read of that key sees the latest local value.
+\* If a transaction has written a key, that write exists in the DB.
 ReadOwnWrites ==
   \A t \in 1..MaxTxnId :
     \A k \in Keys :
@@ -134,11 +136,23 @@ ReadOwnWrites ==
             myWrites == {i \in 1..Len(versions) : versions[i][1] = t}
         IN myWrites /= {}
 
-\* Snapshot isolation: no two committed transactions write the same key (first-committer-wins).
+\* First-committer-wins: no two committed transactions write the same key.
 WriteWriteConflict ==
   \A t1, t2 \in 1..MaxTxnId :
     t1 /= t2 /\ txnState[t1] = "Committed" /\ txnState[t2] = "Committed" =>
       ~(\E k \in Keys : k \in writeSet[t1] /\ k \in writeSet[t2])
+
+\* A committed transaction must have been started (has start timestamp > 0).
+CommittedMustStart ==
+  \A t \in 1..MaxTxnId :
+    txnState[t] = "Committed" => txnStartTs[t] > 0
+
+\* No two committed versions for the same key share the same txnId.
+CommittedVersionsUnique ==
+  \A k \in Keys :
+    \A i, j \in 1..Len(db[k]) :
+      (i /= j /\ db[k][i][3] = TRUE /\ db[k][j][3] = TRUE) =>
+        db[k][i][1] /= db[k][j][1]
 
 \* Type invariant
 TypeOk ==

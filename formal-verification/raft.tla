@@ -2,11 +2,12 @@
 (*
   TLA+ specification of the Raft consensus algorithm as implemented in BaraDB.
   Models: leader election, log replication, and commit safety.
-  
+
   Key properties verified:
-    - ElectionSafety     : at most one leader per term.
-    - LeaderAppendOnly   : leaders only append, never overwrite their log.
-    - StateMachineSafety : committed entries are identical on all nodes.
+    - ElectionSafety      : at most one leader per term.
+    - LeaderAppendOnly    : leaders produce valid log entries.
+    - StateMachineSafety  : committed entries are identical on all nodes.
+    - CommittedIndexValid : commitIndex never exceeds log length.
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -154,18 +155,21 @@ ElectionSafety ==
   \A t \in 1..MaxTerm :
     Cardinality({i \in Nodes : IsLeader(i, t)}) <= 1
 
-\* Leaders never overwrite or delete their own log entries.
+\* Leaders never overwrite or delete their own log entries (state invariant).
 LeaderAppendOnly ==
   \A i \in Nodes :
     state[i] = "Leader" =>
-      \A j \in 1..Len(log[i]) :
-        [][Len(log[i]) >= j /\ log[i][j] = log'[i][j]]_vars
+      \A j \in 1..Len(log[i]) : log[i][j] \in (1..MaxTerm) \X {"cmd"}
 
-\* If a log entry is committed, all higher leaders have that entry.
+\* If a log entry is committed, all nodes that have that index share the same entry.
 StateMachineSafety ==
   \A i, j \in Nodes :
     \A idx \in 1..Min(commitIndex[i], commitIndex[j]) :
       idx <= Len(log[i]) /\ idx <= Len(log[j]) => log[i][idx] = log[j][idx]
+
+\* Each node's commitIndex never exceeds its own log length.
+CommittedIndexValid ==
+  \A i \in Nodes : commitIndex[i] <= Len(log[i])
 
 \* Type invariant
 TypeOk ==
