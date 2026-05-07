@@ -1,0 +1,3 @@
+# TLC model checker output
+states/
+*.dump
