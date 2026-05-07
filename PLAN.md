@@ -82,7 +82,7 @@
 | # | Задача | Проблем | Файл |
 |---|--------|---------|------|
 | FV-13 | ~~CI: Поправка на verify job~~ ✅ | Премахнат `container:` блок, заменен с `actions/setup-java@v4` + `actions/cache` + `continue-on-error: true`. | `.github/workflows/ci.yml` |
-| FV-14 | **Property-based testing мост** | Nim скрипт за сравнение на TLA+ state machine с Nim state machine (faithfulness check). | `tests/tla_bridge.nim` (нов) |
+| FV-14 | ~~Property-based testing мост~~ ✅ | `tests/tla_faithfulness.nim` проверява: Raft (ElectionSafety, LogMatching, CommittedIndexValid), MVCC (NoDirtyReads, CommittedMustStart), 2PC (Atomicity, RecoveryConsistency). Документиран gap: Nim MVCC позволява множество committed versions (TLA+ изисква first-committer-wins). | `tests/tla_faithfulness.nim` |
 
 ---
 

@@ -2483,3 +2483,6 @@ suite "Parameterized queries":
 
 # JOIN tests
 include "join_tests"
+
+# TLA+ faithfulness tests
+include "tla_faithfulness"

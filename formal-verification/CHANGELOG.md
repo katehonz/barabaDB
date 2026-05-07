@@ -2,6 +2,14 @@
 
 ## [1.2.0] — 2026-05-07
 
+### Added (Software verification bridge)
+- **tests/tla_faithfulness.nim** — Nim test suite verifying that Nim state machines obey TLA+ invariants:
+  - Raft: ElectionSafety, LogMatching, CommittedIndexValid
+  - MVCC: NoDirtyReads, CommittedMustStart
+  - 2PC: Atomicity, RecoveryConsistency
+- Documented gap: Nim MVCC allows multiple committed versions per key (TLA+ enforces first-committer-wins)
+
+
 ### Added
 - **raft.tla**: `Heartbeat`, `HeartbeatTimeout`, `LeaderLeaseExpired` actions — models leader step-down when quorum is lost
 - **raft.tla**: `LeaderHasSelfHeartbeat` invariant — every leader must have a valid heartbeat in its own term
