@@ -22,6 +22,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: '2.2.10'
+
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev libpcre3-dev
+
+      - name: Install Nim dependencies
+        run: nimble install --depsOnly -y
+
+      - name: Build binaries
+        run: |
+          nim c -d:release --opt:speed -d:ssl -o:build/baradadb src/baradadb.nim
+          nim c -d:release -o:build/backup src/barabadb/core/backup.nim
+
       - name: Build Docker image
         run: docker build -t baradb:latest .
 
