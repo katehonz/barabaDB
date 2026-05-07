@@ -55,7 +55,7 @@ with **TLA+** and the TLC model checker. All specs run with **weak fairness**
 
 | Algorithm | Spec | States | Properties Verified |
 |-----------|------|--------|---------------------|
-| **Raft Consensus** | `formal-verification/raft.tla` | 3,031,684 | ElectionSafety, LeaderAppendOnly, StateMachineSafety, CommittedIndexValid, LogMatching |
+| **Raft Consensus** | `formal-verification/raft.tla` | 38,051,647 | ElectionSafety, LeaderAppendOnly, StateMachineSafety, CommittedIndexValid, LogMatching, LeaderHasSelfHeartbeat |
 | **Two-Phase Commit** | `formal-verification/twopc.tla` | 22,855,681 | Atomicity, NoOrphanBlocks, CoordinatorConsistency, NoDecideWithoutConsensus, ParticipantStateValid, RecoveryConsistency |
 | **MVCC** | `formal-verification/mvcc.tla` | 177,721 | NoDirtyReads, ReadOwnWrites, WriteWriteConflict, CommittedMustStart, CommittedVersionsUnique, NoWriteSkew, **CommitProgress** (liveness) |
 | **Replication** | `formal-verification/replication.tla` | 3,687,939 | AcksRemovePending, PendingAreKnown, AppliedLteCurrent, MonotonicLsn (temporal) |

@@ -29,9 +29,10 @@ VARIABLES
   commitIndex,  \* commitIndex[n] ∈ Nat
   votesGranted, \* votesGranted[n] ⊆ Nodes (only meaningful for Candidates)
   nextIndex,    \* nextIndex[n][m] ∈ Nat (leader state)
-  matchIndex    \* matchIndex[n][m] ∈ Nat (leader state)
+  matchIndex,   \* matchIndex[n][m] ∈ Nat (leader state)
+  heartbeatReceived \* heartbeatReceived[n] ∈ 0..MaxTerm — last term in which node n received a heartbeat
 
-vars == <<state, currentTerm, votedFor, log, commitIndex, votesGranted, nextIndex, matchIndex>>
+vars == <<state, currentTerm, votedFor, log, commitIndex, votesGranted, nextIndex, matchIndex, heartbeatReceived>>
 
 -----------------------------------------------------------------------------
 
@@ -71,6 +72,7 @@ Init ==
   /\ votesGranted = [n \in Nodes |-> {}]
   /\ nextIndex = [n \in Nodes |-> [m \in Nodes |-> 1]]
   /\ matchIndex = [n \in Nodes |-> [m \in Nodes |-> 0]]
+  /\ heartbeatReceived = [n \in Nodes |-> 0]
 
 -----------------------------------------------------------------------------
 \* State transitions
@@ -83,7 +85,7 @@ Timeout(i) ==
   /\ currentTerm' = [currentTerm EXCEPT ![i] = @ + 1]
   /\ votedFor' = [votedFor EXCEPT ![i] = i]
   /\ votesGranted' = [votesGranted EXCEPT ![i] = {i}]
-  /\ UNCHANGED <<log, commitIndex, nextIndex, matchIndex>>
+  /\ UNCHANGED <<log, commitIndex, nextIndex, matchIndex, heartbeatReceived>>
 
 \* Node i votes for node j in j's current term.
 Vote(i, j) ==
@@ -95,7 +97,7 @@ Vote(i, j) ==
   /\ state' = [state EXCEPT ![i] = "Follower"]
   /\ votedFor' = [votedFor EXCEPT ![i] = j]
   /\ votesGranted' = [votesGranted EXCEPT ![j] = @ \cup {i}]
-  /\ UNCHANGED <<log, commitIndex, nextIndex, matchIndex>>
+  /\ UNCHANGED <<log, commitIndex, nextIndex, matchIndex, heartbeatReceived>>
 
 \* A candidate becomes leader after receiving a majority.
 BecomeLeader(i) ==
@@ -104,6 +106,7 @@ BecomeLeader(i) ==
   /\ state' = [state EXCEPT ![i] = "Leader"]
   /\ nextIndex' = [nextIndex EXCEPT ![i] = [m \in Nodes |-> Len(log[i]) + 1]]
   /\ matchIndex' = [matchIndex EXCEPT ![i] = [m \in Nodes |-> 0]]
+  /\ heartbeatReceived' = [heartbeatReceived EXCEPT ![i] = currentTerm[i]]
   /\ UNCHANGED <<currentTerm, votedFor, log, commitIndex, votesGranted>>
 
 \* Leader i appends a new entry to its own log.
@@ -116,7 +119,7 @@ AppendEntry(i) ==
      THEN TRUE
      ELSE log[i][Len(log[i])][1] = currentTerm[i]
   /\ log' = [log EXCEPT ![i] = Append(@, <<currentTerm[i], "cmd">>)]
-  /\ UNCHANGED <<state, currentTerm, votedFor, commitIndex, votesGranted, nextIndex, matchIndex>>
+  /\ UNCHANGED <<state, currentTerm, votedFor, commitIndex, votesGranted, nextIndex, matchIndex, heartbeatReceived>>
 
 \* Leader i replicates its log to follower j.
 \* Now includes prevLogIndex/prevLogTerm check and conflict truncation.
@@ -142,7 +145,7 @@ Replicate(i, j) ==
          /\ commitIndex' = [commitIndex EXCEPT ![j] = newCommit]
          /\ matchIndex' = [matchIndex EXCEPT ![i][j] = newMatch]
   /\ nextIndex' = [nextIndex EXCEPT ![i][j] = @ + 1]
-  /\ UNCHANGED <<state, currentTerm, votedFor, votesGranted>>
+  /\ UNCHANGED <<state, currentTerm, votedFor, votesGranted, heartbeatReceived>>
 
 \* Follower j rejects an AppendEntries from leader i because of prevLog mismatch.
 RejectAppendEntries(i, j) ==
@@ -151,7 +154,7 @@ RejectAppendEntries(i, j) ==
   /\ nextIndex[i][j] > 1
   /\ ~HasCompatiblePrefix(j, i, nextIndex[i][j])
   /\ nextIndex' = [nextIndex EXCEPT ![i][j] = @ - 1]
-  /\ UNCHANGED <<state, currentTerm, votedFor, log, commitIndex, votesGranted, matchIndex>>
+  /\ UNCHANGED <<state, currentTerm, votedFor, log, commitIndex, votesGranted, matchIndex, heartbeatReceived>>
 
 \* Leader i updates commitIndex when a majority has replicated an entry.
 Commit(i) ==
@@ -162,7 +165,7 @@ Commit(i) ==
                          /\ log[i][idx][1] = currentTerm[i]}
      IN  candidates /= {}
          /\ commitIndex' = [commitIndex EXCEPT ![i] = CHOOSE idx \in candidates : TRUE]
-  /\ UNCHANGED <<state, currentTerm, votedFor, log, votesGranted, nextIndex, matchIndex>>
+  /\ UNCHANGED <<state, currentTerm, votedFor, log, votesGranted, nextIndex, matchIndex, heartbeatReceived>>
 
 \* A follower learns about a higher term and steps down.
 StepDown(i, newTerm) ==
@@ -172,7 +175,47 @@ StepDown(i, newTerm) ==
   /\ state' = [state EXCEPT ![i] = "Follower"]
   /\ votedFor' = [votedFor EXCEPT ![i] = Nil]
   /\ votesGranted' = [votesGranted EXCEPT ![i] = {}]
+  /\ UNCHANGED <<log, commitIndex, nextIndex, matchIndex, heartbeatReceived>>
+
+\* Leader i sends a heartbeat to node j in its current term.
+\* Only an up-to-date leader (term >= recipient's term) may send heartbeats.
+\* If j sees a higher term, it steps down (same as AppendEntries handling).
+Heartbeat(i, j) ==
+  /\ i /= j
+  /\ state[i] = "Leader"
+  /\ currentTerm[i] >= currentTerm[j]
+  /\ IF currentTerm[i] > currentTerm[j]
+     THEN /\ currentTerm' = [currentTerm EXCEPT ![j] = currentTerm[i]]
+          /\ state' = [state EXCEPT ![j] = "Follower"]
+          /\ votedFor' = [votedFor EXCEPT ![j] = Nil]
+          /\ votesGranted' = [votesGranted EXCEPT ![j] = {}]
+          /\ heartbeatReceived' = [heartbeatReceived EXCEPT ![j] = currentTerm[i]]
+          /\ UNCHANGED <<log, commitIndex, nextIndex, matchIndex>>
+     ELSE /\ heartbeatReceived' = [heartbeatReceived EXCEPT ![j] = currentTerm[i]]
+          /\ UNCHANGED <<state, currentTerm, votedFor, log, commitIndex, votesGranted, nextIndex, matchIndex>>
+
+\* A follower times out because it has not received a heartbeat from the leader.
+\* This can only happen if heartbeatReceived for its current term is FALSE.
+HeartbeatTimeout(i) ==
+  /\ state[i] = "Follower"
+  /\ heartbeatReceived[i] < currentTerm[i]
+  /\ currentTerm[i] < MaxTerm
+  /\ state' = [state EXCEPT ![i] = "Candidate"]
+  /\ currentTerm' = [currentTerm EXCEPT ![i] = @ + 1]
+  /\ votedFor' = [votedFor EXCEPT ![i] = i]
+  /\ votesGranted' = [votesGranted EXCEPT ![i] = {i}]
+  /\ heartbeatReceived' = [heartbeatReceived EXCEPT ![i] = currentTerm[i] + 1]
   /\ UNCHANGED <<log, commitIndex, nextIndex, matchIndex>>
+
+\* Leader i steps down because it could not reach a majority with heartbeats.
+\* This models a network partition where the leader loses quorum connectivity.
+LeaderLeaseExpired(i) ==
+  /\ state[i] = "Leader"
+  /\ LET majority == (Cardinality(Nodes) \div 2) + 1
+         acks == Cardinality({j \in Nodes : heartbeatReceived[j] = currentTerm[i]})
+     IN  acks < majority
+  /\ state' = [state EXCEPT ![i] = "Follower"]
+  /\ UNCHANGED <<currentTerm, votedFor, log, commitIndex, votesGranted, nextIndex, matchIndex, heartbeatReceived>>
 
 -----------------------------------------------------------------------------
 \* Next-state relation
@@ -186,6 +229,9 @@ Next ==
   \/ \E i, j \in Nodes : RejectAppendEntries(i, j)
   \/ \E i \in Nodes : Commit(i)
   \/ \E i \in Nodes : \E t \in 2..MaxTerm : StepDown(i, t)
+  \/ \E i, j \in Nodes : Heartbeat(i, j)
+  \/ \E i \in Nodes : HeartbeatTimeout(i)
+  \/ \E i \in Nodes : LeaderLeaseExpired(i)
 
 -----------------------------------------------------------------------------
 \* Safety properties
@@ -230,6 +276,22 @@ TypeOk ==
   /\ votesGranted \in [Nodes -> SUBSET Nodes]
   /\ nextIndex \in [Nodes -> [Nodes -> 1..(MaxLogLen+1)]]
   /\ matchIndex \in [Nodes -> [Nodes -> 0..MaxLogLen]]
+  /\ heartbeatReceived \in [Nodes -> 0..MaxTerm]
+
+\* Safety properties for leader lease / heartbeat
+
+\* A leader must have sent itself a heartbeat in its own term.
+LeaderHasSelfHeartbeat ==
+  \A i \in Nodes :
+    state[i] = "Leader" => heartbeatReceived[i] = currentTerm[i]
+
+\* If a leader has not reached a majority with heartbeats, it cannot remain leader.
+\* (This is checked dynamically via LeaderLeaseExpired action.)
+LeaderLeaseSafety ==
+  \A t \in 1..MaxTerm :
+    LET leaders == {i \in Nodes : state[i] = "Leader" /\ currentTerm[i] = t}
+        acks == Cardinality({j \in Nodes : heartbeatReceived[j] = t})
+    IN  \A i \in leaders : acks >= (Cardinality(Nodes) \div 2) + 1
 
 \* Liveness properties
 

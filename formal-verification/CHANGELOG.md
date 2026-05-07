@@ -1,5 +1,28 @@
 # BaraDB Formal Verification Changelog
 
+## [1.2.0] — 2026-05-07
+
+### Added
+- **raft.tla**: `Heartbeat`, `HeartbeatTimeout`, `LeaderLeaseExpired` actions — models leader step-down when quorum is lost
+- **raft.tla**: `LeaderHasSelfHeartbeat` invariant — every leader must have a valid heartbeat in its own term
+- **raft.tla**: `heartbeatReceived` variable tracks last term in which each node received a heartbeat
+
+### Improved
+- **raft.tla**: `Heartbeat` causes recipients to step down if they see a higher term (realistic AppendEntries behavior)
+
+### Model Checker Configs (v1.2.0)
+| Spec | Model Bounds | States Checked | Properties |
+|------|-------------|---------------|------------|
+| raft | 3 nodes, MaxTerm=3, MaxLogLen=3 | 38,051,647 | 7 invariants + fair execution |
+| twopc | 3 participants, MaxTxnId=3 | 22,855,681 | 7 invariants + fair execution |
+| mvcc | 2 keys, 2 values, MaxTxnId=2 | 177,721 | 7 invariants + 1 liveness |
+| replication | 3 replicas, MaxLsn=3, MaxSyncCount=2 | 3,687,939 | 4 invariants + 1 temporal |
+| gossip | 3 nodes, MaxIncarnation=3 | 692,497 | 4 invariants + fair execution |
+| deadlock | 5 txns, MaxEdges=8 | 3,767,361 | 2 invariants |
+| sharding | 3 shards, 2 nodes, 5 vnodes | 186,305 | 3 invariants |
+
+---
+
 ## [1.1.0] — 2026-05-07
 
 ### Added
