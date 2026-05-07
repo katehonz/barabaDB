@@ -470,7 +470,7 @@ function showTab(idx){
 }
 setInterval(() => { if(document.querySelectorAll('.panel')[4].classList.contains('active')) loadMetrics() }, 5000)
 </script>
-<div class='status' style='text-align:center;padding:10px'>BaraDB v0.1.0 — Multimodal Database Engine</div>
+<div class='status' style='text-align:center;padding:10px'>BaraDB v1.0.0 — Multimodal Database Engine</div>
 </body></html>"""
     request.respond(200, @[("Content-Type", "text/html; charset=utf-8")], html)
 

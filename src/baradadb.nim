@@ -55,7 +55,7 @@ proc main() =
   # Init structured logger from config
   let logLvl = parseEnum[LogLevel]("ll" & capitalizeAscii(config.logLevel))
   defaultLogger = newLogger(logLvl, config.logFile)
-  info("BaraDB v0.1.0 — Multimodal Database Engine")
+  info("BaraDB v1.0.0 — Multimodal Database Engine")
 
   # Security check: warn if JWT secret is not configured
   if config.jwtSecret.len == 0:
