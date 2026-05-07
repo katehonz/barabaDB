@@ -62,11 +62,16 @@ BecomeDead(node) ==
   /\ UNCHANGED <<incarnation>>
 
 \* Gossip: node i learns about node j from node k (gossip message propagation).
+\* Only accept the gossip if it is at least as strong as current knowledge.
 LearnViaGossip(i, j, k) ==
   /\ i /= j
   /\ i /= k
   /\ j /= k
   /\ knownState[i][j] /= knownState[k][j]
+  /\ LET strength(s) == CASE s = "Alive" -> 1
+                          [] s = "Suspect" -> 2
+                          [] s = "Dead" -> 3
+     IN  strength(knownState[k][j]) >= strength(knownState[i][j])
   /\ knownState' = [knownState EXCEPT ![i][j] = knownState[k][j]]
   /\ UNCHANGED <<state, incarnation>>
 
@@ -126,5 +131,14 @@ TypeOk ==
   /\ state \in [Nodes -> {"Alive", "Suspect", "Dead"}]
   /\ incarnation \in [Nodes -> 1..MaxIncarnation]
   /\ knownState \in [Nodes -> [Nodes -> {"Alive", "Suspect", "Dead"}]]
+
+\* Liveness properties
+
+\* If a node becomes dead, all other nodes eventually detect it.
+DeadDetectedEventually ==
+  \A i, j \in Nodes : i /= j => (state[i] = "Dead" ~> knownState[j][i] = "Dead")
+
+\* Specification with weak fairness.
+Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 
 =============================================================================

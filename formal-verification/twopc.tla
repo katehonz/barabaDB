@@ -223,4 +223,19 @@ TypeOk ==
   /\ coordinatorLog \in [1..MaxTxnId -> {"Commit","Abort", Nil}]
   /\ coordinatorAlive \in [1..MaxTxnId -> BOOLEAN]
 
+\* Liveness properties
+
+\* Any prepared participant eventually learns the final decision (Committed or Aborted).
+ParticipantProgress ==
+  \A t \in 1..MaxTxnId : \A p \in Participants :
+    participantState[t][p] = "Prepared" ~> participantState[t][p] \in {"Committed", "Aborted"}
+
+\* Actions used for fairness constraints.
+DecideCommitAction == \E t \in 1..MaxTxnId : DecideCommit(t)
+DecideAbortAction == \E t \in 1..MaxTxnId : DecideAbort(t)
+
+\* Specification with weak fairness + strong fairness for coordinator decisions.
+Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
+           /\ SF_vars(DecideCommitAction) /\ SF_vars(DecideAbortAction)
+
 =============================================================================

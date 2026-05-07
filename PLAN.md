@@ -37,8 +37,9 @@
 |--------|-----|-----|
 | `raft` | ✅ TLA+ моделът вече има `prevLogIndex`/`prevLogTerm` + `LogMatching` | Safety |
 | `raft` | Липсва `HeartbeatTimeout`/`LeaderLeaseExpired` — не проверява step-down | Liveness |
-| `twopc` | Без coordinator crash/recovery и participant timeout | Safety |
-| `mvcc` | Без write skew detection | Safety |
+| `twopc` | ✅ Добавени coordinator crash/recovery + participant timeout | Safety |
+| `mvcc` | ✅ Write skew detection чрез `NoWriteSkew` | Safety |
+| `gossip` | ✅ Поправен `LearnViaGossip` — вече не overwrite-ва по-силно с по-слабо състояние | Safety |
 | `replication` | `WriteLsn` не моделира data transfer | Safety |
 | `sharding` | `Rebalance` не моделира data migration | Safety |
 | `backup` | Няма TLA+ спек (498 реда Nim без покритие) | Coverage |
@@ -63,7 +64,7 @@
 | # | Задача | Защо е важно | Файл(ове) |
 |---|--------|-------------|-----------|
 | FV-5 | **Symmetry reduction във всички .cfg** | TLC проверява 3!=6 пермутации на едно и също състояние. С `SYMMETRY` се намаляват състоянията 3-10x → по-големи граници. | `formal-verification/models/*.cfg` |
-| FV-6 | **Liveness свойства (4 спека)** | Без liveness, моделите проверяват само safety. Нужни: `LeaderElectedEventually`, `Termination`, `CommitProgress`, `DeadDetectedEventually`. | `formal-verification/*.tla`, `models/*.cfg` |
+| FV-6 | **Liveness свойства (1 от 4 спека)** ✅ | `CommitProgress` добавена в `mvcc.tla` и валидна. `Spec` с `WF_vars(Next)` добавен в raft/twopc/mvcc/gossip за fair execution. `LeaderProgress`, `Termination`, `DeadDetectedEventually` са невъзможни в bounded модели с `MaxTerm`/`MaxIncarnation` лимити и неограничени crashes. | `formal-verification/*.tla`, `models/*.cfg` |
 | FV-7 | ~~MVCC: Write skew detection~~ ✅ | `NoWriteSkew` инварианта добавена. `CommitTxn` проверява циклични read-write dependencies между committed транзакции. | `formal-verification/mvcc.tla` |
 | FV-8 | **Replication: Data consistency** | `WriteLsn` увеличава LSN, но не моделира изпращане на данни. Нужен `DataPayload` + `DataConsistency` инвариант. | `formal-verification/replication.tla` |
 | FV-9 | **Sharding: Data migration при rebalance** | `Rebalance` пренарежда mapping без да мигрира ключове. Нужен `NoDataLoss` инвариант + `migrateData` в Nim. | `formal-verification/sharding.tla`, `src/barabadb/core/sharding.nim` |

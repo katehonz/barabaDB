@@ -231,4 +231,13 @@ TypeOk ==
   /\ nextIndex \in [Nodes -> [Nodes -> 1..(MaxLogLen+1)]]
   /\ matchIndex \in [Nodes -> [Nodes -> 0..MaxLogLen]]
 
+\* Liveness properties
+
+\* If a node becomes leader, eventually it commits at least one entry.
+LeaderProgress ==
+  \A i \in Nodes : state[i] = "Leader" ~> commitIndex[i] > 0
+
+\* Specification with weak fairness (all actions get a fair chance).
+Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
+
 =============================================================================

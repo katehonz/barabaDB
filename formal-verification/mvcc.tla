@@ -177,4 +177,13 @@ TypeOk ==
   /\ readSet \in [1..MaxTxnId -> SUBSET Keys]
   /\ globalClock \in 1..(MaxTxnId + 1)
 
+\* Liveness properties
+
+\* Any transaction that writes something eventually commits or aborts.
+CommitProgress ==
+  \A t \in 1..MaxTxnId : writeSet[t] /= {} ~> txnState[t] \in {"Committed", "Aborted"}
+
+\* Specification with weak fairness.
+Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
+
 =============================================================================
