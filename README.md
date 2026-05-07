@@ -1218,20 +1218,20 @@ nim c -d:release -r benchmarks/bench_all.nim
 
 | Phase | Status | Progress | Since |
 |-------|--------|----------|-------|
-| Core (LSM + B-Tree + compaction + cache + mmap) | ✅ | 100% | v0.1.0 |
-| BaraQL (GROUP BY + JOIN + CTE + aggregates + codegen + UDF) | ✅ | 100% | v0.1.0 |
-| Multimodal storage (KV + graph + vector + columnar + FTS) | ✅ | 100% | v0.1.0 |
-| Transactions (MVCC + deadlock + WAL + savepoints) | ✅ | 100% | v0.1.0 |
-| Protocol (binary + HTTP + WS + pool + auth + ratelimit) | ✅ | 100% | v0.1.0 |
-| Schema (inheritance + computed + migrations) | ✅ | 100% | v0.1.0 |
-| Vector engine (HNSW + IVF-PQ + quant + SIMD + metadata) | ✅ | 100% | v0.1.0 |
-| Graph engine (all algorithms + pattern matching) | ✅ | 100% | v0.1.0 |
-| FTS (BM25 + TF-IDF + fuzzy + regex + multi-language) | ✅ | 100% | v0.1.0 |
-| CLI shell | ✅ | 100% | v0.1.0 |
-| Cluster (Raft + sharding + replication + gossip) | ✅ | 100% | v0.1.0 |
-| Cross-modal queries | ✅ | 100% | v0.1.0 |
-| Backup & Recovery | ✅ | 100% | v0.1.0 |
-| Client SDKs (JS, Python, Nim, Rust) | ✅ | 100% | v0.1.0 |
+| Core (LSM + B-Tree + compaction + cache + mmap) | ✅ | 100% | v1.0.0 |
+| BaraQL (GROUP BY + JOIN + CTE + aggregates + codegen + UDF) | ✅ | 100% | v1.0.0 |
+| Multimodal storage (KV + graph + vector + columnar + FTS) | ✅ | 100% | v1.0.0 |
+| Transactions (MVCC + deadlock + WAL + savepoints) | ✅ | 100% | v1.0.0 |
+| Protocol (binary + HTTP + WS + pool + auth + ratelimit) | ✅ | 100% | v1.0.0 |
+| Schema (inheritance + computed + migrations) | ✅ | 100% | v1.0.0 |
+| Vector engine (HNSW + IVF-PQ + quant + SIMD + metadata) | ✅ | 100% | v1.0.0 |
+| Graph engine (all algorithms + pattern matching) | ✅ | 100% | v1.0.0 |
+| FTS (BM25 + TF-IDF + fuzzy + regex + multi-language) | ✅ | 100% | v1.0.0 |
+| CLI shell | ✅ | 100% | v1.0.0 |
+| Cluster (Raft + sharding + replication + gossip) | ✅ | 100% | v1.0.0 |
+| Cross-modal queries | ✅ | 100% | v1.0.0 |
+| Backup & Recovery | ✅ | 100% | v1.0.0 |
+| Client SDKs (JS, Python, Nim, Rust) | ✅ | 100% | v1.0.0 |
 
 ## Current Limitations
 
