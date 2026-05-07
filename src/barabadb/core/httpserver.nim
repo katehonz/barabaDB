@@ -16,7 +16,6 @@ import ../query/executor
 import ../storage/lsm
 import ../core/mvcc
 import ../protocol/wire
-import ../protocol/ratelimit
 import ../core/websocket
 import jwt as jwtlib
 
@@ -147,30 +146,30 @@ proc queryHandler(server: HttpServer): RequestHandler =
           of JString: params.add(WireValue(kind: fkString, strVal: p.getStr()))
           else: params.add(WireValue(kind: fkString, strVal: $p))
 
-      let result = executor.executeQuery(reqCtx, astNode, params)
+      let res = executor.executeQuery(reqCtx, astNode, params)
 
-      if result.success:
+      if res.success:
         var jsonRows = newJArray()
-        for row in result.rows:
+        for row in res.rows:
           var jsonRow = newJObject()
-          for col in result.columns:
+          for col in res.columns:
             let key = col
             var val = ""
             if key in row: val = row[key]
             jsonRow[key] = %val
           jsonRows.add(jsonRow)
         var jsonCols = newJArray()
-        for c in result.columns:
+        for c in res.columns:
           jsonCols.add(%c)
         ctx.json(%*{
           "rows": jsonRows,
-          "affectedRows": result.affectedRows,
+          "affectedRows": res.affectedRows,
           "columns": jsonCols,
-          "message": if result.message.len > 0: %result.message else: newJNull()
+          "message": if res.message.len > 0: %res.message else: newJNull()
         })
       else:
         server.metrics.queryErrors += 1
-        ctx.json(%*{"error": result.message}, 400)
+        ctx.json(%*{"error": res.message}, 400)
 
 proc healthHandler(): RequestHandler =
   return proc(request: Request) {.gcsafe.} =

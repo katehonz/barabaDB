@@ -4,6 +4,7 @@ import std/sets
 import std/locks
 import std/net
 import std/strutils
+import std/nativesockets
 
 
 type
@@ -72,13 +73,29 @@ proc connectReplica*(rm: ReplicationManager, id: string) =
     rm.replicas[id].connected = true
   release(rm.lock)
 
+proc connectWithTimeout(sock: Socket, host: string, port: Port, timeoutMs: int): bool =
+  ## Non-blocking connect with timeout to avoid hanging on unreachable hosts.
+  sock.getFd.setBlocking(false)
+  try:
+    sock.connect(host, port)
+    sock.getFd.setBlocking(true)
+    return true
+  except OSError:
+    var fds = @[sock.getFd]
+    if selectWrite(fds, timeoutMs) <= 0:
+      return false
+    sock.getFd.setBlocking(true)
+    return true
+
 proc shipToReplica(replica: Replica, lsn: uint64, data: seq[byte]): bool =
   ## Send replication data to a replica via TCP.
   ## Protocol: "REP <lsn> <dataLen>\n<data>"
   ## Response: "ACK <lsn>\n" on success
   try:
     var sock = newSocket()
-    sock.connect(replica.host, Port(replica.port))
+    if not connectWithTimeout(sock, replica.host, Port(replica.port), 500):
+      sock.close()
+      return false
     let header = "REP " & $lsn & " " & $data.len & "\n"
     sock.send(header)
     if data.len > 0:
@@ -108,20 +125,22 @@ proc writeLsn*(rm: ReplicationManager, data: seq[byte]): uint64 =
       discard shipToReplica(replica, lsn, data)
     return lsn
   of rmSync:
-    rm.pendingAcks[lsn] = initHashSet[string]()
-    for replica in replicasToShip:
-      rm.pendingAcks[lsn].incl(replica.id)
+    if replicasToShip.len > 0:
+      rm.pendingAcks[lsn] = initHashSet[string]()
+      for replica in replicasToShip:
+        rm.pendingAcks[lsn].incl(replica.id)
     release(rm.lock)
     for replica in replicasToShip:
       discard shipToReplica(replica, lsn, data)
     return lsn
   of rmSemiSync:
-    rm.pendingAcks[lsn] = initHashSet[string]()
-    var count = 0
-    for replica in replicasToShip:
-      if count < rm.syncReplicaCount:
-        rm.pendingAcks[lsn].incl(replica.id)
-        inc count
+    if replicasToShip.len > 0:
+      rm.pendingAcks[lsn] = initHashSet[string]()
+      var count = 0
+      for replica in replicasToShip:
+        if count < rm.syncReplicaCount:
+          rm.pendingAcks[lsn].incl(replica.id)
+          inc count
     release(rm.lock)
     for replica in replicasToShip:
       discard shipToReplica(replica, lsn, data)

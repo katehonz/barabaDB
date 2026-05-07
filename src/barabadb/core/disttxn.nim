@@ -4,6 +4,7 @@ import std/locks
 import std/monotimes
 import std/net
 import std/strutils
+import std/nativesockets
 
 type
   DistTxnState* = enum
@@ -75,13 +76,29 @@ proc addParticipant*(txn: DistributedTransaction, nodeId: string,
   )
   release(txn.lock)
 
+proc connectWithTimeout(sock: Socket, host: string, port: Port, timeoutMs: int): bool =
+  ## Non-blocking connect with timeout to avoid hanging on unreachable hosts.
+  sock.getFd.setBlocking(false)
+  try:
+    sock.connect(host, port)
+    sock.getFd.setBlocking(true)
+    return true
+  except OSError:
+    var fds = @[sock.getFd]
+    if selectWrite(fds, timeoutMs) <= 0:
+      return false
+    sock.getFd.setBlocking(true)
+    return true
+
 proc sendDistTxnRpc(host: string, port: int, txnId: uint64, action: string, timeoutMs: int = 5000): bool =
   ## Send 2PC RPC to participant node via TCP text protocol.
   ## Protocol: "DISTTXN <txnId> <action>\n" where action = PREPARE|COMMIT|ROLLBACK
   ## Response: "OK\n" or "ERR <msg>\n"
   try:
     var sock = newSocket()
-    sock.connect(host, Port(port))
+    if not connectWithTimeout(sock, host, Port(port), timeoutMs):
+      sock.close()
+      return false
     let msg = "DISTTXN " & $txnId & " " & action & "\n"
     sock.send(msg)
     var response = ""

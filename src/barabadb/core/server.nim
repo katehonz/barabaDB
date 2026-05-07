@@ -33,11 +33,6 @@ type
     tls*: TLSContext
     activeConnections*: int
 
-  ClientConnection = ref object
-    socket: AsyncSocket
-    id: int
-    currentTxn: Transaction
-
 proc newServer*(config: BaraConfig): Server =
   let dataDir = config.dataDir / "server"
   let db = newLSMTree(dataDir)
@@ -60,12 +55,6 @@ proc readUint32BE(data: string, pos: int): uint32 =
   for i in 0..3:
     bytes[i] = byte(data[pos + i])
   bigEndian32(addr result, unsafeAddr bytes)
-
-proc writeUint32BE(val: uint32): array[4, byte] =
-  bigEndian32(addr result, unsafeAddr val)
-
-proc writeUint64BE(val: uint64): array[8, byte] =
-  bigEndian64(addr result, unsafeAddr val)
 
 proc parseHeader(data: string): (bool, MessageHeader) =
   if data.len < 12:
@@ -123,18 +112,18 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
     if astNode.stmts.len == 0:
       return (true, QueryResult(), "")
 
-    let result = executor.executeQuery(ctx, astNode, params)
-    if result.success:
+    let res = executor.executeQuery(ctx, astNode, params)
+    if res.success:
       # Ship written key-value pairs to replicas
-      if replication != nil and result.keyValuePairs.len > 0:
-        for (key, value) in result.keyValuePairs:
+      if replication != nil and res.keyValuePairs.len > 0:
+        for (key, value) in res.keyValuePairs:
           var data = newSeq[byte](key.len + 1 + value.len)
           for i, c in key: data[i] = byte(c)
           data[key.len] = byte(0)
           for i, c in value: data[key.len + 1 + i] = c
           discard replication.writeLsn(data)
-      var qr = QueryResult(affectedRows: result.affectedRows, rowCount: result.rows.len)
-      qr.columns = result.columns
+      var qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
+      qr.columns = res.columns
 
       var colTypes: seq[string] = @[]
       var tableName = ""
@@ -147,7 +136,7 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
 
       if tableName.len > 0 and tableName in ctx.tables:
         let tbl = ctx.tables[tableName]
-        for col in result.columns:
+        for col in res.columns:
           var found = ""
           for c in tbl.columns:
             if c.name.toLower() == col.toLower():
@@ -155,20 +144,20 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
               break
           colTypes.add(found)
       else:
-        colTypes = newSeq[string](result.columns.len)
+        colTypes = newSeq[string](res.columns.len)
 
       qr.columnTypes = colTypes.mapIt(typeToFieldKind(it))
       qr.rows = @[]
-      for row in result.rows:
+      for row in res.rows:
         var wireRow: seq[WireValue] = @[]
-        for i, col in result.columns:
+        for i, col in res.columns:
           let val = if col in row: row[col] else: ""
           let cType = if i < colTypes.len: colTypes[i] else: ""
           wireRow.add(valueToWire(val, cType))
         qr.rows.add(wireRow)
-      return (true, qr, result.message)
+      return (true, qr, res.message)
     else:
-      return (false, QueryResult(), result.message)
+      return (false, QueryResult(), res.message)
   except Exception as e:
     return (false, QueryResult(), e.msg)
 
@@ -265,7 +254,6 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
   info("Client " & $clientId & " connected")
   var connCtx = cloneForConnection(server.ctx)
   let idleTimeout = server.config.idleTimeoutMs
-  let queryTimeout = server.config.queryTimeoutMs
   let slowThreshold = server.config.slowQueryThresholdMs
   let slowLog = server.config.slowQueryLogPath
   var authenticated = not server.config.authEnabled
@@ -366,7 +354,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
       case header.kind
       of mkAuth:
         let tokenStr = parseAuthMessage(cast[seq[byte]](payload))
-        let (valid, userId, role) = verifyToken(secret, tokenStr)
+        let (valid, userId, _) = verifyToken(secret, tokenStr)
         if valid:
           authenticated = true
           let okMsg = makeAuthOkMessage(header.requestId)
@@ -420,7 +408,6 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           await client.send(cast[string](errorMsg))
 
       of mkPing:
-        var pongPayload: seq[byte] = @[]
         var pongMsg = WireMessage(
           header: MessageHeader(kind: mkPong, length: 0, requestId: header.requestId),
           payload: @[],

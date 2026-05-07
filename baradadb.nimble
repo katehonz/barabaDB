@@ -23,7 +23,7 @@ task build_release, "Build release version":
   exec "nim c -d:ssl -d:release --opt:speed -o:build/baradadb src/baradadb.nim"
 
 task test, "Run all tests":
-  exec "nim c -d:ssl -r tests/test_all.nim"
+  exec "nim c --path:src -d:ssl -r tests/test_all.nim"
 
 task bench, "Run benchmarks":
-  exec "nim c -d:ssl -d:release -r benchmarks/bench_storage.nim"
+  exec "nim c --path:src -d:ssl -d:release -r benchmarks/bench_storage.nim"

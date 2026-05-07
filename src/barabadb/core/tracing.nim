@@ -16,8 +16,10 @@ type
     spanId*: string
     parentSpanId*: string
     name*: string
-    startTime*: int64    # monotonic ticks
+    startTime*: int64         # monotonic ticks (for duration)
+    startTimeEpochNs*: int64  # Unix epoch nanoseconds (for OTLP)
     endTime*: int64
+    endTimeEpochNs*: int64
     durationMs*: float64
     status*: SpanStatus
     attributes*: Table[string, string]
@@ -36,12 +38,14 @@ proc genId(tracer: Tracer): string =
 
 proc beginSpan*(tracer: Tracer, name: string, attributes: Table[string, string] = initTable[string, string]()): Span =
   if not tracer.enabled: return nil
+  let nowNs = int64(epochTime() * 1_000_000_000)
   let span = Span(
     traceId: if tracer.activeSpan != nil: tracer.activeSpan.traceId else: genId(tracer),
     spanId: genId(tracer),
     parentSpanId: if tracer.activeSpan != nil: tracer.activeSpan.spanId else: "",
     name: name,
     startTime: getMonoTime().ticks(),
+    startTimeEpochNs: nowNs,
     attributes: attributes,
   )
   tracer.spans.add(span)
@@ -51,6 +55,7 @@ proc beginSpan*(tracer: Tracer, name: string, attributes: Table[string, string] 
 proc endSpan*(tracer: Tracer, span: Span, status: SpanStatus = ssOk) =
   if span == nil or not tracer.enabled: return
   span.endTime = getMonoTime().ticks()
+  span.endTimeEpochNs = int64(epochTime() * 1_000_000_000)
   span.durationMs = float64(span.endTime - span.startTime) / 1_000_000.0
   span.status = status
   if span.parentSpanId.len > 0:
@@ -100,8 +105,8 @@ proc exportOtlp*(tracer: Tracer, endpoint: string = "http://localhost:4318/v1/tr
       "parentSpanId": span.parentSpanId,
       "name": span.name,
       "kind": "SPAN_KIND_INTERNAL",
-      "startTimeUnixNano": $span.startTime,
-      "endTimeUnixNano": $span.endTime,
+      "startTimeUnixNano": $span.startTimeEpochNs,
+      "endTimeUnixNano": $span.endTimeEpochNs,
       "status": {"code": if span.status == ssOk: "STATUS_CODE_OK" else: "STATUS_CODE_ERROR"},
       "attributes": attrs,
     })

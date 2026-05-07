@@ -1246,8 +1246,6 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
                 let v = evalExpr(expr.aggArgs[0], row)
                 if maxVal == "" or v > maxVal: maxVal = v
               newRow[alias] = maxVal
-            else:
-              newRow[alias] = ""
           else:
             let val = evalExpr(expr, if sourceRows.len > 0: sourceRows[0] else: initTable[string, string]())
             if alias.len > 0: newRow[alias] = val
@@ -2275,11 +2273,11 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
                        storedRec.checksum[0..<16] & ", Expected: " & expectedChecksum[0..<16])
 
     let startTime = epochTime()
-    let result = executeMigrationSql(ctx, upBody)
+    let res = executeMigrationSql(ctx, upBody)
     let durationMs = int((epochTime() - startTime) * 1000)
 
-    if not result.success:
-      return errResult("Migration '" & stmt.amName & "' failed: " & result.message)
+    if not res.success:
+      return errResult("Migration '" & stmt.amName & "' failed: " & res.message)
 
     ctx.db.put(migrationAppliedKey(stmt.amName), cast[seq[byte]]("applied"))
     setMigrationRecord(ctx, MigrationRecord(
@@ -2332,10 +2330,10 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
       if not found:
         return errResult("Migration '" & name & "' not found during batch apply")
       let startTime = epochTime()
-      let result = executeMigrationSql(ctx, upBody)
+      let res = executeMigrationSql(ctx, upBody)
       let durationMs = int((epochTime() - startTime) * 1000)
-      if not result.success:
-        return errResult("Migration '" & name & "' failed: " & result.message &
+      if not res.success:
+        return errResult("Migration '" & name & "' failed: " & res.message &
                          " (" & $appliedCount & " migrations applied before failure)")
       ctx.db.put(migrationAppliedKey(name), cast[seq[byte]]("applied"))
       setMigrationRecord(ctx, MigrationRecord(
@@ -2375,9 +2373,9 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         return errResult("Migration '" & name & "' not found during rollback")
       if downBody.len == 0:
         return errResult("Migration '" & name & "' has no DOWN script")
-      let result = executeMigrationSql(ctx, downBody)
-      if not result.success:
-        return errResult("Rollback of '" & name & "' failed: " & result.message)
+      let res = executeMigrationSql(ctx, downBody)
+      if not res.success:
+        return errResult("Rollback of '" & name & "' failed: " & res.message)
       ctx.db.delete(migrationAppliedKey(name))
       var rec = getMigrationRecord(ctx, name)
       rec.rolledBack = true
