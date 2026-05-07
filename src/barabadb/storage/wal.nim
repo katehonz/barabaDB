@@ -84,3 +84,39 @@ proc close*(wal: var WriteAheadLog) =
 
 proc entryCount*(wal: WriteAheadLog): uint64 = wal.entryCount
 proc path*(wal: WriteAheadLog): string = wal.path
+
+proc readEntries*(walPath: string, untilTimestamp: uint64 = 0): seq[WalEntry] =
+  result = @[]
+  if not fileExists(walPath): return
+  let s = newFileStream(walPath, fmRead)
+  if s == nil: return
+  # Skip header
+  var magic: uint32
+  var version: uint32
+  discard s.readData(addr magic, 4)
+  discard s.readData(addr version, 4)
+  if magic != WALMagic: return
+  while not s.atEnd:
+    var kind: uint8
+    if s.readData(addr kind, 1) != 1: break
+    var timestamp: uint64
+    if s.readData(addr timestamp, 8) != 8: break
+    if untilTimestamp > 0 and timestamp > untilTimestamp:
+      break
+    var keyLen: uint32
+    if s.readData(addr keyLen, 4) != 4: break
+    var key = newSeq[byte](keyLen)
+    if keyLen > 0:
+      if s.readData(addr key[0], int(keyLen)) != int(keyLen): break
+    var valLen: uint32
+    if s.readData(addr valLen, 4) != 4: break
+    var value = newSeq[byte](valLen)
+    if valLen > 0:
+      if s.readData(addr value[0], int(valLen)) != int(valLen): break
+    result.add(WalEntry(
+      kind: WalEntryKind(kind),
+      timestamp: timestamp,
+      key: key,
+      value: value,
+    ))
+  s.close()

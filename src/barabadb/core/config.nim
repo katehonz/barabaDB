@@ -164,3 +164,8 @@ proc loadConfig*(): BaraConfig =
     loadConfigFromJson("baradb.json", result)
   # 2. Environment overrides (highest priority)
   loadConfigFromEnv(result)
+
+proc getEffectiveJwtSecret*(cfg: BaraConfig): string =
+  if cfg.jwtSecret.len > 0:
+    return cfg.jwtSecret
+  return "baradb-default-secret-change-in-production!"

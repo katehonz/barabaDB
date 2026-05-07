@@ -134,9 +134,9 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
   s.write(SSTableVersion)
   s.write(uint32(entries.len))
   let indexOffsetPos = s.getPosition()
-  s.write(0'u64)  # indexOffset placeholder
+  s.write(0'u64)  # patched after data+bloom are written
   let bloomOffsetPos = s.getPosition()
-  s.write(0'u64)  # bloomOffset placeholder
+  s.write(0'u64)  # patched after data+bloom are written
 
   # Write data block
   var offsets = newSeq[(string, int64)](entries.len)

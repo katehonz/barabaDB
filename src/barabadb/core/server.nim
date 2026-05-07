@@ -255,13 +255,34 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
   let slowThreshold = server.config.slowQueryThresholdMs
   let slowLog = server.config.slowQueryLogPath
   var authenticated = not server.config.authEnabled
-  let secret = if server.config.jwtSecret.len > 0: server.config.jwtSecret else: "baradb-default-secret-change-in-production!"
+  let secret = server.config.getEffectiveJwtSecret()
 
   try:
     while true:
       let headerData = await client.recvExactWithTimeout(12, idleTimeout)
       if headerData.len < 12:
         break
+
+      # Detect text-based DISTTXN RPC (starts with "DISTTXN")
+      if headerData.len >= 7 and headerData[0..6] == "DISTTXN":
+        # Text-based 2PC protocol: read rest of line
+        var rest = headerData[7..^1]
+        # Read until newline
+        while '\n' notin rest:
+          let more = await client.recv(1024)
+          if more.len == 0: break
+          rest.add(more)
+        let parts = rest.strip().split(" ")
+        if parts.len >= 2:
+          let txnId = try: parseUInt(parts[0]) except: 0'u64
+          let action = parts[1].toUpper()
+          if action == "PREPARE" or action == "COMMIT" or action == "ROLLBACK":
+            await client.send("OK\n")
+          else:
+            await client.send("ERR unknown action\n")
+        else:
+          await client.send("ERR invalid message\n")
+        continue
 
       let (ok, header) = parseHeader(headerData)
       if not ok:

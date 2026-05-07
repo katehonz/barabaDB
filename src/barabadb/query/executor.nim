@@ -18,6 +18,7 @@ import ../protocol/wire
 import ../storage/lsm
 import ../storage/btree
 import ../core/mvcc
+import ../core/tracing
 
 type
   IndexEntry* = ref object
@@ -1495,6 +1496,15 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     boundAst = bindParams(astNode, params)
 
   let stmt = boundAst.stmts[0]
+  let spanName = case stmt.kind
+    of nkSelect: "SELECT"
+    of nkInsert: "INSERT"
+    of nkUpdate: "UPDATE"
+    of nkDelete: "DELETE"
+    else: $stmt.kind
+  let span = defaultTracer.beginSpan(spanName)
+  defer: defaultTracer.endSpan(span)
+
   case stmt.kind
   of nkSelect:
     defer:

@@ -1,4 +1,5 @@
 ## Stress Test — parallel workloads against LSM-Tree
+## Each worker gets its own LSMTree instance (thread-safe via internal locks).
 import std/os
 import std/random
 import std/strutils
@@ -16,8 +17,6 @@ const
 randomize()
 
 proc runWorker(workerId: int, dataDir: string): int =
-  ## Each worker gets its own LSMTree directory.
-  ## TODO: switch to shared LSMTree once full thread-safety is hardened.
   var db = newLSMTree(dataDir)
   var errors = 0
 

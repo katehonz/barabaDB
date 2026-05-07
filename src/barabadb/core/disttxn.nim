@@ -2,6 +2,8 @@
 import std/tables
 import std/locks
 import std/monotimes
+import std/net
+import std/strutils
 
 type
   DistTxnState* = enum
@@ -65,13 +67,29 @@ proc beginTransaction*(tm: DistTxnManager, coordinator: string): DistributedTran
   release(tm.lock)
 
 proc addParticipant*(txn: DistributedTransaction, nodeId: string,
-                     host: string, port: int) =
+                     host: string = "", port: int = 0) =
   acquire(txn.lock)
   txn.participants[nodeId] = DistTxnParticipant(
     nodeId: nodeId, host: host, port: port,
     prepared: false, committed: false, aborted: false,
   )
   release(txn.lock)
+
+proc sendDistTxnRpc(host: string, port: int, txnId: uint64, action: string, timeoutMs: int = 5000): bool =
+  ## Send 2PC RPC to participant node via TCP text protocol.
+  ## Protocol: "DISTTXN <txnId> <action>\n" where action = PREPARE|COMMIT|ROLLBACK
+  ## Response: "OK\n" or "ERR <msg>\n"
+  try:
+    var sock = newSocket()
+    sock.connect(host, Port(port))
+    let msg = "DISTTXN " & $txnId & " " & action & "\n"
+    sock.send(msg)
+    var response = ""
+    sock.readLine(response)
+    sock.close()
+    return response.strip() == "OK"
+  except:
+    return false
 
 proc prepare*(txn: DistributedTransaction): bool =
   acquire(txn.lock)
@@ -83,9 +101,12 @@ proc prepare*(txn: DistributedTransaction): bool =
 
   var allOk = true
   for nodeId, participant in txn.participants.mpairs:
-    # In production, would send PREPARE RPC to each participant node
-    # Simulate prepare success for now
-    participant.prepared = true
+    if participant.host.len > 0 and participant.port > 0:
+      participant.prepared = sendDistTxnRpc(participant.host, participant.port, txn.id, "PREPARE")
+    else:
+      participant.prepared = true  # local participant
+    if not participant.prepared:
+      allOk = false
 
   if allOk:
     txn.state = dtsPrepared
@@ -105,8 +126,12 @@ proc commit*(txn: DistributedTransaction): bool =
 
   var allOk = true
   for nodeId, participant in txn.participants.mpairs:
-    # In production, would send COMMIT RPC
-    participant.committed = true
+    if participant.host.len > 0 and participant.port > 0:
+      participant.committed = sendDistTxnRpc(participant.host, participant.port, txn.id, "COMMIT")
+    else:
+      participant.committed = true  # local participant
+    if not participant.committed:
+      allOk = false
 
   if allOk:
     txn.state = dtsCommitted
@@ -121,7 +146,10 @@ proc rollback*(txn: DistributedTransaction): bool =
 
   txn.state = dtsAborting
   for nodeId, participant in txn.participants.mpairs:
-    participant.aborted = true
+    if participant.host.len > 0 and participant.port > 0:
+      participant.aborted = sendDistTxnRpc(participant.host, participant.port, txn.id, "ROLLBACK")
+    else:
+      participant.aborted = true
   txn.state = dtsAborted
   release(txn.lock)
   return true

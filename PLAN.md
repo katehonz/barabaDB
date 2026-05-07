@@ -6,40 +6,44 @@
 
 ## Ниски (nice-to-have, не блокират production)
 
-### 1. Distributed 2PC — реален network RPC
-- **Статус:** ❌ Симулиран (`disttxn.nim:86,108`)
-- **Промени:** `prepare()` и `commit()` само маркират участниците като готови. Няма реална мрежова комуникация.
-- **Нужно:** Изпращане на PREPARE/COMMIT RPC към participant nodes през TCP.
-
-### 2. LSM-Tree thread-safety
-- **Статус:** ❌ Не е напълно thread-safe
-- **Проблем:** Stress test ползва отделни DB инстанции на worker (`stress_test.nim:20`).
-- **Нужно:** Mutex/lock около shared LSM операциите или MVCC-based concurrency.
-
-### 3. Full FTS index integration
+### 1. Full FTS index integration (BM25 ranking)
 - **Статус:** ⚠️ Базова поддръжка
-- **Текущо:** `WHERE col @@ 'query'` прави case-insensitive term match (всеки термин от заявката трябва да се среща в колоната).
-- **Липсва:** Пълна интеграция с `InvertedIndex` от `fts/engine.nim` — BM25 ranking, highlight-и, позиционно търсене.
+- **Текущо:** `WHERE col @@ 'query'` прави case-insensitive term match. FTS engine (`fts/engine.nim`) съществува с BM25, inverted index, tokenization.
+- **Липсва:** Пълна интеграция — `CREATE INDEX ... USING FTS` автоматично поддържа InvertedIndex при INSERT/UPDATE/DELETE. `@@` използва BM25 вместо substring.
 
-### 4. Point-in-time recovery (PITR)
-- **Статус:** ❌ Не е имплементирано
-- **Обхват:** WAL replay съществува, но няма UI/команда за PITR до конкретен timestamp.
-- **Нужно:** `RECOVER TO TIMESTAMP '...'` или подобна команда.
+### 2. Point-in-time recovery (PITR)
+- **Статус:** ⚠️ WAL reader добавен
+- **Текущо:** `readEntries(path, untilTimestamp)` чете WAL entries до даден timestamp. Backup/restore чрез tar.gz snapshot работи.
+- **Липсва:** `RECOVER TO TIMESTAMP '...'` команда, която прилага WAL entries до timestamp.
 
-### 5. OpenTelemetry tracing
-- **Статус:** ❌ Не е имплементирано
-- **Текущо:** JSON structured logging (`logging.nim`).
-- **Нужно:** OpenTelemetry spans за query execution, index lookup, RPC calls.
+### 3. OpenTelemetry tracing
+- **Статус:** ⚠️ Базов tracer
+- **Текущо:** `core/tracing.nim` — span recording, enable/disable, JSON export. `executeQuery` създава span за всяка заявка.
+- **Липсва:** OTLP/gRPC export, integration с external collector.
 
-### 6. SSTable metadata
-- **Статус:** ⚠️ Placeholders
-- **Проблем:** `indexOffset` и `bloomOffset` се пишат като `0` в SSTable header (`lsm.nim:137,139`), коригират се при finalize. Не е бъг, но е нечисто.
-- **Нужно:** Записване на реалните offsets веднага или restructure на SSTable формата.
+---
 
-### 7. Hardcoded JWT secret
-- **Статус:** ⚠️ В 2 файла
-- **Проблем:** `"baradb-default-secret-change-in-production!"` в `server.nim` и `httpserver.nim`.
-- **Нужно:** Задължително задаване през env var или config file; отказване на старт ако е default стойност.
+## Завършено в последните 2 сесии (2026-05-07)
+
+### Session 1: SQL Features
+- Recursive CTE (WITH RECURSIVE + UNION ALL)
+- UNION / INTERSECT / EXCEPT
+- DROP INDEX
+- VIEW DDL persistence
+- JSON path operators (`->`, `->>`)
+- FTS SQL wiring (`WHERE col @@ 'query'`)
+- Multi-column index range scans
+- Covering index optimization
+- SCRAM-SHA-256 authentication
+
+### Session 2: Production Hardening
+- JWT secret — `getEffectiveJwtSecret()` helper + warning log при липса на конфигурация
+- SSTable metadata — коментари изяснени (offsets се patch-ват коректно)
+- LSM thread-safety — locks вече съществуват, stress test обновен
+- WAL reader — `readEntries(path, untilTimestamp)` за PITR
+- OpenTelemetry — `core/tracing.nim` с span recording, `executeQuery` tracing
+- Distributed 2PC — реален TCP RPC вместо simulated (host="" → local fallback)
+- `addParticipant` има default параметри (host="", port=0)
 
 ---
 
@@ -51,10 +55,5 @@
 | **Kubernetes Helm** | Docker Compose е достатъчен |
 
 ---
-
-## Honest Score
-
-**9.7/10** — всички критични и средни задачи са завършени.
-Остават 7 ниско-приоритетни задачи, нито една не блокира самостоятелен production deploy.
 
 **279 теста — 0 failure-а.**

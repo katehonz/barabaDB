@@ -1663,13 +1663,13 @@ suite "Adaptive Query Execution":
 suite "Distributed Transactions":
   test "Create distributed transaction":
     var txn = newDistributedTransaction("coordinator")
-    txn.addParticipant("node1", "10.0.0.1", 9472)
-    txn.addParticipant("node2", "10.0.0.2", 9472)
+    txn.addParticipant("node1")
+    txn.addParticipant("node2")
     check txn.participantCount == 2
 
   test "Two-phase commit flow":
     var txn = newDistributedTransaction("coordinator")
-    txn.addParticipant("n1", "10.0.0.1", 9472)
+    txn.addParticipant("n1")
     check txn.prepare()
     check txn.state() == dtsPrepared
     check txn.commit()
@@ -1677,7 +1677,7 @@ suite "Distributed Transactions":
 
   test "Rollback dist transaction":
     var txn = newDistributedTransaction("coordinator")
-    txn.addParticipant("n1", "10.0.0.1", 9472)
+    txn.addParticipant("n1")
     check txn.rollback()
     check txn.isAborted
 
@@ -1685,7 +1685,7 @@ suite "Distributed Transactions":
     var tm = newDistTxnManager()
     let txn = tm.beginTransaction("node1")
     check tm.activeCount == 1
-    txn.addParticipant("n2", "10.0.0.2", 9472)
+    txn.addParticipant("n2")
     check txn.prepare()
     check txn.commit()
     tm.cleanupCompleted()

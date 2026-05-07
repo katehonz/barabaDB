@@ -42,7 +42,7 @@ proc newHttpServer*(config: BaraConfig): HttpServer =
   let db = newLSMTree(dataDir)
   let ctx = newExecutionContext(db)
   ctx.txnManager = newTxnManager()
-  let secret = if config.jwtSecret.len > 0: config.jwtSecret else: "baradb-default-secret-change-in-production!"
+  let secret = config.getEffectiveJwtSecret()
   let ws = newWsServer(config, secret)
   ctx.onChange = proc(ev: ChangeEvent) =
     let msg = $ev.kind & " " & ev.table

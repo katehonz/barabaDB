@@ -56,6 +56,10 @@ proc main() =
   defaultLogger = newLogger(logLvl, config.logFile)
   info("BaraDB v0.1.0 — Multimodal Database Engine")
 
+  # Security check: warn if JWT secret is not configured
+  if config.jwtSecret.len == 0:
+    warn("JWT secret not configured! Set BARADB_JWT_SECRET env var or jwt_secret in config. Using default (INSECURE).")
+
   if config.tlsEnabled:
     if config.certFile.len == 0 or config.keyFile.len == 0 or
        not fileExists(config.certFile) or not fileExists(config.keyFile):
