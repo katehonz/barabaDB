@@ -133,6 +133,7 @@ Client → Protocol → Auth → Parser → AST → IR → Codegen
 5. **MVCC**: Multi-version concurrency control
 6. **Schema-First**: Strongly typed schema system with inheritance
 7. **Cross-Modal**: Single query language across all data models
+8. **Formally Verified**: Core distributed algorithms specified in TLA+ and model-checked with TLC
 
 ## Module Statistics
 

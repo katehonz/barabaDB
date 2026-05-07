@@ -22,6 +22,7 @@ BaraQL is a SQL-compatible query language with extensions for graph, vector, and
 | `datetime` | ISO 8601 timestamp | `'2025-01-15T10:30:00Z'` |
 | `uuid` | UUID v4 | `'550e8400-e29b-41d4-a716-446655440000'` |
 | `json` | JSON document | `{"key": "value"}` |
+| `jsonb` | Binary JSON (validated) | `{"key": "value"}` |
 
 ## Basic Queries
 
@@ -360,6 +361,32 @@ DROP TYPE User;
 DROP INDEX idx_users_name;
 ```
 
+### JSON Path Operators
+
+```sql
+-- Extract JSON field as JSON
+SELECT data->'name' FROM users;
+
+-- Extract JSON field as text
+SELECT data->>'name' FROM users;
+```
+
+### Full-Text Search (SQL)
+
+```sql
+-- Create FTS index with BM25
+CREATE INDEX idx_fts ON articles(body) USING FTS;
+
+-- Search with BM25 ranking
+SELECT * FROM articles WHERE body @@ 'machine learning';
+```
+
+### Point-in-Time Recovery
+
+```sql
+RECOVER TO TIMESTAMP '2026-05-07T12:00:00';
+```
+
 ## Vector Search
 
 ```sql
@@ -505,4 +532,7 @@ SELECT /*+ PARALLEL(4) */ * FROM large_table;
 | Graph | MATCH, RETURN, WHERE, shortestPath, type |
 | FTS | MATCH, AGAINST, relevance, IN BOOLEAN MODE, WITH FUZZINESS |
 | Vector | cosine_distance, l2_distance, dot_product, manhattan_distance |
+| JSON | ->, ->> |
+| FTS | @@ (BM25 match) |
+| Recovery | RECOVER TO TIMESTAMP |
 | Functions | count, sum, avg, min, max, stddev, variance, abs, sqrt, lower, upper, len, trim, substr, now, last_insert_id |

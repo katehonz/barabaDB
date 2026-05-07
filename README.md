@@ -47,17 +47,39 @@ single 3.3MB binary with no runtime dependencies.
 └─────────────────────────────────────────────────────────┘
 ```
 
+## Formal Verification
+
+BaraDB core distributed algorithms are formally specified and model-checked
+with **TLA+** and the TLC model checker:
+
+| Algorithm | Spec | States Checked | Properties |
+|-----------|------|----------------|------------|
+| **Raft Consensus** | `formal-verification/raft.tla` | 475,972 | ElectionSafety, StateMachineSafety |
+| **Two-Phase Commit** | `formal-verification/twopc.tla` | 22,145 | Atomicity, NoOrphanBlocks |
+| **MVCC** | `formal-verification/mvcc.tla` | 177,849 | NoDirtyReads, ReadOwnWrites, WriteWriteConflict |
+| **Replication** | `formal-verification/replication.tla` | 3,687,939 | MonotonicLsn, AcksRemovePending |
+
+Run the checks locally:
+
+```bash
+cd formal-verification
+java -cp tla2tools.jar tlc2.TLC -config models/raft.cfg raft.tla
+java -cp tla2tools.jar tlc2.TLC -config models/twopc.cfg twopc.tla
+java -cp tla2tools.jar tlc2.TLC -config models/mvcc.cfg mvcc.tla
+java -cp tla2tools.jar tlc2.TLC -config models/replication.cfg replication.tla
+```
+
 ## Quick Start
 
 ```bash
 # Build
-nim c -d:release -o:build/baradadb src/baradadb.nim
+nimble build -d:release
 
 # Run tests
-nim c --path:src -r tests/test_all.nim
+nimble test
 
 # Run benchmarks
-nim c -d:release -r benchmarks/bench_all.nim
+nimble bench
 
 # Start server
 ./build/baradadb
@@ -167,6 +189,45 @@ CREATE TYPE Movie {
   title: str,
   director: Person
 };
+```
+
+### JSON & JSONB
+
+```sql
+-- Create table with JSON column
+CREATE TABLE events (id INT PRIMARY KEY, payload JSON);
+
+-- Insert valid JSON
+INSERT INTO events (id, payload) VALUES (1, '{"action": "click"}');
+
+-- JSON path operators
+SELECT payload->'action' AS action_json,
+       payload->>'action' AS action_text
+FROM events;
+```
+
+### Full-Text Search (SQL)
+
+```sql
+-- Create FTS index
+CREATE INDEX idx_fts ON articles(body) USING FTS;
+
+-- Search with BM25 ranking
+SELECT * FROM articles WHERE body @@ 'machine learning';
+```
+
+### Set Operations
+
+```sql
+SELECT name FROM customers
+UNION ALL
+SELECT name FROM suppliers;
+```
+
+### Point-in-Time Recovery
+
+```sql
+RECOVER TO TIMESTAMP '2026-05-07T12:00:00';
 ```
 
 ## Storage Engines
@@ -665,6 +726,22 @@ Example response:
   "txns_committed": 89123,
   "txns_rolled_back": 12
 }
+```
+
+### OpenTelemetry Tracing
+
+Built-in lightweight tracing with OTLP/HTTP export:
+
+```nim
+import barabadb/core/tracing
+
+defaultTracer.enable()
+let span = defaultTracer.beginSpan("SELECT users")
+# ... query execution ...
+defaultTracer.endSpan(span)
+
+# Export to Jaeger/OTLP collector
+discard defaultTracer.exportOtlp("http://localhost:4318/v1/traces")
 ```
 
 ### Health Check

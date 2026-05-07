@@ -59,3 +59,20 @@ tm.savepoint(txn, "sp1")
 # ... operations ...
 tm.rollbackToSavepoint(txn, "sp1")
 ```
+
+## Formal Verification
+
+The MVCC / Snapshot Isolation protocol is formally specified in TLA+:
+
+- **Spec:** `formal-verification/mvcc.tla`
+- **Verified properties:**
+  - `NoDirtyReads` — transactions never read uncommitted data
+  - `ReadOwnWrites` — transactions always see their own writes
+  - `WriteWriteConflict` — first-committer-wins (no two committed transactions write the same key)
+
+Run TLC locally:
+
+```bash
+cd formal-verification
+java -cp tla2tools.jar tlc2.TLC -config models/mvcc.cfg mvcc.tla
+```

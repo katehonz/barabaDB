@@ -35,3 +35,23 @@ var rm = newReplicationManager(rmSync)
 rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
 rm.connectReplica("r1")
 ```
+
+## Формална Верификация
+
+Разпределените алгоритми са формално специфицирани в TLA+ и проверени с TLC:
+
+- **Raft Консенсус** — `formal-verification/raft.tla`
+  - Проверено: ElectionSafety, StateMachineSafety
+- **Two-Phase Commit** — `formal-verification/twopc.tla`
+  - Проверено: Atomicity, NoOrphanBlocks
+- **Репликация** — `formal-verification/replication.tla`
+  - Проверено: MonotonicLsn, AcksRemovePending
+
+Пускане на TLC:
+
+```bash
+cd formal-verification
+java -cp tla2tools.jar tlc2.TLC -config models/raft.cfg raft.tla
+java -cp tla2tools.jar tlc2.TLC -config models/twopc.cfg twopc.tla
+java -cp tla2tools.jar tlc2.TLC -config models/replication.cfg replication.tla
+```

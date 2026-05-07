@@ -105,6 +105,33 @@ RETURN friend.name;
 ## Пълнотекстово Търсене
 
 ```sql
-SELECT * FROM articles
-WHERE MATCH(title, body) AGAINST('database programming');
+-- Създаване на FTS индекс
+CREATE INDEX idx_fts ON articles(body) USING FTS;
+
+-- Търсене с BM25 ранжиране
+SELECT * FROM articles WHERE body @@ 'database programming';
+```
+
+## JSON Оператори
+
+```sql
+-- Извличане на JSON поле като JSON
+SELECT data->'name' FROM users;
+
+-- Извличане на JSON поле като текст
+SELECT data->>'name' FROM users;
+```
+
+## Set Операции
+
+```sql
+SELECT name FROM customers
+UNION ALL
+SELECT name FROM suppliers;
+```
+
+## Възстановяване до Момент във Времето
+
+```sql
+RECOVER TO TIMESTAMP '2026-05-07T12:00:00';
 ```

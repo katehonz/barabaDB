@@ -52,6 +52,24 @@ let tfidf = idx.searchTfidf("query terms")
 | Phrase search | Exact phrase matching |
 | Boolean | AND, OR, NOT operators |
 
+## SQL Interface
+
+Full-text search is also available directly in BaraQL:
+
+```sql
+-- Create a table with text column
+CREATE TABLE articles (id INT PRIMARY KEY, title TEXT, body TEXT);
+
+-- Create an FTS index
+CREATE INDEX idx_fts ON articles(body) USING FTS;
+
+-- Search with the @@ operator (BM25 ranking)
+SELECT * FROM articles WHERE body @@ 'machine learning';
+
+-- Search with multiple terms
+SELECT * FROM articles WHERE body @@ 'quick brown fox';
+```
+
 ## Multi-Language Support
 
 ```nim

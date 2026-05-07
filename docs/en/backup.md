@@ -75,6 +75,14 @@ BARADB_WAL_ARCHIVE_INTERVAL_MS=60000 \
   --target-time="2025-01-15T10:30:00Z"
 ```
 
+### Recovery via SQL
+
+You can also recover directly via BaraQL:
+
+```sql
+RECOVER TO TIMESTAMP '2026-05-07T12:00:00';
+```
+
 ### Incremental Backups
 
 Incremental backups only copy changed SSTables:

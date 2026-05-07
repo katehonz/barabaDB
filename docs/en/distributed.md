@@ -88,3 +88,23 @@ var dt = newDistributedTxn()
 dt.prepare(@["node1", "node2"])
 dt.commit()
 ```
+
+## Formal Verification
+
+Core distributed algorithms are formally specified in TLA+ and model-checked:
+
+- **Raft Consensus** — `formal-verification/raft.tla`
+  - Verified: ElectionSafety, StateMachineSafety
+- **Two-Phase Commit** — `formal-verification/twopc.tla`
+  - Verified: Atomicity, NoOrphanBlocks
+- **Replication** — `formal-verification/replication.tla`
+  - Verified: MonotonicLsn, AcksRemovePending
+
+Run TLC locally:
+
+```bash
+cd formal-verification
+java -cp tla2tools.jar tlc2.TLC -config models/raft.cfg raft.tla
+java -cp tla2tools.jar tlc2.TLC -config models/twopc.cfg twopc.tla
+java -cp tla2tools.jar tlc2.TLC -config models/replication.cfg replication.tla
+```
