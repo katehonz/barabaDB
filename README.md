@@ -50,23 +50,33 @@ single 3.3MB binary with no runtime dependencies.
 ## Formal Verification
 
 BaraDB core distributed algorithms are formally specified and model-checked
-with **TLA+** and the TLC model checker:
+with **TLA+** and the TLC model checker. All specs run with **weak fairness**
+(`WF_vars(Next)`) to ensure realistic execution:
 
-| Algorithm | Spec | States Checked | Properties |
-|-----------|------|----------------|------------|
-| **Raft Consensus** | `formal-verification/raft.tla` | 475,972 | ElectionSafety, StateMachineSafety |
-| **Two-Phase Commit** | `formal-verification/twopc.tla` | 22,145 | Atomicity, NoOrphanBlocks |
-| **MVCC** | `formal-verification/mvcc.tla` | 177,849 | NoDirtyReads, ReadOwnWrites, WriteWriteConflict |
-| **Replication** | `formal-verification/replication.tla` | 3,687,939 | MonotonicLsn, AcksRemovePending |
+| Algorithm | Spec | States | Properties Verified |
+|-----------|------|--------|---------------------|
+| **Raft Consensus** | `formal-verification/raft.tla` | 3,031,684 | ElectionSafety, LeaderAppendOnly, StateMachineSafety, CommittedIndexValid, LogMatching |
+| **Two-Phase Commit** | `formal-verification/twopc.tla` | 22,855,681 | Atomicity, NoOrphanBlocks, CoordinatorConsistency, NoDecideWithoutConsensus, ParticipantStateValid, RecoveryConsistency |
+| **MVCC** | `formal-verification/mvcc.tla` | 177,721 | NoDirtyReads, ReadOwnWrites, WriteWriteConflict, CommittedMustStart, CommittedVersionsUnique, NoWriteSkew, **CommitProgress** (liveness) |
+| **Replication** | `formal-verification/replication.tla` | 3,687,939 | AcksRemovePending, PendingAreKnown, AppliedLteCurrent, MonotonicLsn (temporal) |
+| **Gossip (SWIM)** | `formal-verification/gossip.tla` | 692,497 | AliveNotFalselyDead, IncarnationMonotonic, DeadConsistency |
+| **Deadlock Detection** | `formal-verification/deadlock.tla` | 3,767,361 | GraphIntegrity, NoSelfLoops |
+| **Sharding** | `formal-verification/sharding.tla` | 186,305 | VirtualNodeMapping, NodeAssignmentConsistency, VnodeOrdering |
 
-Run the checks locally:
+Run all checks locally:
 
 ```bash
 cd formal-verification
-java -cp tla2tools.jar tlc2.TLC -config models/raft.cfg raft.tla
-java -cp tla2tools.jar tlc2.TLC -config models/twopc.cfg twopc.tla
-java -cp tla2tools.jar tlc2.TLC -config models/mvcc.cfg mvcc.tla
-java -cp tla2tools.jar tlc2.TLC -config models/replication.cfg replication.tla
+bash run_all.sh
+```
+
+Or run individual specs:
+
+```bash
+cd formal-verification
+java -cp tla2tools.jar tlc2.TLC -workers auto -config models/raft.cfg raft.tla
+java -cp tla2tools.jar tlc2.TLC -workers auto -config models/twopc.cfg twopc.tla
+java -cp tla2tools.jar tlc2.TLC -workers auto -config models/mvcc.cfg mvcc.tla
 ```
 
 ## Quick Start
