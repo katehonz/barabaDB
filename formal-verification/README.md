@@ -87,6 +87,7 @@ java -cp tla2tools.jar tlc2.TLC -config models/sharding.cfg sharding.tla
 - `WriteWriteConflict` — no two committed transactions write the same key (first-committer-wins).
 - `CommittedMustStart` — committed transactions have a valid start timestamp.
 - `CommittedVersionsUnique` — no two committed versions for a key share the same txnId.
+- `NoWriteSkew` — no two committed transactions have a circular read-write dependency.
 
 ### replication.tla
 - `MonotonicLsn` (temporal) — the applied LSN never decreases.

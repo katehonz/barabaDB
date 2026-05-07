@@ -64,7 +64,7 @@
 |---|--------|-------------|-----------|
 | FV-5 | **Symmetry reduction във всички .cfg** | TLC проверява 3!=6 пермутации на едно и също състояние. С `SYMMETRY` се намаляват състоянията 3-10x → по-големи граници. | `formal-verification/models/*.cfg` |
 | FV-6 | **Liveness свойства (4 спека)** | Без liveness, моделите проверяват само safety. Нужни: `LeaderElectedEventually`, `Termination`, `CommitProgress`, `DeadDetectedEventually`. | `formal-verification/*.tla`, `models/*.cfg` |
-| FV-7 | **MVCC: Write skew detection** | Snapshot isolation допуска write skew — класически бъг. Нито TLA+, нито Nim го проверяват. | `formal-verification/mvcc.tla`, `src/barabadb/core/mvcc.nim` |
+| FV-7 | ~~MVCC: Write skew detection~~ ✅ | `NoWriteSkew` инварианта добавена. `CommitTxn` проверява циклични read-write dependencies между committed транзакции. | `formal-verification/mvcc.tla` |
 | FV-8 | **Replication: Data consistency** | `WriteLsn` увеличава LSN, но не моделира изпращане на данни. Нужен `DataPayload` + `DataConsistency` инвариант. | `formal-verification/replication.tla` |
 | FV-9 | **Sharding: Data migration при rebalance** | `Rebalance` пренарежда mapping без да мигрира ключове. Нужен `NoDataLoss` инвариант + `migrateData` в Nim. | `formal-verification/sharding.tla`, `src/barabadb/core/sharding.nim` |
 

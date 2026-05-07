@@ -84,11 +84,16 @@ Write(t, k, v) ==
   /\ UNCHANGED <<txnState, txnStartTs, readSet, globalClock>>
 
 \* Commit transaction t: mark its versions as committed (first-committer-wins).
+\* Also checks for write skew: if another committed txn read a key we wrote,
+\* and wrote a key we read, that's a circular dependency and we must abort.
 CommitTxn(t) ==
   /\ txnState[t] = "Active"
   /\ txnStartTs[t] > 0
   /\ ~(\E t2 \in 1..MaxTxnId : t2 /= t /\ txnState[t2] = "Committed" /\
        \E k \in Keys : k \in writeSet[t] /\ k \in writeSet[t2])
+  /\ ~(\E t2 \in 1..MaxTxnId : t2 /= t /\ txnState[t2] = "Committed" /\
+       \E k1 \in Keys : k1 \in writeSet[t] /\ k1 \in readSet[t2] /\
+       \E k2 \in Keys : k2 \in writeSet[t2] /\ k2 \in readSet[t])
   /\ txnState' = [txnState EXCEPT ![t] = "Committed"]
   /\ db' = [k \in Keys |->
              IF k \in writeSet[t]
@@ -141,6 +146,14 @@ WriteWriteConflict ==
   \A t1, t2 \in 1..MaxTxnId :
     t1 /= t2 /\ txnState[t1] = "Committed" /\ txnState[t2] = "Committed" =>
       ~(\E k \in Keys : k \in writeSet[t1] /\ k \in writeSet[t2])
+
+\* No write skew: two committed transactions cannot have a circular read-write dependency.
+\* If t1 writes a key that t2 read, then t2 cannot write a key that t1 read.
+NoWriteSkew ==
+  \A t1, t2 \in 1..MaxTxnId :
+    t1 /= t2 /\ txnState[t1] = "Committed" /\ txnState[t2] = "Committed" =>
+      ~(\E k1 \in Keys : k1 \in writeSet[t1] /\ k1 \in readSet[t2] /\
+          \E k2 \in Keys : k2 \in writeSet[t2] /\ k2 \in readSet[t1])
 
 \* A committed transaction must have been started (has start timestamp > 0).
 CommittedMustStart ==

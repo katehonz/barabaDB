@@ -96,9 +96,9 @@
 
 - Version cleanup (стари версии се трият при compaction)
 - Long-running transaction handling (транзакции със стар snapshot)
-- Write skew detection (класически проблем на snapshot isolation)
+- ~~Write skew detection~~ ✅ Направено — `NoWriteSkew` инвариантата е добавена в `mvcc.tla`
 
-**Препоръка:** Добавяне на `CleanupOldVersions` действие и `NoWriteSkew` инвариант (изисква tracking на predicate-based read/write конфликти).
+**Препоръка:** Добавяне на `CleanupOldVersions` действие.
 
 ### 2.7. Няма интеграция с Nim тестовете
 
