@@ -17,7 +17,10 @@ jobs:
         with:
           nim-version: '2.2.10'
 
-      - name: Install dependencies
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev
+
+      - name: Install Nim dependencies
         run: nimble install --depsOnly -y
 
       - name: Run tests
