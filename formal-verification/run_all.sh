@@ -17,12 +17,12 @@ run_tlc() {
   echo "=============================================="
   echo " TLC: $spec (cfg: $cfg)"
   echo "=============================================="
-  java -cp "$JAR" tlc2.TLC -config "$cfg" "$spec" 2>&1 | tail -5
+  java -XX:+UseParallelGC -cp "$JAR" tlc2.TLC -workers auto -config "$cfg" "$spec" 2>&1 | tail -5
   echo ""
 }
 
 echo "=============================================="
-echo " BaraDB Formal Verification Suite v1.0.0"
+echo " BaraDB Formal Verification Suite v1.1.0"
 echo " Running TLC model checker on all specs"
 echo "=============================================="
 echo ""

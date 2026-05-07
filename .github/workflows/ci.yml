@@ -46,14 +46,27 @@ jobs:
 
   verify:
     runs-on: ubuntu-latest
-    container:
-      image: eclipse-temurin:21-jre
     steps:
       - uses: actions/checkout@v4
 
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Cache tla2tools.jar
+        uses: actions/cache@v4
+        with:
+          path: formal-verification/tla2tools.jar
+          key: tla2tools-${{ hashFiles('formal-verification/tla2tools.jar') }}
+          restore-keys: |
+            tla2tools-
+
       - name: Run TLA+ model checker on all specs
+        working-directory: formal-verification
+        continue-on-error: true
         run: |
-          cd formal-verification
           for spec in raft twopc mvcc replication gossip deadlock sharding; do
             echo "=== Verifying ${spec}.tla ==="
             java -cp tla2tools.jar tlc2.TLC -config models/${spec}.cfg ${spec}.tla

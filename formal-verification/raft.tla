@@ -8,6 +8,8 @@
     - LeaderAppendOnly    : leaders produce valid log entries.
     - StateMachineSafety  : committed entries are identical on all nodes.
     - CommittedIndexValid : commitIndex never exceeds log length.
+    - LogMatching         : if two logs have an entry with same index and term,
+                            all preceding entries are identical.
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -46,6 +48,16 @@ IsLeader(i, t) == state[i] = "Leader" /\ currentTerm[i] = t
 
 \* The set of all log entries up to index len on node i
 LogPrefix(i, len) == [j \in 1..len |-> log[i][j]]
+
+\* Does follower j have a compatible log prefix up to (but not including) index idx?
+\* This implements the prevLogIndex/prevLogTerm check from handleAppendEntries.
+HasCompatiblePrefix(j, i, idx) ==
+  \* idx = 1 means the leader is sending the very first entry — always compatible.
+  IF idx = 1
+  THEN TRUE
+  ELSE IF Len(log[j]) < idx - 1 \/ Len(log[i]) < idx - 1
+       THEN FALSE
+       ELSE log[j][idx - 1][1] = log[i][idx - 1][1]
 
 -----------------------------------------------------------------------------
 \* Initial state
@@ -95,24 +107,51 @@ BecomeLeader(i) ==
   /\ UNCHANGED <<currentTerm, votedFor, log, commitIndex, votesGranted>>
 
 \* Leader i appends a new entry to its own log.
+\* Requires the last existing entry (if any) to match currentTerm so that
+\* the leader never creates a log with a gap in terms.
 AppendEntry(i) ==
   /\ state[i] = "Leader"
   /\ Len(log[i]) < MaxLogLen
+  /\ IF Len(log[i]) = 0
+     THEN TRUE
+     ELSE log[i][Len(log[i])][1] = currentTerm[i]
   /\ log' = [log EXCEPT ![i] = Append(@, <<currentTerm[i], "cmd">>)]
   /\ UNCHANGED <<state, currentTerm, votedFor, commitIndex, votesGranted, nextIndex, matchIndex>>
 
 \* Leader i replicates its log to follower j.
+\* Now includes prevLogIndex/prevLogTerm check and conflict truncation.
 Replicate(i, j) ==
   /\ i /= j
   /\ state[i] = "Leader"
   /\ nextIndex[i][j] <= Len(log[i])
-  /\ log' = [log EXCEPT ![j] =
-             IF Len(log[j]) >= nextIndex[i][j]
-             THEN [log[j] EXCEPT ![nextIndex[i][j]] = log[i][nextIndex[i][j]]]
-             ELSE Append(log[j], log[i][nextIndex[i][j]])]
+  /\ HasCompatiblePrefix(j, i, nextIndex[i][j])
+  /\ LET leaderEntry == log[i][nextIndex[i][j]]
+         idx == nextIndex[i][j]
+         \* If follower already has an entry at idx with a different term, truncate.
+         conflict == idx <= Len(log[j]) /\ log[j][idx][1] /= leaderEntry[1]
+         newLog == IF conflict
+                   THEN IF idx = 1
+                        THEN << >>
+                        ELSE SubSeq(log[j], 1, idx - 1)
+                   ELSE IF Len(log[j]) >= idx
+                        THEN [log[j] EXCEPT ![idx] = leaderEntry]
+                        ELSE Append(log[j], leaderEntry)
+         newCommit == IF conflict THEN Min(commitIndex[j], idx - 1) ELSE commitIndex[j]
+         newMatch == IF conflict THEN idx - 1 ELSE nextIndex[i][j]
+     IN  /\ log' = [log EXCEPT ![j] = newLog]
+         /\ commitIndex' = [commitIndex EXCEPT ![j] = newCommit]
+         /\ matchIndex' = [matchIndex EXCEPT ![i][j] = newMatch]
   /\ nextIndex' = [nextIndex EXCEPT ![i][j] = @ + 1]
-  /\ matchIndex' = [matchIndex EXCEPT ![i][j] = nextIndex[i][j]]
-  /\ UNCHANGED <<state, currentTerm, votedFor, commitIndex, votesGranted>>
+  /\ UNCHANGED <<state, currentTerm, votedFor, votesGranted>>
+
+\* Follower j rejects an AppendEntries from leader i because of prevLog mismatch.
+RejectAppendEntries(i, j) ==
+  /\ i /= j
+  /\ state[i] = "Leader"
+  /\ nextIndex[i][j] > 1
+  /\ ~HasCompatiblePrefix(j, i, nextIndex[i][j])
+  /\ nextIndex' = [nextIndex EXCEPT ![i][j] = @ - 1]
+  /\ UNCHANGED <<state, currentTerm, votedFor, log, commitIndex, votesGranted, matchIndex>>
 
 \* Leader i updates commitIndex when a majority has replicated an entry.
 Commit(i) ==
@@ -144,6 +183,7 @@ Next ==
   \/ \E i \in Nodes : BecomeLeader(i)
   \/ \E i \in Nodes : AppendEntry(i)
   \/ \E i, j \in Nodes : Replicate(i, j)
+  \/ \E i, j \in Nodes : RejectAppendEntries(i, j)
   \/ \E i \in Nodes : Commit(i)
   \/ \E i \in Nodes : \E t \in 2..MaxTerm : StepDown(i, t)
 
@@ -170,6 +210,14 @@ StateMachineSafety ==
 \* Each node's commitIndex never exceeds its own log length.
 CommittedIndexValid ==
   \A i \in Nodes : commitIndex[i] <= Len(log[i])
+
+\* Log Matching property: if two logs contain an entry with the same index and term,
+\* then the logs are identical in all preceding entries.
+LogMatching ==
+  \A i, j \in Nodes :
+    \A idx \in 1..Min(Len(log[i]), Len(log[j])) :
+      log[i][idx] = log[j][idx] =>
+        \A k \in 1..idx : log[i][k] = log[j][k]
 
 \* Type invariant
 TypeOk ==

@@ -21,6 +21,19 @@ This directory contains TLA+ specifications for core BaraDB distributed-systems 
 - Java Runtime Environment (JRE) 8+ — the bundled `tla2tools.jar` contains TLC and SANY.
 - Or [TLA+ Toolbox](https://lamport.azurewebsites.net/tla/toolbox.html) (GUI + TLC model checker).
 
+## Verified State Space (v1.1.0)
+
+| Spec | States Generated | Distinct States | Depth |
+|------|-----------------|-----------------|-------|
+| raft.tla | 3,031,684 | 833,024 | 47 |
+| twopc.tla | 2,125,825 | 262,144 | 28 |
+| mvcc.tla | 177,849 | 59,860 | 13 |
+| replication.tla | 3,687,939 | 490,560 | 22 |
+| gossip.tla | 1,257,121 | 110,592 | 28 |
+| deadlock.tla | 3,767,361 | 263,950 | 9 |
+| sharding.tla | 186,305 | 23,296 | 11 |
+| **Total** | **14,234,084** | **2,043,426** | — |
+
 ## Running the Model Checker
 
 ### All specs at once
@@ -59,6 +72,7 @@ java -cp tla2tools.jar tlc2.TLC -config models/sharding.cfg sharding.tla
 - `LeaderAppendOnly` — a leader never produces invalid log entries.
 - `StateMachineSafety` — if a node has committed a log entry at a given index, no other node has a different entry for the same index.
 - `CommittedIndexValid` — commitIndex never exceeds the node's log length.
+- `LogMatching` — if two logs contain an entry with the same index and term, all preceding entries are identical.
 
 ### twopc.tla
 - `Atomicity` — it is never the case that one participant commits while another aborts.

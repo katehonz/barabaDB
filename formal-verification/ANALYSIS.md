@@ -72,7 +72,7 @@
 
 Спрямо реалната имплементация (`raft.nim`, 564 реда), моделът пропуска:
 
-- **PrevLogIndex/PrevLogTerm проверка** — Replicate действието не валидира, че follower има съвместим префикс. Това прави `LogMatching` инварианта неизпълним (затова беше премахнат).
+- ~~**PrevLogIndex/PrevLogTerm проверка**~~ ✅ Направено — `Replicate` вече изисква `HasCompatiblePrefix`, добавено е `RejectAppendEntries`, и `LogMatching` инвариантата е възстановена.
 - **Log truncation/compaction** — Няма snapshot механизъм.
 - **Membership changes** — Няма добавяне/премахване на възли.
 - **Leader step-down при partition** — Няма leader lease или heartbeat fail.

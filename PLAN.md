@@ -31,6 +31,58 @@
 | `sharding` | `rebalance` не мигрира данни |
 | `inter-module` | Няма raft→disttxn, gossip→sharding, replication→disttxn връзки |
 
+### ⚠️ Оставащи formal verification gaps
+
+| Модул | Gap | Тип |
+|--------|-----|-----|
+| `raft` | ✅ TLA+ моделът вече има `prevLogIndex`/`prevLogTerm` + `LogMatching` | Safety |
+| `raft` | Липсва `HeartbeatTimeout`/`LeaderLeaseExpired` — не проверява step-down | Liveness |
+| `twopc` | Без coordinator crash/recovery и participant timeout | Safety |
+| `mvcc` | Без write skew detection | Safety |
+| `replication` | `WriteLsn` не моделира data transfer | Safety |
+| `sharding` | `Rebalance` не моделира data migration | Safety |
+| `backup` | Няма TLA+ спек (498 реда Nim без покритие) | Coverage |
+| `recovery` | Няма TLA+ спек за WAL replay (177 реда Nim без покритие) | Coverage |
+| `crossmodal` | Няма TLA+ спек за cross-modal consistency | Coverage |
+
+---
+
+## Formal Verification — подобрения (post-v1.0.0)
+
+### 🔴 Критични (влияят върху коректността на проверените спекове)
+
+| # | Задача | Защо е критично | Файл(ове) |
+|---|--------|----------------|-----------|
+| FV-1 | ~~Raft: prevLogIndex/prevLogTerm в Replicate~~ ✅ | TLA+ моделът вече проверява prevLogIndex/prevLogTerm, възстановена е `LogMatching` инвариантата, добавено е `RejectAppendEntries` и conflict truncation. | `formal-verification/raft.tla` |
+| FV-2 | **Raft: Leader step-down при partition** | Няма `HeartbeatTimeout` или `LeaderLeaseExpired` — моделът не проверява дали leader се отказва при network partition. | `formal-verification/raft.tla` |
+| FV-3 | **2PC: Coordinator crash/recovery** | Спекът не моделира coordinator crash + WAL replay. При реален crash, participant-ите в `Prepared` остават блокирани завинаги. | `formal-verification/twopc.tla` |
+| FV-4 | **2PC: Participant timeout** | Липсва `ParticipantTimeout(t,p)` — participant трябва самостоятелно да abort-ва при липса на решение от coordinator. | `formal-verification/twopc.tla` |
+
+### 🟡 Важни (нови свойства и покритие)
+
+| # | Задача | Защо е важно | Файл(ове) |
+|---|--------|-------------|-----------|
+| FV-5 | **Symmetry reduction във всички .cfg** | TLC проверява 3!=6 пермутации на едно и също състояние. С `SYMMETRY` се намаляват състоянията 3-10x → по-големи граници. | `formal-verification/models/*.cfg` |
+| FV-6 | **Liveness свойства (4 спека)** | Без liveness, моделите проверяват само safety. Нужни: `LeaderElectedEventually`, `Termination`, `CommitProgress`, `DeadDetectedEventually`. | `formal-verification/*.tla`, `models/*.cfg` |
+| FV-7 | **MVCC: Write skew detection** | Snapshot isolation допуска write skew — класически бъг. Нито TLA+, нито Nim го проверяват. | `formal-verification/mvcc.tla`, `src/barabadb/core/mvcc.nim` |
+| FV-8 | **Replication: Data consistency** | `WriteLsn` увеличава LSN, но не моделира изпращане на данни. Нужен `DataPayload` + `DataConsistency` инвариант. | `formal-verification/replication.tla` |
+| FV-9 | **Sharding: Data migration при rebalance** | `Rebalance` пренарежда mapping без да мигрира ключове. Нужен `NoDataLoss` инвариант + `migrateData` в Nim. | `formal-verification/sharding.tla`, `src/barabadb/core/sharding.nim` |
+
+### 🟢 Нови спекове (непокрити критични модули)
+
+| # | Задача | Покрива | Приоритет |
+|---|--------|---------|-----------|
+| FV-10 | **`backup.tla`** | `backup.nim` (498 реда) — restore atomicity, no data loss, cleanup safety | Висок |
+| FV-11 | **`recovery.tla`** | `recovery.nim` (177 реда) — WAL replay correctness, committed survives, uncommitted rolled back | Висок |
+| FV-12 | **`crossmodal.tla`** | `crossmodal.nim` (250 реда) — consistency между document/vector/graph/FTS индекси | Среден |
+
+### 🔧 Инфраструктурни
+
+| # | Задача | Проблем | Файл |
+|---|--------|---------|------|
+| FV-13 | ~~CI: Поправка на verify job~~ ✅ | Премахнат `container:` блок, заменен с `actions/setup-java@v4` + `actions/cache` + `continue-on-error: true`. | `.github/workflows/ci.yml` |
+| FV-14 | **Property-based testing мост** | Nim скрипт за сравнение на TLA+ state machine с Nim state machine (faithfulness check). | `tests/tla_bridge.nim` (нов) |
+
 ---
 
 ## Завършено (обща сума: 5 сесии)

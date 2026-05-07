@@ -140,6 +140,27 @@ BaraDB is production-ready for blogs, e-commerce, and small ERP systems.
 
 ---
 
+## 2026-05-07: Formal Verification v1.0.0
+
+### TLA+ Спецификации (7 спека, 11.6M състояния, 0 грешки)
+- `raft.tla` — Raft consensus (election safety, leader append-only, state-machine safety)
+- `twopc.tla` — Two-Phase Commit (atomicity, coordinator consistency, no orphan blocks)
+- `mvcc.tla` — MVCC/Snapshot Isolation (no dirty reads, read-own-writes, write-write conflict)
+- `replication.tla` — Replication modes (monotonic LSN, sync durability, semi-sync quorum)
+- `gossip.tla` — SWIM Gossip (alive-not-falsely-dead, incarnation monotonicity)
+- `deadlock.tla` — Deadlock Detection (graph integrity, no self-loops)
+- `sharding.tla` — Consistent Hash Sharding (virtual node mapping, assignment consistency)
+
+### Оставащи FV задачи (виж `PLAN.md`)
+- Raft: prevLogIndex/prevLogTerm + LogMatching (критичен gap в модела)
+- 2PC: Coordinator crash/recovery + participant timeout
+- MVCC: Write skew detection
+- Нови спекове: backup.tla, recovery.tla, crossmodal.tla
+- CI: Поправка на verify job (container → setup-java)
+- Symmetry reduction + Liveness properties
+
+---
+
 ## 2026-05-07: Medium Priority Batch
 
 ### JSON/JSONB Types ✅
