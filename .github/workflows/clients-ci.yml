@@ -149,8 +149,9 @@ jobs:
       - name: Start BaraDB server
         run: |
           docker run -d --name baradb-ci -p 9472:9472 baradb:latest
-          sleep 3
+          sleep 5
           docker logs baradb-ci
+          until nc -z localhost 9472; do sleep 1; done
 
       - name: Setup Nim
         uses: jiro4989/setup-nim-action@v1
@@ -186,11 +187,9 @@ jobs:
       - name: Start BaraDB server
         run: |
           docker run -d --name baradb-ci -p 9472:9472 baradb:latest
-          sleep 3
+          sleep 5
           docker logs baradb-ci
-
-      - name: Setup Rust
-        uses: dtolnay/rust-action@stable
+          until nc -z localhost 9472; do sleep 1; done
 
       - name: Run Rust tests
         working-directory: clients/rust
