@@ -18,7 +18,7 @@ jobs:
           nim-version: '2.2.10'
 
       - name: Install dependencies
-        run: nimble install -y
+        run: nimble install --depsOnly -y
 
       - name: Run tests
         run: nim c -d:ssl --path:src -r tests/test_all.nim
