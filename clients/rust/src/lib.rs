@@ -39,6 +39,7 @@ const FK_BYTES: u8 = 0x09;
 const FK_ARRAY: u8 = 0x0A;
 const FK_OBJECT: u8 = 0x0B;
 const FK_VECTOR: u8 = 0x0C;
+const FK_JSON: u8 = 0x0D;
 
 /// Connection configuration
 #[derive(Debug, Clone)]
@@ -66,6 +67,7 @@ impl Default for Config {
 #[derive(Debug)]
 pub struct QueryResult {
     columns: Vec<String>,
+    column_types: Vec<String>,
     rows: Vec<HashMap<String, String>>,
     affected_rows: usize,
 }
@@ -73,6 +75,10 @@ pub struct QueryResult {
 impl QueryResult {
     pub fn columns(&self) -> &[String] {
         &self.columns
+    }
+
+    pub fn column_types(&self) -> &[String] {
+        &self.column_types
     }
 
     pub fn rows(&self) -> &[HashMap<String, String>] {
@@ -158,13 +164,18 @@ impl Client {
         }
 
         match kind {
-            MK_READY => Ok(QueryResult { columns: vec![], rows: vec![], affected_rows: 0 }),
+            MK_READY => Ok(QueryResult { columns: vec![], column_types: vec![], rows: vec![], affected_rows: 0 }),
             MK_DATA => {
                 let mut pos = 0usize;
                 let col_count = read_u32(&payload, &mut pos) as usize;
                 let mut columns = Vec::with_capacity(col_count);
                 for _ in 0..col_count {
                     columns.push(read_string(&payload, &mut pos));
+                }
+                let mut col_types = Vec::with_capacity(col_count);
+                for _ in 0..col_count {
+                    col_types.push(format!("{}", payload[pos]));
+                    pos += 1;
                 }
                 let row_count = read_u32(&payload, &mut pos) as usize;
                 let mut rows = Vec::with_capacity(row_count);
@@ -188,13 +199,13 @@ impl Client {
                 let affected = if comp_kind == MK_COMPLETE && comp_payload.len() >= 4 {
                     u32::from_be_bytes([comp_payload[0], comp_payload[1], comp_payload[2], comp_payload[3]]) as usize
                 } else { 0 };
-                Ok(QueryResult { columns, rows, affected_rows: affected })
+                Ok(QueryResult { columns, column_types: col_types, rows, affected_rows: affected })
             }
             MK_COMPLETE => {
                 let affected = if payload.len() >= 4 {
                     u32::from_be_bytes([payload[0], payload[1], payload[2], payload[3]]) as usize
                 } else { 0 };
-                Ok(QueryResult { columns: vec![], rows: vec![], affected_rows: affected })
+                Ok(QueryResult { columns: vec![], column_types: vec![], rows: vec![], affected_rows: affected })
             }
             MK_ERROR => Err("Query error".into()),
             _ => Err(format!("Unknown response kind: {}", kind).into()),
@@ -433,6 +444,7 @@ fn read_value(data: &[u8], pos: &mut usize) -> String {
             *pos += (dim * 4) as usize;
             format!("<vector:{}>", dim)
         }
+        FK_JSON => read_string(data, pos),
         _ => String::new(),
     }
 }

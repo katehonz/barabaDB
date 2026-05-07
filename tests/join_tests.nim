@@ -1,6 +1,7 @@
 import std/unittest
 import std/os
 import std/strutils
+import std/times
 import barabadb/core/types
 import barabadb/query/executor as qexec
 import barabadb/query/parser
@@ -14,9 +15,12 @@ proc execSql(ctx: qexec.ExecutionContext, sql: string): qexec.ExecResult =
 suite "JOIN execution":
   var db: LSMTree
   var ctx: qexec.ExecutionContext
+  var testDir: string
 
   setup:
-    db = newLSMTree("")
+    testDir = getTempDir() / "baradb_join_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix()
+    createDir(testDir)
+    db = newLSMTree(testDir)
     ctx = qexec.newExecutionContext(db)
     discard execSql(ctx, "CREATE TABLE users (id INT, name TEXT)")
     discard execSql(ctx, "CREATE TABLE orders (id INT, user_id INT, total REAL)")
@@ -27,7 +31,7 @@ suite "JOIN execution":
     discard execSql(ctx, "INSERT INTO orders (id, user_id, total) VALUES (30, 3, 150.0)")
 
   teardown:
-    discard
+    removeDir(testDir)
 
   test "INNER JOIN returns matching rows only":
     let r = execSql(ctx, "SELECT * FROM users u JOIN orders o ON u.id = o.user_id")

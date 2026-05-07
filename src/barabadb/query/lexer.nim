@@ -67,6 +67,7 @@ type
     tkCase
     tkWhen
     tkWith
+    tkRecursive
     tkDistinct
     tkUnion
     tkIntersect
@@ -231,6 +232,7 @@ const keywords*: Table[string, TokenKind] = {
   "case": tkCase,
   "when": tkWhen,
   "with": tkWith,
+  "recursive": tkRecursive,
   "distinct": tkDistinct,
   "union": tkUnion,
   "intersect": tkIntersect,

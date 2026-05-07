@@ -149,7 +149,7 @@ type
     case kind*: NodeKind
     of nkSelect:
       selDistinct*: bool
-      selWith*: seq[(string, Node)]
+      selWith*: seq[(string, Node, bool)]
       selResult*: seq[Node]
       selFrom*: Node
       selJoins*: seq[Node]
@@ -286,6 +286,7 @@ type
     of nkCreateIndex:
       ciTarget*: string
       ciName*: string
+      ciColumns*: seq[string]
       ciExpr*: Node
       ciKind*: IndexKind
     of nkDropIndex:
@@ -309,7 +310,7 @@ type
     of nkReturning:
       retExprs*: seq[Node]
     of nkWith:
-      withBindings*: seq[(string, Node)]
+      withBindings*: seq[(string, Node, bool)]
     of nkBinOp:
       binOp*: BinOpKind
       binLeft*: Node

@@ -27,6 +27,7 @@ type
     fkArray = 0x0A
     fkObject = 0x0B
     fkVector = 0x0C
+    fkJson = 0x0D
 
   MsgKind* = enum
     mkClientHandshake = 0x01
@@ -61,6 +62,7 @@ type
     of fkArray: arrayVal*: seq[WireValue]
     of fkObject: objVal*: seq[(string, WireValue)]
     of fkVector: vecVal*: seq[float32]
+    of fkJson: jsonVal*: string
 
 proc writeUint32(buf: var seq[byte], val: uint32) =
   var bytes: array[4, byte]
@@ -198,6 +200,8 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
       vec.add(fv)
       pos += 4
     result = WireValue(kind: fkVector, vecVal: vec)
+  of fkJson:
+    result = WireValue(kind: fkJson, jsonVal: readString(buf, pos))
   else:
     result = WireValue(kind: fkNull)
 
@@ -228,6 +232,7 @@ type
 
   QueryResult* = object
     columns*: seq[string]
+    columnTypes*: seq[string]
     rows*: seq[seq[string]]
     rowCount*: int
     affectedRows*: int
@@ -277,6 +282,7 @@ proc wireValueToString*(wv: WireValue): string =
   of fkArray: return "<array:" & $wv.arrayVal.len & ">"
   of fkObject: return "<object:" & $wv.objVal.len & ">"
   of fkVector: return "<vector:" & $wv.vecVal.len & ">"
+  of fkJson: return wv.jsonVal
 
 proc readQueryResponse(client: BaraClient): Future[QueryResult] {.async.} =
   let headerData = await client.socket.recv(12)
@@ -308,6 +314,11 @@ proc readQueryResponse(client: BaraClient): Future[QueryResult] {.async.} =
     for i in 0..<colCount:
       cols.add(readString(payload, dpos))
     result.columns = cols
+    var colTypes: seq[string] = @[]
+    for i in 0..<colCount:
+      colTypes.add($FieldKind(payload[dpos]))
+      inc dpos
+    result.columnTypes = colTypes
     let rowCount = int(readUint32(payload, dpos))
     for r in 0..<rowCount:
       var row: seq[string] = @[]

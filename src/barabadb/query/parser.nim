@@ -275,10 +275,15 @@ proc parseJoinType(p: var Parser): JoinKind =
   return jkInner
 
 proc parseWith(p: var Parser): Node =
-  # WITH name AS (select), name2 AS (select2) SELECT ...
+  # WITH [RECURSIVE] name AS (select), name2 AS (select2) SELECT ...
   let tok = p.expect(tkWith)
   result = Node(kind: nkWith, line: tok.line, col: tok.col)
   result.withBindings = @[]
+
+  var isRecursive = false
+  if p.peek().kind == tkRecursive:
+    discard p.advance()
+    isRecursive = true
 
   # Parse first CTE
   let cteName = p.expect(tkIdent).value
@@ -286,7 +291,7 @@ proc parseWith(p: var Parser): Node =
   discard p.expect(tkLParen)
   let cteQuery = p.parseSelect()
   discard p.expect(tkRParen)
-  result.withBindings.add((cteName, cteQuery))
+  result.withBindings.add((cteName, cteQuery, isRecursive))
 
   # Parse additional CTEs
   while p.match(tkComma):
@@ -295,7 +300,7 @@ proc parseWith(p: var Parser): Node =
     discard p.expect(tkLParen)
     let query = p.parseSelect()
     discard p.expect(tkRParen)
-    result.withBindings.add((name, query))
+    result.withBindings.add((name, query, isRecursive))
 
 proc parseSelect(p: var Parser): Node =
   # Handle WITH (CTE)
@@ -735,10 +740,13 @@ proc parseCreateIndex(p: var Parser): Node =
   discard p.match(tkOn)
   let tableName = p.expect(tkIdent).value
   discard p.match(tkLParen)
-  let colName = p.expect(tkIdent).value
+  var colNames: seq[string] = @[]
+  colNames.add(p.expect(tkIdent).value)
+  while p.match(tkComma):
+    colNames.add(p.expect(tkIdent).value)
   discard p.match(tkRParen)
   result = Node(kind: nkCreateIndex, ciName: idxName, ciTarget: tableName,
-                line: tok.line, col: tok.col)
+                ciColumns: colNames, line: tok.line, col: tok.col)
 
 proc parseBeginTxn(p: var Parser): Node =
   let tok = p.expect(tkBegin)

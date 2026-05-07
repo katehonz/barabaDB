@@ -2,6 +2,7 @@
 import std/asyncdispatch
 import std/asyncnet
 import std/strutils
+import std/sequtils
 import std/tables
 import std/os
 import std/endians
@@ -73,6 +74,19 @@ proc parseHeader(data: string): (bool, MessageHeader) =
 # Query Execution (pipeline-based)
 # ----------------------------------------------------------------------
 
+proc typeToFieldKind*(colType: string): FieldKind =
+  let t = colType.toUpper()
+  if t.startsWith("INT") or t == "SERIAL" or t == "BIGINT" or t == "SMALLINT" or t == "BIGSERIAL" or t == "SMALLSERIAL":
+    return fkInt64
+  elif t.startsWith("FLOAT") or t == "REAL" or t == "DOUBLE" or t == "NUMERIC":
+    return fkFloat64
+  elif t == "BOOLEAN" or t == "BOOL":
+    return fkBool
+  elif t == "JSON" or t == "JSONB":
+    return fkJson
+  else:
+    return fkString
+
 proc valueToWire(val: string, colType: string): WireValue =
   if val.len == 0 or val.toLower() == "null":
     return WireValue(kind: fkNull)
@@ -91,6 +105,8 @@ proc valueToWire(val: string, colType: string): WireValue =
       return WireValue(kind: fkBool, boolVal: true)
     elif lv in ["false", "f", "no", "0"]:
       return WireValue(kind: fkBool, boolVal: false)
+  elif t == "JSON" or t == "JSONB":
+    return WireValue(kind: fkJson, jsonVal: val)
   return WireValue(kind: fkString, strVal: val)
 
 proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[]): (bool, QueryResult, string) =
@@ -127,7 +143,7 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
       else:
         colTypes = newSeq[string](result.columns.len)
 
-      qr.columnTypes = newSeq[FieldKind](result.columns.len)
+      qr.columnTypes = colTypes.mapIt(typeToFieldKind(it))
       qr.rows = @[]
       for row in result.rows:
         var wireRow: seq[WireValue] = @[]
@@ -154,6 +170,9 @@ proc serializeResult(qr: QueryResult, requestId: uint32): seq[byte] =
   # Column names
   for col in qr.columns:
     payload.writeString(col)
+  # Column types metadata
+  for ct in qr.columnTypes:
+    payload.add(byte(ct))
   # Row count
   payload.writeUint32(uint32(qr.rows.len))
   # Rows

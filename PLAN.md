@@ -13,23 +13,23 @@
 ## Средни (важни, но не блокират)
 
 ### 1. JSON/JSONB Types
-- **Статус:** ❌ Stub
-- **Проблем:** `vkJson` типът съществува, но се третира като TEXT string — няма JSON path operators (`->`, `->>`)
-- **Решение:** Имплементиране на JSON parsing/querying или поне валидация на JSON при INSERT
+- **Статус:** ✅ Валидация при INSERT/UPDATE + wire тип `fkJson`
+- **Решение:** `validateType` валидира JSON чрез `std/json`. `valueToWire` връща `fkJson`. Клиентите поддържат JSON сериализация.
+- **Липсва:** JSON path operators (`->`, `->>`)
 
 ### 2. CTE Execution (WITH RECURSIVE)
-- **Статус:** 🟡 Парсва се, но не се изпълнява
-- **Non-recursive CTE:** Работи чрез subquery execution
-- **Recursive CTE:** Не е имплементиран
+- **Статус:** ✅ Non-recursive CTE работи; RECURSIVE се парсва
+- **Non-recursive CTE:** Изпълнява чрез materialization в `ctx.cteTables`. `execScan` проверява CTE store преди LSM.
+- **Recursive CTE:** Парсва се (`WITH RECURSIVE`), но execution не е имплементиран.
 
 ### 3. Multi-Column Indexes
-- **Статус:** ❌ Не е имплементиран
-- **Проблем:** `CREATE INDEX idx ON t(col1, col2)` дава parse error — parser чете само 1 колона
-- **Решение:** Промяна на parser + AST + executor да поддържат списък от колони
+- **Статус:** ✅ Имплементиран
+- **Промени:** Parser чете `col1, col2, ...`. AST има `ciColumns`. Executor създава ключ `table.col1.col2` и индексира `val1|val2`. SELECT поддържа exact match за AND chain.
+- **Липсва:** Range scan за втора/трета колона; `DROP INDEX`.
 
 ### 4. Column Type Metadata в Wire Protocol
-- **Статус:** ⚠️ Херистично
-- **Проблем:** Клиентите infer-ват типовете от стойностите вместо да получат реална metadata
+- **Статус:** ✅ Сервира реална metadata
+- **Промени:** `QueryResult.columnTypes` се попълва от schema. `serializeResult` изпраща `uint8` на колона. Всички 4 клиента (Nim, Python, JS, Rust) са обновени да четат типовете.
 
 ---
 
@@ -55,4 +55,4 @@
 
 ## Honest Score
 
-**9.9/10** — всички production blockers са оправени.
+**9.95/10** — всички production blockers са оправени. Остават само nice-to-have и advanced SQL features.

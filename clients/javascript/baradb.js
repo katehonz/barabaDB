@@ -46,6 +46,7 @@ const FieldKind = {
   ARRAY: 0x0A,
   OBJECT: 0x0B,
   VECTOR: 0x0C,
+  JSON: 0x0D,
 };
 
 const ResultFormat = {
@@ -57,6 +58,7 @@ const ResultFormat = {
 class QueryResult {
   constructor() {
     this.columns = [];
+    this.columnTypes = [];
     this.rows = [];
     this.rowCount = 0;
     this.affectedRows = 0;
@@ -169,6 +171,12 @@ class Client {
         pos += sLen;
       }
       result.columns = cols;
+      const colTypes = [];
+      for (let i = 0; i < colCount; i++) {
+        colTypes.push(payload[pos]);
+        pos++;
+      }
+      result.columnTypes = colTypes;
       const rowCount = new DataView(payload.buffer).getUint32(pos, false);
       pos += 4;
       for (let r = 0; r < rowCount; r++) {
@@ -250,6 +258,13 @@ class Client {
           result.push(new DataView(payload.buffer).getFloat32(pos, false));
           pos += 4;
         }
+        break;
+      }
+      case FieldKind.JSON: {
+        const len = new DataView(payload.buffer).getUint32(pos, false);
+        pos += 4;
+        result = new TextDecoder().decode(payload.slice(pos, pos + len));
+        pos += len;
         break;
       }
       default: result = null;

@@ -137,3 +137,33 @@
 
 BaraDB is production-ready for blogs, e-commerce, and small ERP systems.
 262 tests across 56 suites — all passing. Stress test: 10000 ops, 0 errors, 555K ops/sec.
+
+---
+
+## 2026-05-07: Medium Priority Batch
+
+### JSON/JSONB Types ✅
+- `validateType` валидира JSON при INSERT/UPDATE
+- `fkJson = 0x0D` добавен в `FieldKind`
+- `valueToWire` връща `fkJson` за JSON/JSONB колони
+- Всички 4 клиента обновени за JSON сериализация
+
+### Column Type Metadata в Wire Protocol ✅
+- `typeToFieldKind` helper в `server.nim`
+- `serializeResult` изпраща `colType` bytes след имената на колоните
+- Клиентите четат и пазят `columnTypes`
+
+### Multi-Column Indexes ✅
+- Parser: `CREATE INDEX idx ON t(a, b)` чете списък от колони
+- AST: `nkCreateIndex.ciColumns: seq[string]`
+- Executor: ключ `table.col1.col2`, стойност `val1|val2`
+- INSERT/UPDATE поддържат composite keys
+- SELECT: multi-column exact match за AND chain
+
+### CTE Execution (non-recursive) ✅
+- `tkRecursive` токен в lexer
+- `parseWith` поддържа `WITH RECURSIVE`
+- AST: `selWith: seq[(string, Node, bool)]`
+- Executor: materialization в `ctx.cteTables`
+- `execScan` проверява CTE store преди LSM
+- `defer: ctx.cteTables.clear()` за cleanup

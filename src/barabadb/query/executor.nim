@@ -8,6 +8,7 @@ import std/re
 import checksums/sha2
 import std/math
 import std/times
+import std/json
 import lexer as qlex
 import parser as qpar
 import ast
@@ -54,6 +55,7 @@ type
     tables*: Table[string, TableDef]
     btrees*: Table[string, BTreeIndex[string, IndexEntry]]
     views*: Table[string, Node]  # view name -> SELECT AST
+    cteTables*: Table[string, seq[Row]]  # CTE name -> rows
     txnManager*: TxnManager
     pendingTxn*: Transaction
     onChange*: proc(ev: ChangeEvent) {.closure.}
@@ -129,6 +131,7 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
   result = ExecutionContext(db: db, tables: initTable[string, TableDef](),
                    btrees: initTable[string, BTreeIndex[string, IndexEntry]](),
                    views: initTable[string, Node](),
+                   cteTables: initTable[string, seq[Row]](),
                    users: initTable[string, UserDef](),
                    policies: initTable[string, seq[PolicyDef]](),
                    currentUser: "", currentRole: "",
@@ -190,6 +193,7 @@ proc restoreSchema(ctx: ExecutionContext) =
 proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
   ExecutionContext(db: ctx.db, tables: ctx.tables,
                    btrees: ctx.btrees, views: ctx.views,
+                   cteTables: initTable[string, seq[Row]](),
                    users: ctx.users, policies: ctx.policies,
                    txnManager: ctx.txnManager,
                    currentUser: ctx.currentUser, currentRole: ctx.currentRole,
@@ -478,6 +482,9 @@ proc checkInsertPolicy(ctx: ExecutionContext, tableName: string, row: Row): bool
 
 proc execScan(ctx: ExecutionContext, table: string): seq[Row] =
   result = @[]
+  # Check CTE tables first
+  if table in ctx.cteTables:
+    return ctx.cteTables[table]
   let prefix = table & "."
   for entry in ctx.db.scanMemTable():
     if entry.deleted: continue
@@ -549,10 +556,14 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
 
     for colName in ctx.btrees.keys.toSeq():
       if colName.startsWith(table & "."):
-        let colOnly = colName[table.len + 1..^1]
-        let colVal = getValue(rowVals, fields, colOnly)
-        if colVal.len > 0 and not isNull(colVal):
-          ctx.btrees[colName].insert(colVal, IndexEntry(lsmKey: fullKey, rowValue: valStr))
+        let colsPart = colName[table.len + 1..^1]
+        let idxCols = colsPart.split(".")
+        var colVals: seq[string] = @[]
+        for c in idxCols:
+          colVals.add(getValue(rowVals, fields, c))
+        let idxVal = colVals.join("|")
+        if idxVal.len > 0 and not isNull(idxVal):
+          ctx.btrees[colName].insert(idxVal, IndexEntry(lsmKey: fullKey, rowValue: valStr))
 
     inc count
   return count
@@ -600,6 +611,25 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
   for col, val in parsed:
     parts.add(col & "=" & val)
   let newVal = parts.join(",")
+  # Update indexes: remove old, insert new
+  for colName in ctx.btrees.keys.toSeq():
+    if colName.startsWith(table & "."):
+      let colsPart = colName[table.len + 1..^1]
+      let idxCols = colsPart.split(".")
+      var oldVals: seq[string] = @[]
+      var newVals: seq[string] = @[]
+      for c in idxCols:
+        if c in oldRow:
+          oldVals.add(oldRow[c])
+        else:
+          oldVals.add("")
+        if c in parsed:
+          newVals.add(parsed[c])
+        else:
+          newVals.add("")
+      let newIdxVal = newVals.join("|")
+      if newIdxVal.len > 0 and not isNull(newIdxVal):
+        ctx.btrees[colName].insert(newIdxVal, IndexEntry(lsmKey: fullKey, rowValue: newVal))
   if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
     discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](newVal))
   else:
@@ -626,6 +656,11 @@ proc validateType*(colType: string, value: string): (bool, string) =
   elif t == "TIMESTAMP" or t == "DATE":
     if value.len < 8:  # minimal date check
       return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
+  elif t == "JSON" or t == "JSONB":
+    try:
+      discard parseJson(value)
+    except:
+      return (false, "Type mismatch: expected JSON but got '" & value & "'")
   return (true, "")
 
 proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
@@ -1319,6 +1354,23 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
   let stmt = boundAst.stmts[0]
   case stmt.kind
   of nkSelect:
+    defer:
+      ctx.cteTables.clear()
+    # Execute CTEs if present
+    if stmt.selWith.len > 0:
+      for (cteName, cteQuery, isRecursive) in stmt.selWith:
+        if isRecursive:
+          # Recursive CTE: not yet fully implemented
+          ctx.cteTables[cteName] = @[]
+        else:
+          var inner = Node(kind: nkStatementList, stmts: @[])
+          inner.stmts.add(cteQuery)
+          let cteRes = executeQuery(ctx, inner)
+          var cteRows: seq[Row] = @[]
+          for row in cteRes.rows:
+            cteRows.add(row)
+          ctx.cteTables[cteName] = cteRows
+
     # Expand view if FROM table is a view
     if stmt.selFrom != nil and stmt.selFrom.fromTable in ctx.views:
       let viewQuery = ctx.views[stmt.selFrom.fromTable]
@@ -1365,6 +1417,35 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     if stmt.selFrom != nil and stmt.selFrom.fromTable.len > 0:
       if stmt.selWhere != nil and stmt.selWhere.whereExpr != nil:
         let w = stmt.selWhere.whereExpr
+        # Multi-column exact match: AND chain of =
+        var eqConds: seq[(string, string)] = @[]
+        proc collectEq(node: Node) =
+          if node.kind == nkBinOp and node.binOp == bkEq and node.binLeft.kind == nkIdent and node.binRight.kind == nkStringLit:
+            eqConds.add((node.binLeft.identName, node.binRight.strVal))
+          elif node.kind == nkBinOp and node.binOp == bkAnd:
+            collectEq(node.binLeft)
+            collectEq(node.binRight)
+        collectEq(w)
+        if eqConds.len >= 2:
+          var idxCols: seq[string] = @[]
+          for c in eqConds: idxCols.add(c[0])
+          let idxName = stmt.selFrom.fromTable & "." & idxCols.join(".")
+          if idxName in ctx.btrees:
+            var idxVals: seq[string] = @[]
+            for c in eqConds: idxVals.add(c[1])
+            let idxVal = idxVals.join("|")
+            let entries = ctx.btrees[idxName].get(idxVal)
+            if entries.len > 0:
+              var rows: seq[Row] = @[]
+              for entry in entries:
+                let (found, val) = ctx.db.get(entry.lsmKey)
+                if found:
+                  rows.add(parseRowData(cast[string](val)))
+              let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
+              var cols: seq[string] = @[]
+              for c in tbl.columns: cols.add(c.name)
+              if cols.len == 0: cols = @["key", "value"]
+              return okResult(rows, cols)
         if w.kind == nkBinOp and w.binOp == bkEq:
           if w.binLeft.kind == nkIdent and w.binRight.kind == nkStringLit:
             let colName = w.binLeft.identName
@@ -1905,19 +1986,24 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     return okResult(msg=msg)
 
   of nkCreateIndex:
-    let idxName = if stmt.ciName.len > 0: stmt.ciName
-                  else: stmt.ciTarget & "." & stmt.ciTarget
-    let key = stmt.ciTarget & "." & stmt.ciTarget
-    ctx.btrees[key] = newBTreeIndex[string, IndexEntry]()
+    var colKey = stmt.ciTarget
+    for col in stmt.ciColumns:
+      colKey = colKey & "." & col
+    let idxName = if stmt.ciName.len > 0: stmt.ciName else: colKey
+    ctx.btrees[colKey] = newBTreeIndex[string, IndexEntry]()
     # Populate index from existing data
     let rows = execScan(ctx, stmt.ciTarget)
     for row in rows:
-      if "$key" in row:
-        let val = row["$key"]
-        let eqPos = val.find('=')
-        if eqPos >= 0:
-          let colVal = val[eqPos+1..^1]
-          ctx.btrees[key].insert(colVal, IndexEntry(lsmKey: stmt.ciTarget & "." & val, rowValue: ""))
+      var colVals: seq[string] = @[]
+      for col in stmt.ciColumns:
+        if col in row:
+          colVals.add(row[col])
+        else:
+          colVals.add("")
+      let idxVal = colVals.join("|")
+      if idxVal.len > 0 and not isNull(idxVal):
+        let lsmKey = if "$key" in row: stmt.ciTarget & "." & row["$key"] else: ""
+        ctx.btrees[colKey].insert(idxVal, IndexEntry(lsmKey: lsmKey, rowValue: ""))
     return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget)
 
   of nkCreateUser:

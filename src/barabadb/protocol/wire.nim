@@ -44,6 +44,7 @@ type
     fkArray = 0x0A
     fkObject = 0x0B
     fkVector = 0x0C
+    fkJson = 0x0D
 
   MessageHeader* = object
     kind*: MsgKind
@@ -79,6 +80,7 @@ type
     of fkArray: arrayVal*: seq[WireValue]
     of fkObject: objVal*: seq[(string, WireValue)]
     of fkVector: vecVal*: seq[float32]
+    of fkJson: jsonVal*: string
 
   QueryResult* = object
     columns*: seq[string]
@@ -175,6 +177,8 @@ proc serializeValue*(buf: var seq[byte], val: WireValue) =
       var bytes: array[4, byte]
       copyMem(addr bytes, unsafeAddr fl, 4)
       buf.add(bytes)
+  of fkJson:
+    buf.writeString(val.jsonVal)
 
 proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
   let kind = FieldKind(buf[pos])
@@ -241,6 +245,8 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
       pos += 4
       vec.add(fl)
     result = WireValue(kind: fkVector, vecVal: vec)
+  of fkJson:
+    result = WireValue(kind: fkJson, jsonVal: readString(buf, pos))
 
 proc serializeMessage*(msg: WireMessage): seq[byte] =
   result = @[]

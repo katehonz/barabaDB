@@ -4,6 +4,8 @@ import std/tables
 import std/strutils
 import std/os
 import std/asyncdispatch
+import std/times
+import std/random
 
 import barabadb/core/types
 import barabadb/core/mvcc
@@ -912,10 +914,12 @@ suite "BaraQL Parser — Extended":
     let ast = parse("WITH active AS (SELECT * FROM users WHERE active = true) SELECT * FROM active")
     check ast.stmts[0].selWith.len == 1
     check ast.stmts[0].selWith[0][0] == "active"
+    check ast.stmts[0].selWith[0][2] == false
 
   test "Parse multiple CTEs":
     let ast = parse("WITH a AS (SELECT id FROM t1), b AS (SELECT id FROM t2) SELECT * FROM a")
     check ast.stmts[0].selWith.len == 2
+    check ast.stmts[0].selWith[0][2] == false
 
   test "Parse aggregate functions in SELECT":
     let ast = parse("SELECT count(*), sum(amount), avg(price), min(age), max(score) FROM orders")
@@ -2105,7 +2109,9 @@ suite "Row-Level Security":
     check ast.stmts[0].drlsTable == "accounts"
 
   test "RLS filter on SELECT":
-    var db = newLSMTree("")
+    var testDir = getTempDir() / "baradb_rls_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    createDir(testDir)
+    var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
     # Create table and insert data
     discard qexec.executeQuery(ctx, parse("CREATE TABLE docs (id INTEGER, owner TEXT)"))
@@ -2127,7 +2133,9 @@ suite "Row-Level Security":
     check res.rows[0]["owner"] == "alice"
 
   test "RLS superuser bypass":
-    var db = newLSMTree("")
+    var testDir = getTempDir() / "baradb_rls_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    createDir(testDir)
+    var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE TABLE docs (id INTEGER, owner TEXT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO docs (id, owner) VALUES (1, 'alice')"))
@@ -2240,7 +2248,9 @@ suite "Enhanced Migrations":
     check ast.stmts[0].mdrName == "add_users"
 
   test "Create and apply migration with checksum":
-    var db = newLSMTree("")
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    createDir(testDir)
+    var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
     # Create migration
     let createRes = qexec.executeQuery(ctx, parse("CREATE MIGRATION add_users { UP: CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT); DOWN: DROP TABLE users; }"))
@@ -2259,7 +2269,9 @@ suite "Enhanced Migrations":
     check reapplyRes.message.contains("already applied")
 
   test "Migration STATUS shows applied migrations":
-    var db = newLSMTree("")
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    createDir(testDir)
+    var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE MIGRATION m1 { UP: CREATE TABLE t1 (id INTEGER); }"))
     discard qexec.executeQuery(ctx, parse("CREATE MIGRATION m2 { UP: CREATE TABLE t2 (id INTEGER); }"))
@@ -2271,7 +2283,9 @@ suite "Enhanced Migrations":
     check statusRes.rows[1]["status"] == "pending"
 
   test "Migration UP applies all pending":
-    var db = newLSMTree("")
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    createDir(testDir)
+    var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE MIGRATION m1 { UP: CREATE TABLE t1 (id INTEGER); }"))
     discard qexec.executeQuery(ctx, parse("CREATE MIGRATION m2 { UP: CREATE TABLE t2 (id INTEGER); }"))
@@ -2280,7 +2294,9 @@ suite "Enhanced Migrations":
     check upRes.message.contains("Applied 2 migrations")
 
   test "Migration DOWN rollback":
-    var db = newLSMTree("")
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    createDir(testDir)
+    var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE MIGRATION add_t { UP: CREATE TABLE t (id INTEGER); DOWN: DROP TABLE t; }"))
     discard qexec.executeQuery(ctx, parse("APPLY MIGRATION add_t"))
@@ -2293,7 +2309,9 @@ suite "Enhanced Migrations":
     check tableRes.rows.len == 0  # table does not exist
 
   test "Migration DRYRUN":
-    var db = newLSMTree("")
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    createDir(testDir)
+    var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE MIGRATION add_t { UP: CREATE TABLE t (id INTEGER); CREATE INDEX idx ON t(id); DOWN: DROP TABLE t; }"))
     let dryRes = qexec.executeQuery(ctx, parse("MIGRATION DRYRUN add_t"))
@@ -2347,6 +2365,39 @@ suite "Parameterized queries":
     check r.success
     check r.rows.len == 1
     check r.rows[0]["name"] == "Alice"
+
+  test "JSON type validation":
+    let createTbl = parse("CREATE TABLE json_test (id INT PRIMARY KEY, data JSON)")
+    discard qexec.executeQuery(ctx, createTbl)
+    let valid = parse("INSERT INTO json_test (id, data) VALUES (1, '{\"key\": \"value\"}')")
+    let r1 = qexec.executeQuery(ctx, valid)
+    check r1.success
+    let invalid = parse("INSERT INTO json_test (id, data) VALUES (2, 'not json')")
+    let r2 = qexec.executeQuery(ctx, invalid)
+    check not r2.success
+    check r2.message.contains("JSON")
+
+  test "Multi-column index parse and create":
+    let ast = parse("CREATE INDEX idx_mc ON users (name, age)")
+    check ast.stmts[0].kind == nkCreateIndex
+    check ast.stmts[0].ciColumns.len == 2
+    check ast.stmts[0].ciColumns[0] == "name"
+    check ast.stmts[0].ciColumns[1] == "age"
+    let r = qexec.executeQuery(ctx, ast)
+    check r.success
+    check r.message.contains("CREATE INDEX")
+
+  test "CTE non-recursive execution":
+    let ast = parse("WITH active AS (SELECT * FROM users WHERE active = true) SELECT * FROM active")
+    let r = qexec.executeQuery(ctx, ast)
+    check r.success
+    check r.rows.len >= 1
+
+  test "CTE recursive parse":
+    let ast = parse("WITH RECURSIVE nums AS (SELECT 1 AS n) SELECT * FROM nums")
+    check ast.stmts[0].selWith.len == 1
+    check ast.stmts[0].selWith[0][0] == "nums"
+    check ast.stmts[0].selWith[0][2] == true
 
 # JOIN tests
 include "join_tests"

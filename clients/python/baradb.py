@@ -37,6 +37,7 @@ class FieldKind:
     ARRAY = 0x0A
     OBJECT = 0x0B
     VECTOR = 0x0C
+    JSON = 0x0D
 
 
 class MsgKind:
@@ -88,6 +89,7 @@ class WireValue:
 class QueryResult:
     def __init__(self):
         self.columns: list[str] = []
+        self.column_types: list[str] = []
         self.rows: list[list[Any]] = []
         self.row_count: int = 0
         self.affected_rows: int = 0
@@ -176,7 +178,12 @@ class Client:
                     val = self._deserialize_value(data, pos)
                     row.append(val)
                 rows.append(row)
+            col_types = []
+            for _ in range(col_count):
+                col_types.append(hex(data[pos[0]]))
+                pos[0] += 1
             result.columns = cols
+            result.column_types = col_types
             result.rows = rows
             result.row_count = row_count
             # Read following COMPLETE message
@@ -281,6 +288,8 @@ class Client:
                 vec.append(struct.unpack(">f", data[pos[0]:pos[0]+4])[0])
                 pos[0] += 4
             return vec
+        elif kind == FieldKind.JSON:
+            return self._read_string(data, pos)
         return None
 
     def __enter__(self):
