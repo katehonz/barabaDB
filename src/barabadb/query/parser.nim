@@ -776,8 +776,13 @@ proc parseCreateIndex(p: var Parser): Node =
   while p.match(tkComma):
     colNames.add(p.expect(tkIdent).value)
   discard p.match(tkRParen)
+  var idxKind = ikBTree
+  if p.match(tkUsing):
+    let idxMethod = p.expect(tkIdent).value.toLower()
+    if idxMethod == "fts" or idxMethod == "fulltext":
+      idxKind = ikFullText
   result = Node(kind: nkCreateIndex, ciName: idxName, ciTarget: tableName,
-                ciColumns: colNames, line: tok.line, col: tok.col)
+                ciColumns: colNames, ciKind: idxKind, line: tok.line, col: tok.col)
 
 proc parseBeginTxn(p: var Parser): Node =
   let tok = p.expect(tkBegin)

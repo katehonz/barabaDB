@@ -2467,5 +2467,19 @@ suite "Parameterized queries":
     let r = qexec.executeQuery(ctx, parse("RECOVER TO TIMESTAMP '2026-12-31T23:59:59'"))
     check r.success
 
+  test "FTS index creation USING FTS":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE IF NOT EXISTS fts_test (id INT PRIMARY KEY, body TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO fts_test (id, body) VALUES (1, 'the quick brown fox jumps')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO fts_test (id, body) VALUES (2, 'lazy dog sleeps all day')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO fts_test (id, body) VALUES (3, 'quick brown dog plays fetch')"))
+    let r = qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts_body ON fts_test(body) USING FTS"))
+    check r.success
+    check r.message.contains("USING FTS")
+
+  test "FTS index @@ uses BM25":
+    let r = qexec.executeQuery(ctx, parse("SELECT id FROM fts_test WHERE body @@ 'quick brown'"))
+    check r.success
+    check r.rows.len >= 2
+
 # JOIN tests
 include "join_tests"

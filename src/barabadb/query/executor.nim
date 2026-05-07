@@ -407,7 +407,7 @@ proc parseRowData(valStr: string): Table[string, string] =
       let v = part[eqPos+1..^1].strip()
       result[k] = v
 
-proc evalExpr*(expr: IRExpr, row: Table[string, string]): string =
+proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string =
   if expr == nil: return ""
   case expr.kind
   of irekLiteral:
@@ -544,10 +544,34 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string]): string =
       except: discard
       return if left != right: "true" else: "false"
     of irFtsMatch:
-      # Simple full-text search: case-insensitive phrase containment
+      # Check for FTS index via ctx
+      if ctx != nil and expr.binLeft.kind == irekField and expr.binLeft.fieldPath.len > 0:
+        let colName = expr.binLeft.fieldPath[^1]
+        # Find FTS index for this column (search by column name suffix)
+        var ftsIdx: fts.InvertedIndex = nil
+        var ftsKey = ""
+        for key, idx in ctx.ftsIndexes:
+          if key.endsWith("." & colName):
+            ftsIdx = idx
+            ftsKey = key
+            break
+        if ftsIdx != nil:
+          let results = ftsIdx.search(right, limit = 10000)
+          # Get the row's document key to check if it's in results
+          let rowKey = if "$key" in row: row["$key"] else: ""
+          let tableName = ftsKey[0..<ftsKey.rfind('.')]
+          let docKey = tableName & "." & rowKey
+          # Assign docId from key hash
+          var docId: uint64 = 0
+          for ch in docKey:
+            docId = docId * 31 + uint64(ord(ch))
+          for r in results:
+            if r.docId == docId:
+              return "true"
+          return "false"
+      # Fallback: case-insensitive phrase containment
       let colVal = left.toLower()
       let query = right.toLower()
-      # Split query into terms and check each term is in column
       let terms = query.split()
       for term in terms:
         if term.len > 0 and term notin colVal:
@@ -708,6 +732,17 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
         if idxVal.len > 0 and not isNull(idxVal):
           ctx.btrees[colName].insert(idxVal, IndexEntry(lsmKey: fullKey, rowValue: valStr))
 
+    # Update FTS indexes
+    for ftsKey, ftsIdx in ctx.ftsIndexes:
+      if ftsKey.startsWith(table & "."):
+        let colName = ftsKey[table.len + 1..^1]
+        let text = getValue(rowVals, fields, colName)
+        if text.len > 0:
+          var docId: uint64 = 0
+          for ch in fullKey:
+            docId = docId * 31 + uint64(ord(ch))
+          ftsIdx.addDocument(docId, text)
+
     inc count
   return count
 
@@ -728,6 +763,13 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string): int =
       discard ctx.txnManager.delete(ctx.pendingTxn, fullKey)
     else:
       ctx.db.delete(fullKey)
+    # Update FTS indexes
+    for ftsKey, ftsIdx in ctx.ftsIndexes:
+      if ftsKey.startsWith(table & "."):
+        var docId: uint64 = 0
+        for ch in fullKey:
+          docId = docId * 31 + uint64(ord(ch))
+        ftsIdx.removeDocument(docId)
     return 1
   return 0
 
@@ -777,6 +819,17 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
     discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](newVal))
   else:
     ctx.db.put(fullKey, cast[seq[byte]](newVal))
+  # Update FTS indexes: remove old doc, add new
+  for ftsKey, ftsIdx in ctx.ftsIndexes:
+    if ftsKey.startsWith(table & "."):
+      var docId: uint64 = 0
+      for ch in fullKey:
+        docId = docId * 31 + uint64(ord(ch))
+      ftsIdx.removeDocument(docId)
+      let colName = ftsKey[table.len + 1..^1]
+      let newText = if colName in parsed: parsed[colName] else: ""
+      if newText.len > 0:
+        ftsIdx.addDocument(docId, newText)
   return 1
 
 # ----------------------------------------------------------------------
@@ -1123,7 +1176,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     if plan.filterCond == nil: return sourceRows
     result = @[]
     for row in sourceRows:
-      let evalResult = evalExpr(plan.filterCond, row)
+      let evalResult = evalExpr(plan.filterCond, row, ctx)
       if evalResult == "true":
         result.add(row)
 
@@ -2338,6 +2391,22 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     for col in stmt.ciColumns:
       colKey = colKey & "." & col
     let idxName = if stmt.ciName.len > 0: stmt.ciName else: colKey
+
+    if stmt.ciKind == ikFullText:
+      # Full-text search index
+      var ftsIdx = fts.newInvertedIndex()
+      let rows = execScan(ctx, stmt.ciTarget)
+      var docId: uint64 = 0
+      for row in rows:
+        for col in stmt.ciColumns:
+          let text = if col in row: row[col] else: ""
+          if text.len > 0:
+            ftsIdx.addDocument(docId, text)
+        let lsmKey = if "$key" in row: row["$key"] else: ""
+        docId += 1
+      ctx.ftsIndexes[colKey] = ftsIdx
+      return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING FTS")
+
     ctx.btrees[colKey] = newBTreeIndex[string, IndexEntry]()
     # Populate index from existing data
     let rows = execScan(ctx, stmt.ciTarget)

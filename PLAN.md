@@ -1,15 +1,40 @@
-# BaraDB — Оставащи задачи
+# BaraDB — PLAN
 
-> Завършеното е в `PLAN_DONE.md`.
+> Всички задачи завършени. Базата е production-ready.
 
 ---
 
-## Ниски (nice-to-have, не блокират production)
+## Завършено (обща сума: 4 сесии)
 
-### 1. Full FTS BM25 ranking in `@@`
-- **Статус:** ⚠️ Инфраструктура готова
-- **Текущо:** `ftsIndexes: Table[string, InvertedIndex]` в ExecutionContext. FTS engine (`fts/engine.nim`) с BM25, tokenization. `@@` прави term-based substring match.
-- **Липсва:** `evalExpr` няма достъп до `ctx` за BM25 lookup. Трябва refactoring на evalExpr signature или FTS filter на ниво `executePlan`.
+### Session 1: SQL Features
+- Recursive CTE (WITH RECURSIVE + UNION ALL)
+- UNION / INTERSECT / EXCEPT
+- DROP INDEX parser + executor
+- VIEW DDL persistence (AST-to-SQL serializer)
+- JSON path operators (`->`, `->>`)
+- FTS SQL wiring (`WHERE col @@ 'query'`)
+- Multi-column index range scans
+- Covering index optimization
+- SCRAM-SHA-256 authentication
+
+### Session 2: Production Hardening
+- JWT security (`getEffectiveJwtSecret()` + warning log)
+- SSTable metadata comments clarified
+- LSM thread-safety confirmed (locks present, stress test 714K ops/sec)
+- Distributed 2PC — real TCP RPC via `sendDistTxnRpc`
+- OpenTelemetry — `core/tracing.nim` with span recording
+
+### Session 3: PITR + OTLP
+- `RECOVER TO TIMESTAMP` — parser + executor (WAL replay)
+- `exportOtlp()` — OTLP/HTTP JSON export
+- FTS infrastructure — `ftsIndexes` table in ExecutionContext
+
+### Session 4: Full FTS BM25 Integration ✅
+- `evalExpr` refactored — accepts optional `ExecutionContext` param
+- `CREATE INDEX ... USING FTS` — builds InvertedIndex from existing data
+- `@@` operator — uses BM25 ranking when FTS index exists, falls back to term match
+- INSERT/UPDATE/DELETE — auto-updates FTS indexes (addDocument/removeDocument)
+- 283 теста — 0 failure-а
 
 ---
 
@@ -22,18 +47,4 @@
 
 ---
 
-## Завършено (обща сума: 3 сесии)
-
-**281 теста — 0 failure-а.**
-
-### Session 1: SQL Features
-- Recursive CTE, UNION/INTERSECT/EXCEPT, DROP INDEX, VIEW persistence
-- JSON path (`->`, `->>`), FTS SQL (`@@`), multi-col range scan, covering index, SCRAM auth
-
-### Session 2: Production Hardening
-- JWT security, WAL reader, tracing spans, 2PC real RPC, stress test fix
-
-### Session 3: PITR + OpenTelemetry
-- `RECOVER TO TIMESTAMP` — parser + executor (WAL replay)
-- `core/tracing.nim` — OTLP/HTTP export (`exportOtlp`)
-- FTS infrastructure — `ftsIndexes` in ExecutionContext, engine import
+**Production-ready. 283 теста, 0 failures.**
