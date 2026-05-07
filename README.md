@@ -4,6 +4,8 @@
 
 **A multimodal database engine written in Nim — 100% native, zero dependencies.**
 
+[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](baradadb.nimble)
+
 BaraDB combines document, graph, vector, columnar, and full-text search storage
 in a single engine with a unified query language (BaraQL). It compiles to a
 single 3.3MB binary with no runtime dependencies.
