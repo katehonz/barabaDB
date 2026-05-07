@@ -55,8 +55,8 @@
 |---|--------|----------------|-----------|
 | FV-1 | ~~Raft: prevLogIndex/prevLogTerm в Replicate~~ ✅ | TLA+ моделът вече проверява prevLogIndex/prevLogTerm, възстановена е `LogMatching` инвариантата, добавено е `RejectAppendEntries` и conflict truncation. | `formal-verification/raft.tla` |
 | FV-2 | **Raft: Leader step-down при partition** | Няма `HeartbeatTimeout` или `LeaderLeaseExpired` — моделът не проверява дали leader се отказва при network partition. | `formal-verification/raft.tla` |
-| FV-3 | **2PC: Coordinator crash/recovery** | Спекът не моделира coordinator crash + WAL replay. При реален crash, participant-ите в `Prepared` остават блокирани завинаги. | `formal-verification/twopc.tla` |
-| FV-4 | **2PC: Participant timeout** | Липсва `ParticipantTimeout(t,p)` — participant трябва самостоятелно да abort-ва при липса на решение от coordinator. | `formal-verification/twopc.tla` |
+| FV-3 | ~~2PC: Coordinator crash/recovery~~ ✅ | Добавени `coordinatorLog`, `CrashCoordinator`, `RecoverCoordinator`. Coordinator записва решението в persistent log преди изпращане. | `formal-verification/twopc.tla` |
+| FV-4 | ~~2PC: Participant timeout~~ ✅ | `ParticipantTimeout` позволява abort само ако coordinator е crashed и НЕ е записал решение (`coordinatorLog = Nil`). | `formal-verification/twopc.tla` |
 
 ### 🟡 Важни (нови свойства и покритие)
 

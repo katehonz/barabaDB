@@ -9,6 +9,7 @@
     - CoordinatorConsistency  : once decided, the coordinator never changes decision.
     - NoDecideWithoutConsensus: coordinator only decides when all votes are collected.
     - ParticipantStateValid   : participant state transitions are valid.
+    - RecoveryConsistency     : after coordinator crash+recovery, decision is unchanged.
 *)
 
 EXTENDS Integers, Sequences, FiniteSets, TLC
@@ -24,9 +25,11 @@ VARIABLES
                   \*                "Committed","Aborting","Aborted"}
   participantState, \* participantState[t][p] ∈ {"Active","Prepared","Committed","Aborted"}
   coordinatorDecided, \* coordinatorDecided[t] ∈ {TRUE, FALSE}
-  decidedAction     \* decidedAction[t] ∈ {"Commit","Abort", Nil}
+  decidedAction,     \* decidedAction[t] ∈ {"Commit","Abort", Nil}
+  coordinatorLog,   \* coordinatorLog[t] ∈ {"Commit","Abort", Nil} — persistent WAL
+  coordinatorAlive  \* coordinatorAlive[t] ∈ BOOLEAN
 
-vars == <<txnState, participantState, coordinatorDecided, decidedAction>>
+vars == <<txnState, participantState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
 
 -----------------------------------------------------------------------------
 
@@ -38,6 +41,9 @@ AllPrepared(t) ==
 AnyPrepareFailed(t) ==
   \E p \in Participants : participantState[t][p] = "Aborted"
 
+AllResponded(t) ==
+  \A p \in Participants : participantState[t][p] /= "Active"
+
 -----------------------------------------------------------------------------
 \* Initial state
 
@@ -46,48 +52,56 @@ Init ==
   /\ participantState = [t \in 1..MaxTxnId |-> [p \in Participants |-> "Active"]]
   /\ coordinatorDecided = [t \in 1..MaxTxnId |-> FALSE]
   /\ decidedAction = [t \in 1..MaxTxnId |-> Nil]
+  /\ coordinatorLog = [t \in 1..MaxTxnId |-> Nil]
+  /\ coordinatorAlive = [t \in 1..MaxTxnId |-> TRUE]
 
 -----------------------------------------------------------------------------
 \* State transitions
 
 \* Phase 1a: Coordinator sends PREPARE to all participants.
 SendPrepare(t) ==
+  /\ coordinatorAlive[t]
   /\ txnState[t] = "Active"
   /\ txnState' = [txnState EXCEPT ![t] = "Preparing"]
-  /\ UNCHANGED <<participantState, coordinatorDecided, decidedAction>>
+  /\ UNCHANGED <<participantState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
 
 \* Phase 1b: Participant p receives PREPARE and votes Yes.
 ParticipantPrepare(t, p) ==
   /\ txnState[t] = "Preparing"
   /\ participantState[t][p] = "Active"
   /\ participantState' = [participantState EXCEPT ![t][p] = "Prepared"]
-  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction>>
+  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
 
 \* Phase 1c: Participant p votes No (aborts locally).
 ParticipantAbort(t, p) ==
   /\ txnState[t] \in {"Preparing", "Active"}
   /\ participantState[t][p] = "Active"
   /\ participantState' = [participantState EXCEPT ![t][p] = "Aborted"]
-  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction>>
+  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
 
 \* Phase 2a: Coordinator decides COMMIT (all voted Yes).
+\* The decision is first persisted to coordinatorLog before being sent.
 DecideCommit(t) ==
+  /\ coordinatorAlive[t]
   /\ txnState[t] = "Preparing"
   /\ AllPrepared(t)
   /\ ~AnyPrepareFailed(t)
   /\ txnState' = [txnState EXCEPT ![t] = "Committing"]
   /\ coordinatorDecided' = [coordinatorDecided EXCEPT ![t] = TRUE]
   /\ decidedAction' = [decidedAction EXCEPT ![t] = "Commit"]
-  /\ UNCHANGED <<participantState>>
+  /\ coordinatorLog' = [coordinatorLog EXCEPT ![t] = "Commit"]
+  /\ UNCHANGED <<participantState, coordinatorAlive>>
 
 \* Phase 2a-alt: Coordinator decides ABORT (at least one No or timeout).
 DecideAbort(t) ==
+  /\ coordinatorAlive[t]
   /\ txnState[t] = "Preparing"
   /\ AnyPrepareFailed(t)
   /\ txnState' = [txnState EXCEPT ![t] = "Aborting"]
   /\ coordinatorDecided' = [coordinatorDecided EXCEPT ![t] = TRUE]
   /\ decidedAction' = [decidedAction EXCEPT ![t] = "Abort"]
-  /\ UNCHANGED <<participantState>>
+  /\ coordinatorLog' = [coordinatorLog EXCEPT ![t] = "Abort"]
+  /\ UNCHANGED <<participantState, coordinatorAlive>>
 
 \* Phase 2b: Participant receives COMMIT decision.
 ReceiveCommit(t, p) ==
@@ -95,7 +109,7 @@ ReceiveCommit(t, p) ==
   /\ decidedAction[t] = "Commit"
   /\ participantState[t][p] \in {"Prepared", "Active"}
   /\ participantState' = [participantState EXCEPT ![t][p] = "Committed"]
-  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction>>
+  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
 
 \* Phase 2b-alt: Participant receives ABORT decision.
 ReceiveAbort(t, p) ==
@@ -103,20 +117,44 @@ ReceiveAbort(t, p) ==
   /\ decidedAction[t] = "Abort"
   /\ participantState[t][p] \in {"Prepared", "Active", "Aborted"}
   /\ participantState' = [participantState EXCEPT ![t][p] = "Aborted"]
-  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction>>
+  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
 
 \* Finalize: transaction moves to terminal state when all participants are done.
 FinalizeCommit(t) ==
   /\ txnState[t] = "Committing"
   /\ \A p \in Participants : participantState[t][p] = "Committed"
   /\ txnState' = [txnState EXCEPT ![t] = "Committed"]
-  /\ UNCHANGED <<participantState, coordinatorDecided, decidedAction>>
+  /\ UNCHANGED <<participantState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
 
 FinalizeAbort(t) ==
   /\ txnState[t] = "Aborting"
   /\ \A p \in Participants : participantState[t][p] = "Aborted"
   /\ txnState' = [txnState EXCEPT ![t] = "Aborted"]
-  /\ UNCHANGED <<participantState, coordinatorDecided, decidedAction>>
+  /\ UNCHANGED <<participantState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
+
+\* Coordinator crashes after deciding but possibly before all participants are informed.
+CrashCoordinator(t) ==
+  /\ coordinatorAlive[t]
+  /\ coordinatorAlive' = [coordinatorAlive EXCEPT ![t] = FALSE]
+  /\ UNCHANGED <<txnState, participantState, coordinatorDecided, decidedAction, coordinatorLog>>
+
+\* Coordinator recovers from crash and reads its decision from the persistent log.
+RecoverCoordinator(t) ==
+  /\ ~coordinatorAlive[t]
+  /\ coordinatorAlive' = [coordinatorAlive EXCEPT ![t] = TRUE]
+  /\ coordinatorDecided' = [coordinatorDecided EXCEPT ![t] = coordinatorLog[t] /= Nil]
+  /\ decidedAction' = [decidedAction EXCEPT ![t] = coordinatorLog[t]]
+  /\ UNCHANGED <<txnState, participantState, coordinatorLog>>
+
+\* Participant p times out waiting for the coordinator decision and aborts.
+\* This can only happen if the coordinator crashed BEFORE deciding (coordinatorLog = Nil).
+\* If the coordinator already decided, the participant must wait for recovery.
+ParticipantTimeout(t, p) ==
+  /\ participantState[t][p] = "Prepared"
+  /\ ~coordinatorAlive[t]
+  /\ coordinatorLog[t] = Nil
+  /\ participantState' = [participantState EXCEPT ![t][p] = "Aborted"]
+  /\ UNCHANGED <<txnState, coordinatorDecided, decidedAction, coordinatorLog, coordinatorAlive>>
 
 -----------------------------------------------------------------------------
 \* Next-state relation
@@ -131,6 +169,9 @@ Next ==
   \/ \E t \in 1..MaxTxnId : \E p \in Participants : ReceiveAbort(t, p)
   \/ \E t \in 1..MaxTxnId : FinalizeCommit(t)
   \/ \E t \in 1..MaxTxnId : FinalizeAbort(t)
+  \/ \E t \in 1..MaxTxnId : CrashCoordinator(t)
+  \/ \E t \in 1..MaxTxnId : RecoverCoordinator(t)
+  \/ \E t \in 1..MaxTxnId : \E p \in Participants : ParticipantTimeout(t, p)
 
 -----------------------------------------------------------------------------
 \* Safety properties
@@ -166,6 +207,11 @@ ParticipantStateValid ==
       (participantState[t][p] = "Committed" => decidedAction[t] = "Commit")
       /\ (participantState[t][p] = "Aborted" /\ decidedAction[t] /= Nil => decidedAction[t] = "Abort")
 
+\* RecoveryConsistency: if the coordinator has a logged decision, recovery restores it exactly.
+RecoveryConsistency ==
+  \A t \in 1..MaxTxnId :
+    coordinatorLog[t] /= Nil => decidedAction[t] = coordinatorLog[t]
+
 \* Type invariant
 TypeOk ==
   /\ txnState \in [1..MaxTxnId -> {"Active","Preparing","Prepared","Committing",
@@ -174,5 +220,7 @@ TypeOk ==
                                                               "Committed","Aborted"}]]
   /\ coordinatorDecided \in [1..MaxTxnId -> BOOLEAN]
   /\ decidedAction \in [1..MaxTxnId -> {"Commit","Abort", Nil}]
+  /\ coordinatorLog \in [1..MaxTxnId -> {"Commit","Abort", Nil}]
+  /\ coordinatorAlive \in [1..MaxTxnId -> BOOLEAN]
 
 =============================================================================

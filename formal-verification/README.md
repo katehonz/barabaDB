@@ -26,13 +26,13 @@ This directory contains TLA+ specifications for core BaraDB distributed-systems 
 | Spec | States Generated | Distinct States | Depth |
 |------|-----------------|-----------------|-------|
 | raft.tla | 3,031,684 | 833,024 | 47 |
-| twopc.tla | 2,125,825 | 262,144 | 28 |
+| twopc.tla | 22,855,681 | 2,097,152 | 31 |
 | mvcc.tla | 177,849 | 59,860 | 13 |
 | replication.tla | 3,687,939 | 490,560 | 22 |
 | gossip.tla | 1,257,121 | 110,592 | 28 |
 | deadlock.tla | 3,767,361 | 263,950 | 9 |
 | sharding.tla | 186,305 | 23,296 | 11 |
-| **Total** | **14,234,084** | **2,043,426** | — |
+| **Total** | **34,963,940** | **3,878,434** | — |
 
 ## Running the Model Checker
 

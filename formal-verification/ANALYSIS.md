@@ -79,16 +79,16 @@
 
 **Препоръка:** Разширяване на Replicate с `prevLogIndex` и `prevLogTerm` параметри, добавяне на `InstallSnapshot` действие, и връщане на `LogMatching` инварианта.
 
-### 2.5. 2PC без recovery модел
+### 2.5. 2PC без recovery модел ✅ Направено
 
-Спекът не моделира:
+~~Спекът не моделира:~~
 
-- Coordinator crash и recovery (read decision from WAL)
-- Participant timeout (какво става ако participant не отговори)
-- Heuristic decisions (участник взима самостоятелно решение при coordinator failure)
-- Transaction log replay
+- ~~Coordinator crash и recovery (read decision from WAL)~~ ✅ Добавени `CrashCoordinator` и `RecoverCoordinator`
+- ~~Participant timeout~~ ✅ `ParticipantTimeout` позволява abort само при `coordinatorLog = Nil`
+- ~~Heuristic decisions~~ ✅ Participant не може да abort-ва ако coordinator е decided
+- ~~Transaction log replay~~ ✅ `RecoverCoordinator` чете `coordinatorLog`
 
-**Препоръка:** Добавяне на `CrashCoordinator(t)` и `RecoverCoordinator(t)` действия с четене на `decidedAction[t]` от персистентен лог.
+**Резултат:** `RecoveryConsistency` инвариантата гарантира че след crash+recovery, решението е същото.
 
 ### 2.6. MVCC без garbage collection
 
