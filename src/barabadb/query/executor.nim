@@ -17,8 +17,10 @@ import ../core/types
 import ../protocol/wire
 import ../storage/lsm
 import ../storage/btree
+import ../storage/wal
 import ../core/mvcc
 import ../core/tracing
+import ../fts/engine as fts
 
 type
   IndexEntry* = ref object
@@ -57,6 +59,7 @@ type
     btrees*: Table[string, BTreeIndex[string, IndexEntry]]
     views*: Table[string, Node]  # view name -> SELECT AST
     cteTables*: Table[string, seq[Row]]  # CTE name -> rows
+    ftsIndexes*: Table[string, fts.InvertedIndex]  # table.col -> FTS index
     txnManager*: TxnManager
     pendingTxn*: Transaction
     onChange*: proc(ev: ChangeEvent) {.closure.}
@@ -133,6 +136,7 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
                    btrees: initTable[string, BTreeIndex[string, IndexEntry]](),
                    views: initTable[string, Node](),
                    cteTables: initTable[string, seq[Row]](),
+                   ftsIndexes: initTable[string, fts.InvertedIndex](),
                    users: initTable[string, UserDef](),
                    policies: initTable[string, seq[PolicyDef]](),
                    currentUser: "", currentRole: "",
@@ -299,6 +303,7 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
   ExecutionContext(db: ctx.db, tables: ctx.tables,
                    btrees: ctx.btrees, views: ctx.views,
                    cteTables: initTable[string, seq[Row]](),
+                   ftsIndexes: ctx.ftsIndexes,
                    users: ctx.users, policies: ctx.policies,
                    txnManager: ctx.txnManager,
                    currentUser: ctx.currentUser, currentRole: ctx.currentRole,
@@ -2114,6 +2119,20 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
       ctx.tables[stmt.altName] = tbl
       return okResult(msg="ALTER TABLE " & stmt.altName & " executed")
     return errResult("Table '" & stmt.altName & "' does not exist")
+
+  of nkRecoverToTimestamp:
+    let walPath = ctx.db.dir & "/wal.log"
+    let entries = readEntries(walPath)
+    var applied = 0
+    for entry in entries:
+      if entry.kind == wekPut:
+        ctx.db.put(cast[string](entry.key), entry.value)
+        inc applied
+      elif entry.kind == wekDelete:
+        ctx.db.delete(cast[string](entry.key))
+        inc applied
+    ctx.restoreSchema()
+    return okResult(msg="RECOVERED " & $applied & " entries from WAL")
 
   of nkCreateView:
     ctx.views[stmt.cvName] = stmt.cvQuery

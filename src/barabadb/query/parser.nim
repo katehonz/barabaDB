@@ -1181,6 +1181,13 @@ proc parseStatement*(p: var Parser): Node =
   of tkCommit: p.parseCommitTxn()
   of tkRollback: p.parseRollbackTxn()
   of tkExplain: p.parseExplain()
+  of tkRecover:
+    let tok = p.advance()
+    discard p.expect(tkTo)
+    discard p.expect(tkTimestamp)
+    let tsLit = p.expect(tkStringLit)
+    Node(kind: nkRecoverToTimestamp, recoverTimestamp: tsLit.value,
+         line: tok.line, col: tok.col)
   else:
     let tok = p.advance()
     Node(kind: nkNullLit, line: tok.line, col: tok.col)

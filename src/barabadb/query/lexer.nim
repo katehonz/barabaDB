@@ -109,6 +109,8 @@ type
     tkPolicy
     tkEnable
     tkDisable
+    tkRecover
+    tkTimestamp
     tkFor
     tkUsing
     tkGrant
@@ -280,6 +282,8 @@ const keywords*: Table[string, TokenKind] = {
   "disable": tkDisable,
   "for": tkFor,
   "using": tkUsing,
+  "recover": tkRecover,
+  "timestamp": tkTimestamp,
   "grant": tkGrant,
   "revoke": tkRevoke,
   "count": tkCount,

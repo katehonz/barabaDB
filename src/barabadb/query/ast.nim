@@ -20,6 +20,7 @@ type
     nkCommitTxn
     nkRollbackTxn
     nkExplainStmt
+    nkRecoverToTimestamp
     nkCreateView
     nkDropView
     nkCreateTrigger
@@ -233,6 +234,8 @@ type
     of nkExplainStmt:
       expStmt*: Node
       expAnalyze*: bool
+    of nkRecoverToTimestamp:
+      recoverTimestamp*: string
     of nkCreateView:
       cvName*: string
       cvQuery*: Node

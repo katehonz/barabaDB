@@ -2459,5 +2459,13 @@ suite "Parameterized queries":
     check r.success
     # Should find the row because 'text' is in 'full text search'
 
+  test "RECOVER TO TIMESTAMP parse":
+    let ast = parse("RECOVER TO TIMESTAMP '2026-05-07T12:00:00'")
+    check ast.stmts[0].kind == nkRecoverToTimestamp
+
+  test "RECOVER FROM WAL execution":
+    let r = qexec.executeQuery(ctx, parse("RECOVER TO TIMESTAMP '2026-12-31T23:59:59'"))
+    check r.success
+
 # JOIN tests
 include "join_tests"

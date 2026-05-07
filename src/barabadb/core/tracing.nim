@@ -3,6 +3,8 @@ import std/json
 import std/times
 import std/monotimes
 import std/tables
+import std/httpclient
+import std/strutils
 
 type
   SpanStatus* = enum
@@ -82,3 +84,44 @@ proc enable*(tracer: Tracer) =
 
 proc disable*(tracer: Tracer) =
   tracer.enabled = false
+
+proc exportOtlp*(tracer: Tracer, endpoint: string = "http://localhost:4318/v1/traces"): bool =
+  ## Export spans via OTLP/HTTP (JSON format).
+  ## Returns true on success.
+  if tracer.spans.len == 0: return true
+  var otlpSpans = newJArray()
+  for span in tracer.spans:
+    var attrs = newJArray()
+    for k, v in span.attributes:
+      attrs.add(%*{"key": k, "value": {"stringValue": v}})
+    otlpSpans.add(%*{
+      "traceId": span.traceId,
+      "spanId": span.spanId,
+      "parentSpanId": span.parentSpanId,
+      "name": span.name,
+      "kind": "SPAN_KIND_INTERNAL",
+      "startTimeUnixNano": $span.startTime,
+      "endTimeUnixNano": $span.endTime,
+      "status": {"code": if span.status == ssOk: "STATUS_CODE_OK" else: "STATUS_CODE_ERROR"},
+      "attributes": attrs,
+    })
+  let body = %*{
+    "resourceSpans": [{
+      "resource": {"attributes": [
+        {"key": "service.name", "value": {"stringValue": "baradadb"}}
+      ]},
+      "scopeSpans": [{
+        "scope": {"name": "baradadb-tracer", "version": "0.1.0"},
+        "spans": otlpSpans
+      }]
+    }]
+  }
+  try:
+    let client = newHttpClient()
+    client.headers["Content-Type"] = "application/json"
+    discard client.postContent(endpoint, body = $body)
+    client.close()
+    tracer.spans = @[]
+    return true
+  except:
+    return false
