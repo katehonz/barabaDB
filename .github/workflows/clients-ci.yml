@@ -1,0 +1,185 @@
+name: Clients CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'clients/**'
+      - 'src/**'
+      - 'Dockerfile'
+      - '.github/workflows/clients-ci.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'clients/**'
+      - 'src/**'
+      - 'Dockerfile'
+      - '.github/workflows/clients-ci.yml'
+
+jobs:
+  build-server:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t baradb:latest .
+
+      - name: Save Docker image
+        run: docker save baradb:latest | gzip > baradb-image.tar.gz
+
+      - name: Upload image artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: baradb-image
+          path: baradb-image.tar.gz
+          retention-days: 1
+
+  test-python:
+    needs: build-server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: baradb-image
+
+      - name: Load Docker image
+        run: docker load < baradb-image.tar.gz
+
+      - name: Start BaraDB server
+        run: |
+          docker run -d --name baradb-ci -p 9472:9472 baradb:latest
+          sleep 3
+          docker logs baradb-ci
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Python client
+        working-directory: clients/python
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest
+          pip install -e .
+
+      - name: Run Python unit tests
+        working-directory: clients/python
+        run: pytest tests/test_wire_protocol.py tests/test_query_builder.py -v
+
+      - name: Run Python integration tests
+        working-directory: clients/python
+        run: pytest tests/test_integration.py -v
+
+      - name: Run Python example
+        working-directory: clients/python
+        run: python examples/basic.py || true
+
+  test-javascript:
+    needs: build-server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: baradb-image
+
+      - name: Load Docker image
+        run: docker load < baradb-image.tar.gz
+
+      - name: Start BaraDB server
+        run: |
+          docker run -d --name baradb-ci -p 9472:9472 baradb:latest
+          sleep 3
+          docker logs baradb-ci
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run JavaScript unit tests
+        working-directory: clients/javascript
+        run: node --test tests/unit.test.js
+
+      - name: Run JavaScript integration tests
+        working-directory: clients/javascript
+        run: node --test tests/integration.test.js
+
+      - name: Run JavaScript example
+        working-directory: clients/javascript
+        run: node examples/basic.js || true
+
+  test-nim:
+    needs: build-server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: baradb-image
+
+      - name: Load Docker image
+        run: docker load < baradb-image.tar.gz
+
+      - name: Start BaraDB server
+        run: |
+          docker run -d --name baradb-ci -p 9472:9472 baradb:latest
+          sleep 3
+          docker logs baradb-ci
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: '2.2.10'
+
+      - name: Run Nim unit tests
+        working-directory: clients/nim
+        run: nim c --path:src -r tests/test_client.nim
+
+      - name: Run Nim integration tests
+        working-directory: clients/nim
+        run: nim c --path:src -r tests/test_integration.nim
+
+      - name: Run Nim example
+        working-directory: clients/nim
+        run: nim c --path:src -r examples/basic.nim || true
+
+  test-rust:
+    needs: build-server
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Docker image
+        uses: actions/download-artifact@v4
+        with:
+          name: baradb-image
+
+      - name: Load Docker image
+        run: docker load < baradb-image.tar.gz
+
+      - name: Start BaraDB server
+        run: |
+          docker run -d --name baradb-ci -p 9472:9472 baradb:latest
+          sleep 3
+          docker logs baradb-ci
+
+      - name: Setup Rust
+        uses: dtolnay/rust-action@stable
+
+      - name: Run Rust tests
+        working-directory: clients/rust
+        run: cargo test -- --test-threads=1
+
+      - name: Run Rust example
+        working-directory: clients/rust
+        run: cargo run --example basic || true

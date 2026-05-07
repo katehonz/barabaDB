@@ -242,6 +242,7 @@ impl Client {
     pub fn connect_with_config(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let addr = format!("{}:{}", config.host, config.port);
         let stream = TcpStream::connect(&addr)?;
+        stream.set_nodelay(true)?;
         Ok(Client {
             config,
             stream,

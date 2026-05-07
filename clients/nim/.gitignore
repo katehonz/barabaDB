@@ -1,0 +1,8 @@
+nimcache/
+*.exe
+*.dll
+*.so
+*.dylib
+tests/test_client
+tests/test_integration
+examples/basic

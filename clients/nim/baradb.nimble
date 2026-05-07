@@ -1,8 +1,8 @@
 # Package
 
-version       = "0.1.0"
+version       = "1.0.0"
 author        = "BaraDB Team"
-description   = "BaraDB client library for Nim — async binary protocol client"
+description   = "Official Nim client for BaraDB — async binary protocol client"
 license       = "Apache-2.0"
 srcDir        = "src"
 
@@ -12,5 +12,16 @@ requires "nim >= 2.2.0"
 # Export the client module
 bin           = @[]
 
-task test, "Run client tests":
+task test, "Run all client tests (unit + integration if server available)":
   exec "nim c -r tests/test_client.nim"
+  # Integration tests are compiled separately; they auto-skip if no server.
+  try:
+    exec "nim c -r tests/test_integration.nim"
+  except:
+    echo "Integration tests skipped (no server on localhost:9472)"
+
+task test_unit, "Run unit tests only":
+  exec "nim c -r tests/test_client.nim"
+
+task example, "Run basic example":
+  exec "nim c -r examples/basic.nim"

@@ -1,8 +1,21 @@
 [package]
 name = "baradb"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
-description = "BaraDB client library for Rust — binary protocol client"
+authors = ["BaraDB Team <team@baradb.dev>"]
+description = "Official Rust client for BaraDB — binary protocol client"
 license = "Apache-2.0"
+repository = "https://github.com/barabadb/baradadb"
+documentation = "https://docs.baradb.dev"
+readme = "README.md"
+keywords = ["database", "baradb", "multimodal", "client", "wire-protocol"]
+categories = ["database", "network-programming"]
+rust-version = "1.70"
 
 [dependencies]
+
+[dev-dependencies]
+
+[[example]]
+name = "basic"
+path = "examples/basic.rs"

@@ -1,0 +1,43 @@
+{
+  "name": "baradb",
+  "version": "1.0.0",
+  "description": "Official JavaScript/Node.js client for BaraDB — Multimodal Database Engine",
+  "main": "baradb.js",
+  "types": "baradb.d.ts",
+  "files": [
+    "baradb.js",
+    "baradb.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "test:unit": "node --test tests/unit.test.js",
+    "test:integration": "node --test tests/integration.test.js",
+    "example": "node examples/basic.js"
+  },
+  "keywords": [
+    "baradb",
+    "database",
+    "multimodal",
+    "client",
+    "wire-protocol",
+    "vector",
+    "graph"
+  ],
+  "author": "BaraDB Team <team@baradb.dev>",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/barabadb/baradadb.git",
+    "directory": "clients/javascript"
+  },
+  "bugs": {
+    "url": "https://github.com/barabadb/baradadb/issues"
+  },
+  "homepage": "https://docs.baradb.dev",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {}
+}
