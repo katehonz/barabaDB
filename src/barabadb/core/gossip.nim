@@ -2,6 +2,7 @@
 import std/tables
 import std/random
 import std/monotimes
+import std/asyncdispatch
 
 type
   NodeState* = enum
@@ -167,3 +168,15 @@ proc isMember*(gp: GossipProtocol, nodeId: string): bool =
 
 proc getMember*(gp: GossipProtocol, nodeId: string): GossipNode =
   gp.members.getOrDefault(nodeId, nil)
+
+proc startHealthCheck*(gp: GossipProtocol, intervalMs: int = 1000) {.async.} =
+  while true:
+    await sleepAsync(intervalMs)
+    gp.checkHealth()
+
+proc startGossipRound*(gp: GossipProtocol, intervalMs: int = 2000) {.async.} =
+  while true:
+    await sleepAsync(intervalMs)
+    let targets = gp.selectGossipTargets()
+    # In production: serialize createGossipMessage() and send to targets via UDP/TCP
+    discard targets

@@ -60,15 +60,23 @@ proc getShardRange*(router: ShardRouter, key: string): int =
   for i, shard in router.shards:
     if key >= shard.minKey and key <= shard.maxKey:
       return i
-  return 0
+  return -1  # key outside all defined ranges
 
 proc getShardConsistent*(router: ShardRouter, key: string): int =
   if router.vnodeRing.len == 0:
     return getShardHash(router, key)
   let h = hashKey(key)
-  for (ringHash, shardId) in router.vnodeRing:
-    if h <= ringHash:
-      return shardId
+  # Binary search on sorted vnode ring
+  var lo = 0
+  var hi = router.vnodeRing.len - 1
+  while lo < hi:
+    let mid = (lo + hi) div 2
+    if router.vnodeRing[mid][0] < h:
+      lo = mid + 1
+    else:
+      hi = mid
+  if lo < router.vnodeRing.len and h <= router.vnodeRing[lo][0]:
+    return router.vnodeRing[lo][1]
   return router.vnodeRing[0][1]
 
 proc getShard*(router: ShardRouter, key: string): int =
@@ -102,7 +110,7 @@ proc getShardForNode*(router: ShardRouter, nodeId: string): seq[int] =
 
 proc replicasOf*(router: ShardRouter, key: string): seq[string] =
   let shardId = router.getShard(key)
-  if shardId < router.shards.len:
+  if shardId >= 0 and shardId < router.shards.len:
     return router.shards[shardId].nodeIds
   return @[]
 

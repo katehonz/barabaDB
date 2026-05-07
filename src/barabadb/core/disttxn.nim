@@ -100,18 +100,28 @@ proc prepare*(txn: DistributedTransaction): bool =
   txn.state = dtsPreparing
 
   var allOk = true
+  var preparedNodes: seq[string] = @[]
   for nodeId, participant in txn.participants.mpairs:
     if participant.host.len > 0 and participant.port > 0:
       participant.prepared = sendDistTxnRpc(participant.host, participant.port, txn.id, "PREPARE")
     else:
       participant.prepared = true  # local participant
-    if not participant.prepared:
+    if participant.prepared:
+      preparedNodes.add(nodeId)
+    else:
       allOk = false
 
   if allOk:
     txn.state = dtsPrepared
   else:
-    txn.state = dtsActive
+    # Rollback already-prepared participants to maintain atomicity
+    for nodeId in preparedNodes:
+      var p = txn.participants[nodeId]
+      if p.host.len > 0 and p.port > 0:
+        discard sendDistTxnRpc(p.host, p.port, txn.id, "ROLLBACK")
+      p.prepared = false
+      p.aborted = true
+    txn.state = dtsAborted
 
   release(txn.lock)
   return allOk
@@ -125,16 +135,28 @@ proc commit*(txn: DistributedTransaction): bool =
   txn.state = dtsCommitting
 
   var allOk = true
+  var committedNodes: seq[string] = @[]
   for nodeId, participant in txn.participants.mpairs:
     if participant.host.len > 0 and participant.port > 0:
       participant.committed = sendDistTxnRpc(participant.host, participant.port, txn.id, "COMMIT")
     else:
       participant.committed = true  # local participant
-    if not participant.committed:
+    if participant.committed:
+      committedNodes.add(nodeId)
+    else:
       allOk = false
 
   if allOk:
     txn.state = dtsCommitted
+  else:
+    # Rollback committed participants on commit failure
+    for nodeId in committedNodes:
+      var p = txn.participants[nodeId]
+      if p.host.len > 0 and p.port > 0:
+        discard sendDistTxnRpc(p.host, p.port, txn.id, "ROLLBACK")
+      p.committed = false
+      p.aborted = true
+    txn.state = dtsAborted
   release(txn.lock)
   return allOk
 

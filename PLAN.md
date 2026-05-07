@@ -4,47 +4,34 @@
 
 ---
 
-## Завършено (обща сума: 4 сесии)
+## Разпределени модули — status след сесия 5
 
-### Session 1: SQL Features
-- Recursive CTE (WITH RECURSIVE + UNION ALL)
-- UNION / INTERSECT / EXCEPT
-- DROP INDEX parser + executor
-- VIEW DDL persistence (AST-to-SQL serializer)
-- JSON path operators (`->`, `->>`)
-- FTS SQL wiring (`WHERE col @@ 'query'`)
-- Multi-column index range scans
-- Covering index optimization
-- SCRAM-SHA-256 authentication
+### ✅ Поправено
 
-### Session 2: Production Hardening
-- JWT security (`getEffectiveJwtSecret()` + warning log)
-- SSTable metadata comments clarified
-- LSM thread-safety confirmed (locks present, stress test 714K ops/sec)
-- Distributed 2PC — real TCP RPC via `sendDistTxnRpc`
-- OpenTelemetry — `core/tracing.nim` with span recording
-
-### Session 3: PITR + OTLP
-- `RECOVER TO TIMESTAMP` — parser + executor (WAL replay)
-- `exportOtlp()` — OTLP/HTTP JSON export
-- FTS infrastructure — `ftsIndexes` table in ExecutionContext
-
-### Session 4: Full FTS BM25 Integration ✅
-- `evalExpr` refactored — accepts optional `ExecutionContext` param
-- `CREATE INDEX ... USING FTS` — builds InvertedIndex from existing data
-- `@@` operator — uses BM25 ranking when FTS index exists, falls back to term match
-- INSERT/UPDATE/DELETE — auto-updates FTS indexes (addDocument/removeDocument)
-- 283 теста — 0 failure-а
-
----
-
-## Изрично НЕ се прави
-
-| Задача | Причина |
+| Модул | Промяна |
 |--------|---------|
-| **Partitioning** | Сложно, малки БД не се нуждаят |
-| **Kubernetes Helm** | Docker Compose е достатъчен |
+| `disttxn` | **2PC atomicity:** prepare failure → rollback на вече готови участници. Commit failure → rollback на вече commit-нати. Няма частичен commit. |
+| `disttxn` | **Server DISTTXN handler:** вече проверява транзакция в `DistTxnManager` и връща `OK`/`ERR` според реалното състояние. |
+| `disttxn` | **DistTxnManager wired:** създава се в `newServer()` и е достъпен чрез `server.distTxnManager`. |
+| `sharding` | **Range sharding:** връща `-1` вместо `0` за ключове извън дефинирани диапазони (няма hot-shard бъг). |
+| `sharding` | **Consistent hashing:** бинарно търсене вместо O(n) линейно. |
+| `gossip` | **Health check timer:** `startHealthCheck(intervalMs)` async loop. |
+| `gossip` | **Gossip round timer:** `startGossipRound(intervalMs)` async loop. |
+
+### ⚠️ Оставащи distributed gaps (non-critical за single-node)
+
+| Модул | Gap |
+|--------|-----|
+| `raft` | `RaftNetwork.run()` не се извиква от main() — няма Raft cluster при старт. |
+| `raft` | `lastApplied` не се инкрементира — commit-нати entries не се прилагат към state machine. |
+| `raft` | `asyncCheck` поглъща грешки. |
+| `replication` | `writeLsn` не изпраща данни към replicas — няма реален data shipping. |
+| `gossip` | Няма UDP/TCP transport за gossip messages — in-memory само. |
+| `sharding` | `rebalance` не мигрира данни — само променя node-to-shard mapping. |
+| `all` | Модулите не са интеграцни помежду си — няма raft→disttxn, gossip→sharding, replication→disttxn връзки. |
 
 ---
 
-**Production-ready. 283 теста, 0 failures.**
+## Завършено (обща сума: 5 сесии)
+
+**283 теста — 0 failure-а.**

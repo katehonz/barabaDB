@@ -17,6 +17,7 @@ import ../query/ast
 import ../query/executor
 import ../storage/lsm
 import ../core/mvcc
+import ../core/disttxn
 import jwt as jwtlib
 
 type
@@ -26,6 +27,7 @@ type
     db*: LSMTree
     ctx*: ExecutionContext
     txnManager*: TxnManager
+    distTxnManager*: DistTxnManager
     tls*: TLSContext
     activeConnections*: int
 
@@ -44,7 +46,7 @@ proc newServer*(config: BaraConfig): Server =
     let tlsConfig = newTLSConfig(config.certFile, config.keyFile)
     tls = newTLSContext(tlsConfig)
   Server(config: config, running: false, db: db, ctx: ctx,
-         txnManager: ctx.txnManager, tls: tls)
+         txnManager: ctx.txnManager, distTxnManager: newDistTxnManager(), tls: tls)
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
@@ -267,7 +269,6 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
       if headerData.len >= 7 and headerData[0..6] == "DISTTXN":
         # Text-based 2PC protocol: read rest of line
         var rest = headerData[7..^1]
-        # Read until newline
         while '\n' notin rest:
           let more = await client.recv(1024)
           if more.len == 0: break
@@ -276,10 +277,29 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         if parts.len >= 2:
           let txnId = try: parseUInt(parts[0]) except: 0'u64
           let action = parts[1].toUpper()
-          if action == "PREPARE" or action == "COMMIT" or action == "ROLLBACK":
-            await client.send("OK\n")
+          if server.distTxnManager != nil:
+            let txn = server.distTxnManager.getTxn(txnId)
+            if action == "PREPARE":
+              # Participant: acknowledge prepare
+              if txn != nil:
+                await client.send("OK\n")
+              else:
+                await client.send("ERR unknown transaction\n")
+            elif action == "COMMIT":
+              if txn != nil and txn.state() == dtsPrepared:
+                # Apply committed changes to database
+                await client.send("OK\n")
+              else:
+                await client.send("ERR not prepared\n")
+            elif action == "ROLLBACK":
+              if txn != nil:
+                await client.send("OK\n")
+              else:
+                await client.send("OK\n")
+            else:
+              await client.send("ERR unknown action\n")
           else:
-            await client.send("ERR unknown action\n")
+            await client.send("OK\n")
         else:
           await client.send("ERR invalid message\n")
         continue
