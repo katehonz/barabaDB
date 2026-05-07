@@ -15,6 +15,14 @@ Quick Start:
     for row in result:
         print(row["name"])
     client.close()
+
+Parameterized Queries:
+    result = client.query_params("SELECT * FROM users WHERE age > $1", [WireValue.int64(18)])
+
+Authentication:
+    client = Client("localhost", 9472, username="admin", password="secret")
+    client.connect()
+    client.auth("jwt-token-here")
 """
 
 import socket
@@ -41,17 +49,27 @@ class FieldKind:
 
 
 class MsgKind:
+    # Client messages
+    CLIENT_HANDSHAKE = 0x01
     QUERY = 0x02
+    QUERY_PARAMS = 0x03
+    EXECUTE = 0x04
     BATCH = 0x05
     TRANSACTION = 0x06
     CLOSE = 0x07
     PING = 0x08
     AUTH = 0x09
     # Server messages
+    SERVER_HANDSHAKE = 0x80
     READY = 0x81
     DATA = 0x82
     COMPLETE = 0x83
     ERROR = 0x84
+    AUTH_CHALLENGE = 0x85
+    AUTH_OK = 0x86
+    SCHEMA_CHANGE = 0x87
+    PONG = 0x88
+    TRANSACTION_STATE = 0x89
 
 
 class ResultFormat:
@@ -70,26 +88,104 @@ class WireValue:
         return WireValue(FieldKind.NULL)
 
     @staticmethod
+    def bool_val(val: bool):
+        return WireValue(FieldKind.BOOL, val)
+
+    @staticmethod
+    def int8(val: int):
+        return WireValue(FieldKind.INT8, val)
+
+    @staticmethod
+    def int16(val: int):
+        return WireValue(FieldKind.INT16, val)
+
+    @staticmethod
+    def int32(val: int):
+        return WireValue(FieldKind.INT32, val)
+
+    @staticmethod
     def int64(val: int):
         return WireValue(FieldKind.INT64, val)
 
     @staticmethod
-    def string(val: str):
-        return WireValue(FieldKind.STRING, val)
+    def float32(val: float):
+        return WireValue(FieldKind.FLOAT32, val)
 
     @staticmethod
     def float64(val: float):
         return WireValue(FieldKind.FLOAT64, val)
 
     @staticmethod
-    def bool_val(val: bool):
-        return WireValue(FieldKind.BOOL, val)
+    def string(val: str):
+        return WireValue(FieldKind.STRING, val)
+
+    @staticmethod
+    def bytes_val(val: bytes):
+        return WireValue(FieldKind.BYTES, val)
+
+    @staticmethod
+    def array_val(val: list):
+        return WireValue(FieldKind.ARRAY, val)
+
+    @staticmethod
+    def object_val(val: dict):
+        return WireValue(FieldKind.OBJECT, val)
+
+    @staticmethod
+    def vector(val: list):
+        return WireValue(FieldKind.VECTOR, val)
+
+    @staticmethod
+    def json_val(val: str):
+        return WireValue(FieldKind.JSON, val)
+
+    def serialize(self) -> bytes:
+        buf = bytes([self.kind])
+        if self.kind == FieldKind.NULL:
+            pass
+        elif self.kind == FieldKind.BOOL:
+            buf += bytes([1 if self.value else 0])
+        elif self.kind == FieldKind.INT8:
+            buf += struct.pack(">b", self.value)
+        elif self.kind == FieldKind.INT16:
+            buf += struct.pack(">h", self.value)
+        elif self.kind == FieldKind.INT32:
+            buf += struct.pack(">i", self.value)
+        elif self.kind == FieldKind.INT64:
+            buf += struct.pack(">q", self.value)
+        elif self.kind == FieldKind.FLOAT32:
+            buf += struct.pack(">f", self.value)
+        elif self.kind == FieldKind.FLOAT64:
+            buf += struct.pack(">d", self.value)
+        elif self.kind == FieldKind.STRING:
+            encoded = self.value.encode("utf-8")
+            buf += struct.pack(">I", len(encoded)) + encoded
+        elif self.kind == FieldKind.BYTES:
+            buf += struct.pack(">I", len(self.value)) + self.value
+        elif self.kind == FieldKind.ARRAY:
+            buf += struct.pack(">I", len(self.value))
+            for item in self.value:
+                buf += item.serialize()
+        elif self.kind == FieldKind.OBJECT:
+            buf += struct.pack(">I", len(self.value))
+            for key, val in self.value.items():
+                key_bytes = key.encode("utf-8")
+                buf += struct.pack(">I", len(key_bytes)) + key_bytes
+                buf += val.serialize()
+        elif self.kind == FieldKind.VECTOR:
+            buf += struct.pack(">I", len(self.value))
+            for f in self.value:
+                buf += struct.pack(">f", f)
+        elif self.kind == FieldKind.JSON:
+            encoded = self.value.encode("utf-8")
+            buf += struct.pack(">I", len(encoded)) + encoded
+        return buf
 
 
 class QueryResult:
     def __init__(self):
         self.columns: list[str] = []
-        self.column_types: list[str] = []
+        self.column_types: list[int] = []
         self.rows: list[list[Any]] = []
         self.row_count: int = 0
         self.affected_rows: int = 0
@@ -130,6 +226,11 @@ class Client:
 
     def close(self) -> None:
         if self._sock:
+            try:
+                msg = self._build_message(MsgKind.CLOSE, b"")
+                self._sock.send(msg)
+            except Exception:
+                pass
             self._sock.close()
         self._connected = False
 
@@ -140,6 +241,100 @@ class Client:
         self._request_id += 1
         return self._request_id
 
+    def _recv_exact(self, size: int) -> bytes:
+        """Receive exactly `size` bytes from the socket."""
+        data = b""
+        while len(data) < size:
+            chunk = self._sock.recv(size - len(data))
+            if not chunk:
+                raise ConnectionError("Connection closed by server")
+            data += chunk
+        return data
+
+    def _read_response_header(self) -> tuple[int, int, int]:
+        """Read a 12-byte message header. Returns (kind, length, request_id)."""
+        header = self._recv_exact(12)
+        kind, length, req_id = struct.unpack(">III", header)
+        return kind, length, req_id
+
+    def _read_error(self, length: int) -> Exception:
+        """Read and parse an ERROR payload."""
+        data = self._recv_exact(length)
+        code = struct.unpack(">I", data[:4])[0]
+        msg_len = struct.unpack(">I", data[4:8])[0]
+        error_msg = data[8:8 + msg_len].decode("utf-8")
+        return Exception(f"BaraDB error {code}: {error_msg}")
+
+    def _read_data_response(self, length: int) -> QueryResult:
+        """Read and parse a DATA payload, then follow up with COMPLETE."""
+        data = self._recv_exact(length)
+        pos = [0]
+
+        col_count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+        pos[0] += 4
+
+        cols = []
+        for _ in range(col_count):
+            cols.append(self._read_string(data, pos))
+
+        col_types = []
+        for _ in range(col_count):
+            col_types.append(data[pos[0]])
+            pos[0] += 1
+
+        row_count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
+        pos[0] += 4
+
+        rows = []
+        for _ in range(row_count):
+            row = []
+            for _ in range(col_count):
+                val = self._deserialize_value(data, pos)
+                row.append(val)
+            rows.append(row)
+
+        result = QueryResult()
+        result.columns = cols
+        result.column_types = col_types
+        result.rows = rows
+        result.row_count = row_count
+
+        comp_kind, comp_len, _ = self._read_response_header()
+        if comp_kind == MsgKind.COMPLETE:
+            comp_data = self._recv_exact(comp_len)
+            result.affected_rows = struct.unpack(">I", comp_data[:4])[0]
+        elif comp_kind == MsgKind.ERROR:
+            raise self._read_error(comp_len)
+
+        return result
+
+    def auth(self, token: str) -> None:
+        """Authenticate with the server using a JWT token."""
+        encoded = token.encode("utf-8")
+        payload = struct.pack(">I", len(encoded)) + encoded
+        msg = self._build_message(MsgKind.AUTH, payload)
+        self._sock.send(msg)
+
+        kind, length, _ = self._read_response_header()
+        if kind == MsgKind.AUTH_OK:
+            return
+        elif kind == MsgKind.ERROR:
+            raise self._read_error(length)
+        else:
+            raise Exception(f"Unexpected auth response: 0x{kind:02x}")
+
+    def ping(self) -> bool:
+        """Ping the server. Returns True if pong received."""
+        msg = self._build_message(MsgKind.PING, b"")
+        self._sock.send(msg)
+
+        kind, length, _ = self._read_response_header()
+        if kind == MsgKind.PONG:
+            return True
+        elif kind == MsgKind.ERROR:
+            raise self._read_error(length)
+        return False
+
     def query(self, sql: str) -> QueryResult:
         """Execute a BaraQL query."""
         payload = self._encode_string(sql)
@@ -148,58 +343,48 @@ class Client:
         msg = self._build_message(MsgKind.QUERY, payload)
         self._sock.send(msg)
 
-        result = QueryResult()
-
-        # Read response header
-        header = self._sock.recv(12)
-        kind, length, req_id = struct.unpack(">III", header)
+        kind, length, _ = self._read_response_header()
 
         if kind == MsgKind.ERROR:
-            error_data = self._sock.recv(length)
-            code, msg_len = struct.unpack(">II", error_data[:8])
-            error_msg = error_data[8:8 + msg_len].decode()
-            raise Exception(f"BaraDB error {code}: {error_msg}")
+            raise self._read_error(length)
 
         if kind == MsgKind.DATA:
-            data = self._sock.recv(length)
-            pos = [0]
-            col_count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
-            pos[0] += 4
-            cols = []
-            for _ in range(col_count):
-                s = self._read_string(data, pos)
-                cols.append(s)
-            row_count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
-            pos[0] += 4
-            rows = []
-            for _ in range(row_count):
-                row = []
-                for _ in range(col_count):
-                    val = self._deserialize_value(data, pos)
-                    row.append(val)
-                rows.append(row)
-            col_types = []
-            for _ in range(col_count):
-                col_types.append(hex(data[pos[0]]))
-                pos[0] += 1
-            result.columns = cols
-            result.column_types = col_types
-            result.rows = rows
-            result.row_count = row_count
-            # Read following COMPLETE message
-            comp_header = self._sock.recv(12)
-            ckind, clen, _ = struct.unpack(">III", comp_header)
-            if ckind == MsgKind.COMPLETE:
-                comp_data = self._sock.recv(clen)
-                result.affected_rows = struct.unpack(">I", comp_data[:4])[0]
-            return result
+            return self._read_data_response(length)
 
         if kind == MsgKind.COMPLETE:
-            comp_data = self._sock.recv(length)
-            result.affected_rows = struct.unpack(">I", comp_data[:4])[0]
+            data = self._recv_exact(length)
+            result = QueryResult()
+            result.affected_rows = struct.unpack(">I", data[:4])[0]
             return result
 
-        return result
+        return QueryResult()
+
+    def query_params(self, sql: str, params: Sequence[WireValue]) -> QueryResult:
+        """Execute a parameterized BaraQL query."""
+        payload = self._encode_string(sql)
+        payload += bytes([ResultFormat.BINARY])
+        payload += struct.pack(">I", len(params))
+        for p in params:
+            payload += p.serialize()
+
+        msg = self._build_message(MsgKind.QUERY_PARAMS, payload)
+        self._sock.send(msg)
+
+        kind, length, _ = self._read_response_header()
+
+        if kind == MsgKind.ERROR:
+            raise self._read_error(length)
+
+        if kind == MsgKind.DATA:
+            return self._read_data_response(length)
+
+        if kind == MsgKind.COMPLETE:
+            data = self._recv_exact(length)
+            result = QueryResult()
+            result.affected_rows = struct.unpack(">I", data[:4])[0]
+            return result
+
+        return QueryResult()
 
     def execute(self, sql: str) -> int:
         result = self.query(sql)
@@ -376,50 +561,3 @@ class QueryBuilder:
 
     def exec(self) -> QueryResult:
         return self.client.query(self.build())
-
-
-# BaraDB Binary Protocol Specification
-"""
-Protocol Format:
-
-Each message: [kind: uint32] [length: uint32] [request_id: uint32] [payload: bytes...]
-
-Client Messages:
-  0x01 CLIENT_HANDSHAKE
-  0x02 QUERY          (string query, uint8 format)
-  0x03 QUERY_PARAMS   (string query, uint16 param_count, params...)
-  0x04 EXECUTE        (prepared statement)
-  0x05 BATCH          (batch of queries)
-  0x06 TRANSACTION    (begin/commit/rollback)
-  0x07 CLOSE
-  0x08 PING
-  0x09 AUTH           (auth method, credentials)
-
-Server Messages:
-  0x80 SERVER_HANDSHAKE
-  0x81 READY          (transaction state)
-  0x82 DATA           (column count, column names, rows)
-  0x83 COMPLETE       (affected rows)
-  0x84 ERROR          (error code, error message)
-  0x85 AUTH_CHALLENGE
-  0x86 AUTH_OK
-  0x87 SCHEMA_CHANGE
-  0x88 PONG
-  0x89 TRANSACTION_STATE
-
-Value Encoding:
-  value ::= kind:uint8 + data
-  NULL:   0x00
-  BOOL:   0x01 + uint8(0|1)
-  INT8:   0x02 + int8
-  INT16:  0x03 + int16(big-endian)
-  INT32:  0x04 + int32(big-endian)
-  INT64:  0x05 + int64(big-endian)
-  FLOAT32: 0x06 + float32(ieee754)
-  FLOAT64: 0x07 + float64(ieee754)
-  STRING: 0x08 + uint32(length) + utf8bytes
-  BYTES:  0x09 + uint32(length) + bytes
-  ARRAY:  0x0A + uint32(count) + value*
-  OBJECT: 0x0B + uint32(count) + (string_key + value)*
-  VECTOR: 0x0C + uint32(dim) + float32*
-"""

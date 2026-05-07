@@ -30,17 +30,27 @@ type
     fkJson = 0x0D
 
   MsgKind* = enum
+    # Client messages
     mkClientHandshake = 0x01
     mkQuery = 0x02
+    mkQueryParams = 0x03
+    mkExecute = 0x04
     mkBatch = 0x05
+    mkTransaction = 0x06
+    mkClose = 0x07
     mkPing = 0x08
     mkAuth = 0x09
-    # Server
+    # Server messages
+    mkServerHandshake = 0x80
     mkReady = 0x81
     mkData = 0x82
     mkComplete = 0x83
     mkError = 0x84
+    mkAuthChallenge = 0x85
+    mkAuthOk = 0x86
+    mkSchemaChange = 0x87
     mkPong = 0x88
+    mkTransactionState = 0x89
 
   ResultFormat* = enum
     rfBinary = 0x00
@@ -69,6 +79,11 @@ proc writeUint32(buf: var seq[byte], val: uint32) =
   bigEndian32(addr bytes, unsafeAddr val)
   buf.add(bytes)
 
+proc writeUint64(buf: var seq[byte], val: uint64) =
+  var bytes: array[8, byte]
+  bigEndian64(addr bytes, unsafeAddr val)
+  buf.add(bytes)
+
 proc writeString(buf: var seq[byte], s: string) =
   buf.writeUint32(uint32(s.len))
   for ch in s:
@@ -79,6 +94,12 @@ proc readUint32(buf: openArray[byte], pos: var int): uint32 =
   for i in 0..3: bytes[i] = buf[pos + i]
   bigEndian32(addr result, unsafeAddr bytes)
   pos += 4
+
+proc readUint64(buf: openArray[byte], pos: var int): uint64 =
+  var bytes: array[8, byte]
+  for i in 0..7: bytes[i] = buf[pos + i]
+  bigEndian64(addr result, unsafeAddr bytes)
+  pos += 8
 
 proc readString(buf: openArray[byte], pos: var int): string =
   let len = int(readUint32(buf, pos))
@@ -98,10 +119,7 @@ proc serializeValue*(buf: var seq[byte], val: WireValue) =
     bigEndian16(addr bytes16, unsafeAddr val.int16Val)
     buf.add(bytes16)
   of fkInt32: buf.writeUint32(uint32(val.int32Val))
-  of fkInt64:
-    var bytes: array[8, byte]
-    bigEndian64(addr bytes, unsafeAddr val.int64Val)
-    buf.add(bytes)
+  of fkInt64: buf.writeUint64(uint64(val.int64Val))
   of fkFloat32:
     var bytes32: array[4, byte]
     copyMem(addr bytes32, unsafeAddr val.float32Val, 4)
@@ -129,7 +147,7 @@ proc serializeValue*(buf: var seq[byte], val: WireValue) =
       var fb: array[4, byte]
       copyMem(addr fb, unsafeAddr f, 4)
       buf.add(fb)
-  else: discard
+  of fkJson: buf.writeString(val.jsonVal)
 
 proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
   let kind = FieldKind(buf[pos])
@@ -152,12 +170,7 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
   of fkInt32:
     result = WireValue(kind: fkInt32, int32Val: int32(readUint32(buf, pos)))
   of fkInt64:
-    var bytes: array[8, byte]
-    for i in 0..7: bytes[i] = buf[pos + i]
-    var v: int64
-    bigEndian64(addr v, unsafeAddr bytes)
-    result = WireValue(kind: fkInt64, int64Val: v)
-    pos += 8
+    result = WireValue(kind: fkInt64, int64Val: int64(readUint64(buf, pos)))
   of fkFloat32:
     var v32: float32
     copyMem(addr v32, addr buf[pos], 4)
@@ -202,8 +215,6 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
     result = WireValue(kind: fkVector, vecVal: vec)
   of fkJson:
     result = WireValue(kind: fkJson, jsonVal: readString(buf, pos))
-  else:
-    result = WireValue(kind: fkNull)
 
 proc buildMessage*(kind: MsgKind, requestId: uint32, payload: seq[byte]): seq[byte] =
   result = @[]
@@ -217,6 +228,20 @@ proc makeQueryMessage*(requestId: uint32, query: string): seq[byte] =
   payload.writeString(query)
   payload.add(byte(rfBinary))
   buildMessage(mkQuery, requestId, payload)
+
+proc makeQueryParamsMessage*(requestId: uint32, query: string, params: seq[WireValue]): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(query)
+  payload.add(byte(rfBinary))
+  payload.writeUint32(uint32(params.len))
+  for p in params:
+    payload.serializeValue(p)
+  buildMessage(mkQueryParams, requestId, payload)
+
+proc makeAuthMessage*(requestId: uint32, token: string): seq[byte] =
+  var payload: seq[byte] = @[]
+  payload.writeString(token)
+  buildMessage(mkAuth, requestId, payload)
 
 # === Client Library ===
 
@@ -257,15 +282,19 @@ proc connect*(client: BaraClient) {.async.} =
   await client.socket.connect(client.config.host, Port(client.config.port))
   client.connected = true
 
+proc nextId(client: BaraClient): uint32 =
+  inc client.requestId; client.requestId
+
 proc close*(client: BaraClient) =
   if client.connected:
+    try:
+      let msg = buildMessage(mkClose, client.nextId(), @[])
+      waitFor client.socket.send(cast[string](msg))
+    except: discard
     client.socket.close()
     client.connected = false
 
 proc isConnected*(client: BaraClient): bool = client.connected
-
-proc nextId(client: BaraClient): uint32 =
-  inc client.requestId; client.requestId
 
 proc wireValueToString*(wv: WireValue): string =
   case wv.kind
@@ -367,10 +396,47 @@ proc exec*(client: BaraClient, sql: string): Future[int] {.async.} =
   let qr = await client.query(sql)
   return qr.affectedRows
 
-proc ping*(client: BaraClient) {.async.} =
-  if not client.connected: return
+proc auth*(client: BaraClient, token: string) {.async.} =
+  if not client.connected:
+    raise newException(IOError, "Not connected")
+
+  let msg = makeAuthMessage(client.nextId(), token)
+  await client.socket.send(cast[string](msg))
+
+  let headerData = await client.socket.recv(12)
+  if headerData.len < 12:
+    raise newException(IOError, "Connection closed")
+
+  var pos = 0
+  let hdrData = cast[seq[byte]](headerData)
+  let kind = MsgKind(readUint32(hdrData, pos))
+  let payloadLen = int(readUint32(hdrData, pos))
+  discard readUint32(hdrData, pos)
+
+  if kind == mkAuthOk:
+    return
+  elif kind == mkError:
+    let payloadStr = await client.socket.recv(payloadLen)
+    var epos = 0
+    let emsg = readString(cast[seq[byte]](payloadStr), epos)
+    raise newException(IOError, "Auth failed: " & emsg)
+  else:
+    raise newException(IOError, "Unexpected auth response: 0x" & toHex(uint32(kind), 2))
+
+proc ping*(client: BaraClient): Future[bool] {.async.} =
+  if not client.connected:
+    return false
   let msg = buildMessage(mkPing, client.nextId(), @[])
   await client.socket.send(cast[string](msg))
+
+  let headerData = await client.socket.recv(12)
+  if headerData.len < 12:
+    return false
+
+  var pos = 0
+  let hdrData = cast[seq[byte]](headerData)
+  let kind = MsgKind(readUint32(hdrData, pos))
+  return kind == mkPong
 
 # === Fluent Query Builder ===
 
@@ -467,6 +533,15 @@ proc close*(client: SyncClient) =
 
 proc query*(client: SyncClient, sql: string): QueryResult =
   waitFor client.asyncClient.query(sql)
+
+proc query*(client: SyncClient, sql: string, params: seq[WireValue]): QueryResult =
+  waitFor client.asyncClient.query(sql, params)
+
+proc auth*(client: SyncClient, token: string) =
+  waitFor client.asyncClient.auth(token)
+
+proc ping*(client: SyncClient): bool =
+  waitFor client.asyncClient.ping()
 
 proc `$`*(qr: QueryResult): string =
   if qr.columns.len == 0: return "(no results)"
