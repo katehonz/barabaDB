@@ -6,6 +6,11 @@
 
 - [English](en/)
 - [Български (Bulgarian)](bg/)
+- [Русский (Russian)](ru/)
+- [فارسی (Farsi)](fa/)
+- [中文 (Chinese)](zh/)
+- [Türkçe (Turkish)](tr/)
+- [العربية (Arabic)](ar/)
 
 ---
 
