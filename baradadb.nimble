@@ -9,7 +9,7 @@ binDir        = "build"
 
 # Dependencies
 requires "nim >= 2.2.0"
-requires "hunos >= 1.2.0"
+requires "https://github.com/katehonz/hunos >= 1.2.0"
 requires "jwt >= 0.3.0"
 requires "checksums >= 0.2.0"
 
