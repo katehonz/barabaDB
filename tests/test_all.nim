@@ -6,6 +6,7 @@ import std/os
 import std/asyncdispatch
 import std/times
 import std/random
+import std/monotimes
 
 import barabadb/core/types
 import barabadb/core/mvcc
@@ -2109,7 +2110,7 @@ suite "Row-Level Security":
     check ast.stmts[0].drlsTable == "accounts"
 
   test "RLS filter on SELECT":
-    var testDir = getTempDir() / "baradb_rls_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    var testDir = getTempDir() / "baradb_rls_test_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
     createDir(testDir)
     var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
@@ -2133,7 +2134,7 @@ suite "Row-Level Security":
     check res.rows[0]["owner"] == "alice"
 
   test "RLS superuser bypass":
-    var testDir = getTempDir() / "baradb_rls_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    var testDir = getTempDir() / "baradb_rls_test_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
     createDir(testDir)
     var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
@@ -2248,7 +2249,7 @@ suite "Enhanced Migrations":
     check ast.stmts[0].mdrName == "add_users"
 
   test "Create and apply migration with checksum":
-    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
     createDir(testDir)
     var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
@@ -2269,7 +2270,7 @@ suite "Enhanced Migrations":
     check reapplyRes.message.contains("already applied")
 
   test "Migration STATUS shows applied migrations":
-    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
     createDir(testDir)
     var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
@@ -2283,7 +2284,7 @@ suite "Enhanced Migrations":
     check statusRes.rows[1]["status"] == "pending"
 
   test "Migration UP applies all pending":
-    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
     createDir(testDir)
     var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
@@ -2294,7 +2295,7 @@ suite "Enhanced Migrations":
     check upRes.message.contains("Applied 2 migrations")
 
   test "Migration DOWN rollback":
-    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
     createDir(testDir)
     var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)
@@ -2309,7 +2310,7 @@ suite "Enhanced Migrations":
     check tableRes.rows.len == 0  # table does not exist
 
   test "Migration DRYRUN":
-    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix() & "_" & $(rand(100000))
+    var testDir = getTempDir() / "baradb_migration_test_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
     createDir(testDir)
     var db = newLSMTree(testDir)
     var ctx = qexec.newExecutionContext(db)

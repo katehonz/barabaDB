@@ -2,6 +2,7 @@ import std/unittest
 import std/os
 import std/strutils
 import std/times
+import std/monotimes
 import barabadb/core/types
 import barabadb/query/executor as qexec
 import barabadb/query/parser
@@ -18,7 +19,7 @@ suite "JOIN execution":
   var testDir: string
 
   setup:
-    testDir = getTempDir() / "baradb_join_test_" & $getCurrentProcessId() & "_" & $getTime().toUnix()
+    testDir = getTempDir() / "baradb_join_test_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
     createDir(testDir)
     db = newLSMTree(testDir)
     ctx = qexec.newExecutionContext(db)
