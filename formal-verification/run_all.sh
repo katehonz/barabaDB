@@ -34,5 +34,7 @@ run_tlc "$SCRIPT_DIR/replication.tla"  "$SCRIPT_DIR/models/replication.cfg"
 run_tlc "$SCRIPT_DIR/gossip.tla"       "$SCRIPT_DIR/models/gossip.cfg"
 run_tlc "$SCRIPT_DIR/deadlock.tla"     "$SCRIPT_DIR/models/deadlock.cfg"
 run_tlc "$SCRIPT_DIR/sharding.tla"     "$SCRIPT_DIR/models/sharding.cfg"
+run_tlc "$SCRIPT_DIR/backup.tla"       "$SCRIPT_DIR/models/backup.cfg"
+run_tlc "$SCRIPT_DIR/recovery.tla"     "$SCRIPT_DIR/models/recovery.cfg"
 
 echo "All verification runs completed."
