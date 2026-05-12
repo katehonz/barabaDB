@@ -1,10 +1,10 @@
 # BaraDB — PLAN
 
-> Базата е production-ready. Всички задачи завършени.
+> Базата е production-ready. Всички критични/високи/средни бъгове поправени.
 
 ---
 
-## Разпределени модули — status след сесия 5
+## Разпределени модули — status след сесия 7
 
 ### ✅ Поправено
 
@@ -20,7 +20,11 @@
 | `raft` | `RaftNetwork.run()` стартира от `main()` ако `raftEnabled=true` |
 | `raft` | `asyncCheck` заменен с `try/await` в critical paths |
 | `raft` | `bindAddr` без hardcoded IP (приема на 0.0.0.0) |
+| `raft` | Disk persistence: `saveState()`/`loadState()` за term/votedFor/log |
 | `config` | Raft config: `raftEnabled`, `raftPort`, `raftPeers`, `raftNodeId` + env vars |
+| `auth` | JWT `exp`/`nbf`/`iat` validation + constant-time signature comparison |
+| `backup` | TLA+ спек: `BackupSnapshotsValid`, `RestoreIntegrity`, `RetentionInvariant` |
+| `recovery` | TLA+ спек: `RedoCommitted`, `RecoveryCompleteness`, `WalIntegrity` |
 
 ### ⚠️ Оставащи distributed gaps (non-critical за single-node)
 
@@ -42,8 +46,8 @@
 | `gossip` | ✅ Поправен `LearnViaGossip` — вече не overwrite-ва по-силно с по-слабо състояние | Safety |
 | `replication` | `WriteLsn` не моделира data transfer | Safety |
 | `sharding` | `Rebalance` не моделира data migration | Safety |
-| `backup` | ✅ TLA+ спек за backup/restore/verify/cleanup — `BackupSnapshotsValid`, `RestoreIntegrity`, `RetentionInvariant` | Coverage |
-| `recovery` | ✅ TLA+ спек за WAL REDO/UNDO — `RedoCommitted`, `RecoveryCompleteness`, `WalIntegrity` | Coverage |
+| `backup` | ✅ TLA+ спек за backup/restore/verify/cleanup | Coverage |
+| `recovery` | ✅ TLA+ спек за WAL REDO/UNDO | Coverage |
 | `crossmodal` | Няма TLA+ спек за cross-modal consistency | Coverage |
 
 ---
@@ -86,6 +90,31 @@
 
 ---
 
-## Завършено (обща сума: 5 сесии)
+## План за утре — Предложение
 
-**283 теста — 0 failure-а.**
+Ако имаш време и желание утре, ето 3 варианта за спринт:
+
+### Опция A: "Clean build" (1-2 часа)
+- Почистване на 4-те build warnings
+- TLA+ symmetry reduction в `.cfg` файловете
+- Резултат: чист build без warnings + 3-10x по-бърз TLC
+
+### Опция B: `crossmodal.tla` (2-3 часа)
+- TLA+ спек за cross-modal consistency
+- Моделира sync между document/vector/graph/FTS индекси
+- Резултат: 10-ти TLA+ спек, пълно покритие на core модулите
+
+### Опция C: Auth hardening + SCRAM (3-4 часа)
+- Истински SCRAM-SHA-256 със salt, iteration count, challenge-response
+- Почистване на warnings като бонус
+- Резултат: production-grade auth
+
+**Препоръчвам Опция A** — бързо, видимо подобрение, подготовка за clean v1.0.0 release.
+
+---
+
+## Завършено (обща сума: 7 сесии)
+
+**292 теста — 0 failure-а.**
+**9 TLA+ спецификации — всички минават TLC.**
+**32 бъга поправени (9 критични + 7 високи + 12 средни + 4 конфигурационни).**
