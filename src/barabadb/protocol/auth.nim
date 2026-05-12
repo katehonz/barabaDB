@@ -2,6 +2,7 @@
 import std/strutils
 import std/base64
 import std/tables
+import checksums/sha2
 
 type
   AuthMethod* = enum
@@ -51,12 +52,33 @@ proc base64UrlDecode(data: string): string =
     s &= "="
   return decode(s)
 
-proc simpleHash(data: string, key: string): string =
-  var prefix = data & key
-  var h: uint64 = 5381
-  for ch in prefix:
-    h = ((h shl 5) + h) + uint64(ord(ch))
-  return $h
+proc hmacSha256(key, message: string): string =
+  var k = key
+  if k.len > 64:
+    var ctx = initSha_256()
+    ctx.update(k.toOpenArray(0, k.len-1))
+    let hash = ctx.digest()
+    k = $hash
+  while k.len < 64:
+    k &= "\x00"
+
+  var ipad = newString(64)
+  var opad = newString(64)
+  for i in 0..<64:
+    ipad[i] = chr(ord(k[i]) xor 0x36)
+    opad[i] = chr(ord(k[i]) xor 0x5c)
+
+  var innerCtx = initSha_256()
+  innerCtx.update(ipad.toOpenArray(0, ipad.len-1))
+  innerCtx.update(message.toOpenArray(0, message.len-1))
+  let innerHash = innerCtx.digest()
+
+  var outerCtx = initSha_256()
+  outerCtx.update(opad.toOpenArray(0, opad.len-1))
+  outerCtx.update(innerHash.toOpenArray(0, innerHash.len-1))
+  let outerHash = outerCtx.digest()
+
+  return $outerHash
 
 proc createToken*(am: AuthManager, claims: JWTClaims): string =
   let header = base64UrlEncode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}")
@@ -64,7 +86,7 @@ proc createToken*(am: AuthManager, claims: JWTClaims): string =
     "{\"sub\":\"" & claims.sub & "\",\"role\":\"" & claims.role &
     "\",\"database\":\"" & claims.database & "\"}")
   let data = header & "." & payload
-  let signature = simpleHash(data, am.secretKey)
+  let signature = hmacSha256(am.secretKey, data)
   am.tokens.add(data & "." & base64UrlEncode(signature))
   return am.tokens[^1]
 
@@ -73,7 +95,7 @@ proc verifyToken*(am: AuthManager, token: string): (bool, JWTClaims) =
   if parts.len != 3:
     return (false, JWTClaims())
   let data = parts[0] & "." & parts[1]
-  let sig = simpleHash(data, am.secretKey)
+  let sig = hmacSha256(am.secretKey, data)
   if base64UrlEncode(sig) != parts[2]:
     return (false, JWTClaims())
   # Parse payload
@@ -132,8 +154,8 @@ proc validateCredentials*(am: AuthManager, creds: AuthCredentials): AuthResult =
     if creds.username in am.users:
       let stored = am.users[creds.username]
       # SCRAM-SHA-256: client sends SHA-256(password) as payload
-      let clientHash = if creds.payload.len > 0: creds.payload else: simpleHash("", am.secretKey)
-      if stored == clientHash or stored == simpleHash(creds.payload, am.secretKey):
+      let clientHash = if creds.payload.len > 0: creds.payload else: hmacSha256(am.secretKey, "")
+      if stored == clientHash or stored == hmacSha256(am.secretKey, creds.payload):
         return AuthResult(authenticated: true, username: creds.username,
                           role: "user", database: "default")
     return AuthResult(authenticated: false, error: "Invalid SCRAM credentials")

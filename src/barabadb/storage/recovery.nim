@@ -168,7 +168,7 @@ proc recover*(rec: CrashRecovery, db: LSMTree = nil): RecoveryResult =
 proc totalEntries*(rec: CrashRecovery): int = rec.entries.len
 
 proc summary*(rec: CrashRecovery): string =
-  let r = rec.recover()
+  let r = rec.analyze()
   result = "WAL Recovery Summary:\n"
   result &= "  Total entries: " & $r.totalEntries & "\n"
   result &= "  Redone (committed): " & $r.redone & "\n"

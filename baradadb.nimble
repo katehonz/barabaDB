@@ -7,8 +7,6 @@ srcDir        = "src"
 bin           = @["baradadb"]
 binDir        = "build"
 
-switch("define", "ssl")
-
 # Dependencies
 requires "nim >= 2.2.0"
 requires "https://github.com/katehonz/hunos >= 1.2.0"
@@ -26,4 +24,4 @@ task test, "Run all tests":
   exec "nim c --path:src -d:ssl -r tests/test_all.nim"
 
 task bench, "Run benchmarks":
-  exec "nim c --path:src -d:ssl -d:release -r benchmarks/bench_storage.nim"
+  exec "nim c --path:src -d:ssl -d:release -r benchmarks/bench_all.nim"

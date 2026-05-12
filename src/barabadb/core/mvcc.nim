@@ -43,6 +43,8 @@ type
     nextLsn: uint64
     activeTxns: Table[TxnId, Transaction]
     committedTxns: seq[TxnId]
+    committedTxnsSet: HashSet[TxnId]
+    abortedTxns: HashSet[TxnId]
     globalVersions*: Table[string, seq[VersionedRecord]]
     txnTimeoutMs: int64
     deadlockDetector*: DeadlockDetector
@@ -59,6 +61,8 @@ proc newTxnManager*(txnTimeoutMs: int64 = 30000): TxnManager =
   result.nextLsn = 1
   result.activeTxns = initTable[TxnId, Transaction]()
   result.committedTxns = @[]
+  result.committedTxnsSet = initHashSet[TxnId]()
+  result.abortedTxns = initHashSet[TxnId]()
   result.globalVersions = initTable[string, seq[VersionedRecord]]()
   result.txnTimeoutMs = txnTimeoutMs
   result.deadlockDetector = newDeadlockDetector()
@@ -112,7 +116,12 @@ proc isVisible(tm: TxnManager, txn: Transaction, version: VersionedRecord): bool
     return false
   if creator in txn.snapshotTxns:
     return false
+  if creator in tm.abortedTxns:
+    return false
   if creator in tm.activeTxns and tm.activeTxns[creator].state != tsCommitted:
+    return false
+  # If creator is not active and not committed, it must be aborted
+  if creator notin tm.activeTxns and creator notin tm.committedTxnsSet:
     return false
 
   # Deleter must not be a visible committed txn
@@ -246,6 +255,7 @@ proc commit*(tm: TxnManager, txn: Transaction): bool =
 
   txn.state = tsCommitted
   tm.committedTxns.add(txn.id)
+  tm.committedTxnsSet.incl(txn.id)
   tm.activeTxns.del(txn.id)
   tm.deadlockDetector.removeTxn(uint64(txn.id))
   release(tm.lock)
@@ -258,6 +268,7 @@ proc abortTxn*(tm: TxnManager, txn: Transaction): bool =
     return false
   txn.state = tsAborted
   tm.activeTxns.del(txn.id)
+  tm.abortedTxns.incl(txn.id)
   tm.deadlockDetector.removeTxn(uint64(txn.id))
   release(tm.lock)
   return true

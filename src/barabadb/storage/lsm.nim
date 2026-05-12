@@ -31,6 +31,7 @@ type
     maxSize: int
 
   SSTable* = object
+    id*: int
     path*: string
     index*: Table[string, int64]
     bloom*: BloomFilter
@@ -186,6 +187,7 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
     if maxK == "" or entry.key > maxK: maxK = entry.key
 
   result = SSTable(
+    id: -1,
     path: path,
     index: idxTable,
     bloom: bloom,
@@ -238,6 +240,7 @@ proc loadSSTable*(path: string): SSTable =
     bloom.deserialize(bloomData)
 
   result = SSTable(
+    id: -1,
     path: path,
     index: idxTable,
     bloom: bloom,
@@ -294,6 +297,8 @@ proc close*(sst: var SSTable) =
 # LSMTree API
 # ----------------------------------------------------------------------
 
+proc flushUnsafe(db: LSMTree) {.gcsafe.}
+
 proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
   createDir(dir)
   createDir(dir / "sstables")
@@ -306,13 +311,14 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
     if kind == pcFile and path.endsWith(".sst"):
       try:
         var sst = loadSSTable(path)
-        sstables.add(sst)
         let name = splitFile(path).name
-        nextId = max(nextId, parseInt(name) + 1)
+        sst.id = parseInt(name)
+        sstables.add(sst)
+        nextId = max(nextId, sst.id + 1)
       except:
         discard  # skip corrupt SSTables
 
-  sstables.sort(proc(a, b: SSTable): int = cmp(a.minKey, b.minKey))
+  sstables.sort(proc(a, b: SSTable): int = cmp(b.id, a.id))
 
   new(result)
   initLock(result.lock)
@@ -328,8 +334,9 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
   # WAL crash recovery — replay unflushed entries into memTable
   let walPath = dir / "wal" / "wal.log"
   if fileExists(walPath):
+    var stream: FileStream = nil
     try:
-      let stream = newFileStream(walPath, fmRead)
+      stream = newFileStream(walPath, fmRead)
       if stream != nil:
         var magic: uint32 = 0
         var version: uint32 = 0
@@ -352,16 +359,20 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
                 if stream.readData(addr value[0], valLen.int) != valLen.int: break
               case WalEntryKind(kind)
               of wekPut:
-                discard result.memTable.put(key, value, timestamp)
+                if not result.memTable.put(key, value, timestamp):
+                  result.flushUnsafe()
+                  discard result.memTable.put(key, value, timestamp)
               of wekDelete:
-                discard result.memTable.put(key, @[], timestamp)  # tombstone
+                if not result.memTable.put(key, @[], timestamp, deleted = true):
+                  result.flushUnsafe()
+                  discard result.memTable.put(key, @[], timestamp, deleted = true)
               of wekCommit:
                 discard
               of wekCheckpoint:
                 discard
+    finally:
+      if stream != nil:
         stream.close()
-    except:
-      discard
 
 proc put*(db: LSMTree, key: string, value: seq[byte]) =
   acquire(db.lock)
@@ -369,6 +380,8 @@ proc put*(db: LSMTree, key: string, value: seq[byte]) =
   let ts = uint64(getMonoTime().ticks())
   db.wal.writePut(cast[seq[byte]](key), value, ts)
   if not db.memTable.put(key, value, ts):
+    if db.immutableMem.len > 0:
+      db.flushUnsafe()
     db.immutableMem = db.memTable
     db.memTable = newMemTable(db.memMaxSize)
     discard db.memTable.put(key, value, ts)
@@ -378,7 +391,12 @@ proc delete*(db: LSMTree, key: string) =
   defer: release(db.lock)
   let ts = uint64(getMonoTime().ticks())
   db.wal.writeDelete(cast[seq[byte]](key), ts)
-  discard db.memTable.put(key, @[], ts, deleted = true)
+  if not db.memTable.put(key, @[], ts, deleted = true):
+    if db.immutableMem.len > 0:
+      db.flushUnsafe()
+    db.immutableMem = db.memTable
+    db.memTable = newMemTable(db.memMaxSize)
+    discard db.memTable.put(key, @[], ts, deleted = true)
 
 proc getUnsafe(db: LSMTree, key: string): (bool, seq[byte]) =
   let (found, entry) = db.memTable.get(key)
@@ -438,8 +456,9 @@ proc flushUnsafe(db: LSMTree) =
   inc db.nextSSTableId
 
   var sst = writeSSTable(toFlush.entries, path, level = 0)
+  sst.id = db.nextSSTableId - 1
   db.sstables.add(sst)
-  db.sstables.sort(proc(a, b: SSTable): int = cmp(a.minKey, b.minKey))
+  # SSTables are kept in insertion order (newest last) so getUnsafe can search newest-first
 
   db.wal.writeCommit(uint64(getMonoTime().ticks()))
   db.wal.sync()

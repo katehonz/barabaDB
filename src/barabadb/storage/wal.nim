@@ -1,6 +1,7 @@
 ## WAL — Write-Ahead Log for durability
 import std/os
 import std/streams
+import std/posix
 
 const
   WALMagic* = 0x42415241'u32  # "BARA"
@@ -77,9 +78,17 @@ proc writeCommit*(wal: var WriteAheadLog, timestamp: uint64) =
 
 proc sync*(wal: var WriteAheadLog) =
   wal.stream.flush()
+  let fd = posix.open(wal.path, O_RDONLY)
+  if fd != -1:
+    discard posix.fsync(fd)
+    discard posix.close(fd)
 
 proc close*(wal: var WriteAheadLog) =
   wal.stream.flush()
+  let fd = posix.open(wal.path, O_RDONLY)
+  if fd != -1:
+    discard posix.fsync(fd)
+    discard posix.close(fd)
   wal.stream.close()
 
 proc entryCount*(wal: WriteAheadLog): uint64 = wal.entryCount

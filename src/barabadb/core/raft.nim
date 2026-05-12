@@ -290,7 +290,7 @@ proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
       matchIndices.add(idx)
     matchIndices.sort()
 
-    let medianIdx = matchIndices[matchIndices.len div 2]
+    let medianIdx = matchIndices[(matchIndices.len - 1) div 2]
     if medianIdx > node.commitIndex:
       if medianIdx <= node.lastLogIndex and
          node.log[medianIdx - 1].term == node.currentTerm:

@@ -410,6 +410,8 @@ proc parseRowData(valStr: string): Table[string, string] =
       let v = part[eqPos+1..^1].strip()
       result[k] = v
 
+proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row]
+
 proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string =
   if expr == nil: return ""
   case expr.kind
@@ -593,7 +595,11 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       let v = evalExpr(expr.unExpr, row)
       return if not isNull(v): "true" else: "false"
     else: return "false"
-  of irekExists: return "false"
+  of irekExists:
+    if ctx != nil:
+      let rows = executePlan(ctx, expr.existsSubquery)
+      return if rows.len > 0: "true" else: "false"
+    return "false"
   else: return ""
 
 proc lowerExpr*(node: Node): IRExpr
