@@ -2,6 +2,7 @@
 import std/strutils
 import std/base64
 import std/tables
+import std/times
 import checksums/sha2
 
 type
@@ -82,13 +83,28 @@ proc hmacSha256(key, message: string): string =
 
 proc createToken*(am: AuthManager, claims: JWTClaims): string =
   let header = base64UrlEncode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}")
-  let payload = base64UrlEncode(
-    "{\"sub\":\"" & claims.sub & "\",\"role\":\"" & claims.role &
-    "\",\"database\":\"" & claims.database & "\"}")
+  var payloadJson = "{\"sub\":\"" & claims.sub & "\",\"role\":\"" & claims.role &
+    "\",\"database\":\"" & claims.database & "\""
+  if claims.exp > 0:
+    payloadJson &= ",\"exp\":" & $claims.exp
+  if claims.iat > 0:
+    payloadJson &= ",\"iat\":" & $claims.iat
+  if claims.nbf > 0:
+    payloadJson &= ",\"nbf\":" & $claims.nbf
+  payloadJson &= "}"
+  let payload = base64UrlEncode(payloadJson)
   let data = header & "." & payload
   let signature = hmacSha256(am.secretKey, data)
   am.tokens.add(data & "." & base64UrlEncode(signature))
   return am.tokens[^1]
+
+proc constantTimeCompare(a, b: string): bool =
+  if a.len != b.len:
+    return false
+  var result = 0
+  for i in 0..<a.len:
+    result = result or (ord(a[i]) xor ord(b[i]))
+  return result == 0
 
 proc verifyToken*(am: AuthManager, token: string): (bool, JWTClaims) =
   let parts = token.split(".")
@@ -96,7 +112,7 @@ proc verifyToken*(am: AuthManager, token: string): (bool, JWTClaims) =
     return (false, JWTClaims())
   let data = parts[0] & "." & parts[1]
   let sig = hmacSha256(am.secretKey, data)
-  if base64UrlEncode(sig) != parts[2]:
+  if not constantTimeCompare(base64UrlEncode(sig), parts[2]):
     return (false, JWTClaims())
   # Parse payload
   let payload = base64UrlDecode(parts[1])
@@ -132,10 +148,23 @@ proc verifyToken*(am: AuthManager, token: string): (bool, JWTClaims) =
       of "database": claims.database = val
       of "iss": claims.iss = val
       of "aud": claims.aud = val
+      of "exp": claims.exp = parseInt(val)
+      of "iat": claims.iat = parseInt(val)
+      of "nbf": claims.nbf = parseInt(val)
+      of "jti": claims.jti = val
       else: discard
     if i < payload.len and payload[i] == ',':
       inc i
     inc i
+  # Validate expiration
+  let now = int64(getTime().toUnix())
+  if claims.exp > 0 and now > claims.exp:
+    return (false, JWTClaims())
+  if claims.nbf > 0 and now < claims.nbf:
+    return (false, JWTClaims())
+  if claims.iat > 0 and now < claims.iat - 60:
+    # Allow 60 seconds clock skew
+    return (false, JWTClaims())
   return (true, claims)
 
 proc validateCredentials*(am: AuthManager, creds: AuthCredentials): AuthResult =
