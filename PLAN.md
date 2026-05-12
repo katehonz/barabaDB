@@ -42,8 +42,8 @@
 | `gossip` | ✅ Поправен `LearnViaGossip` — вече не overwrite-ва по-силно с по-слабо състояние | Safety |
 | `replication` | `WriteLsn` не моделира data transfer | Safety |
 | `sharding` | `Rebalance` не моделира data migration | Safety |
-| `backup` | Няма TLA+ спек (498 реда Nim без покритие) | Coverage |
-| `recovery` | Няма TLA+ спек за WAL replay (177 реда Nim без покритие) | Coverage |
+| `backup` | ✅ TLA+ спек за backup/restore/verify/cleanup — `BackupSnapshotsValid`, `RestoreIntegrity`, `RetentionInvariant` | Coverage |
+| `recovery` | ✅ TLA+ спек за WAL REDO/UNDO — `RedoCommitted`, `RecoveryCompleteness`, `WalIntegrity` | Coverage |
 | `crossmodal` | Няма TLA+ спек за cross-modal consistency | Coverage |
 
 ---
@@ -73,8 +73,8 @@
 
 | # | Задача | Покрива | Приоритет |
 |---|--------|---------|-----------|
-| FV-10 | **`backup.tla`** | `backup.nim` (498 реда) — restore atomicity, no data loss, cleanup safety | Висок |
-| FV-11 | **`recovery.tla`** | `recovery.nim` (177 реда) — WAL replay correctness, committed survives, uncommitted rolled back | Висок |
+| FV-10 | ~~**`backup.tla`**~~ ✅ | `backup.nim` — `BackupSnapshotsValid`, `RestoreIntegrity`, `VerifyIntegrity`, `RetentionInvariant`, `HistoryConsistency`, `BackupIdValid` | Висок |
+| FV-11 | ~~**`recovery.tla`**~~ ✅ | `recovery.nim` — `RedoCommitted`, `RecoveryCompleteness`, `WalIntegrity` | Висок |
 | FV-12 | **`crossmodal.tla`** | `crossmodal.nim` (250 реда) — consistency между document/vector/graph/FTS индекси | Среден |
 
 ### 🔧 Инфраструктурни
