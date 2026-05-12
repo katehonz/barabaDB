@@ -51,6 +51,7 @@ type
     currentSeq: uint64
     nextSSTableId: int
     lock*: Lock
+    walLock*: Lock
 
 proc newMemTable(maxSize: int = DefaultMemTableSize): MemTable =
   MemTable(entries: @[], size: 0, maxSize: maxSize)
@@ -322,6 +323,7 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
 
   new(result)
   initLock(result.lock)
+  initLock(result.walLock)
   result.dir = dir
   result.memTable = newMemTable(memMaxSize)
   result.immutableMem = newMemTable(0)
@@ -375,10 +377,13 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
         stream.close()
 
 proc put*(db: LSMTree, key: string, value: seq[byte]) =
+  let ts = uint64(getMonoTime().ticks())
+  acquire(db.walLock)
+  db.wal.writePut(cast[seq[byte]](key), value, ts)
+  release(db.walLock)
+
   acquire(db.lock)
   defer: release(db.lock)
-  let ts = uint64(getMonoTime().ticks())
-  db.wal.writePut(cast[seq[byte]](key), value, ts)
   if not db.memTable.put(key, value, ts):
     if db.immutableMem.len > 0:
       db.flushUnsafe()
@@ -387,10 +392,13 @@ proc put*(db: LSMTree, key: string, value: seq[byte]) =
     discard db.memTable.put(key, value, ts)
 
 proc delete*(db: LSMTree, key: string) =
+  let ts = uint64(getMonoTime().ticks())
+  acquire(db.walLock)
+  db.wal.writeDelete(cast[seq[byte]](key), ts)
+  release(db.walLock)
+
   acquire(db.lock)
   defer: release(db.lock)
-  let ts = uint64(getMonoTime().ticks())
-  db.wal.writeDelete(cast[seq[byte]](key), ts)
   if not db.memTable.put(key, @[], ts, deleted = true):
     if db.immutableMem.len > 0:
       db.flushUnsafe()

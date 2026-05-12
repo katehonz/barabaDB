@@ -10,6 +10,7 @@ import std/asyncnet
 import std/streams
 import std/strutils
 import std/endians
+import std/os
 import ../protocol/wire
 
 type
@@ -46,6 +47,7 @@ type
     votesReceived*: HashSet[string]
     peerAddrs*: Table[string, tuple[host: string, port: int]]
     raftPort*: int
+    dataDir*: string
 
   RaftMessageKind* = enum
     rmkRequestVote
@@ -73,9 +75,61 @@ type
     nodes*: Table[string, RaftNode]
     messageQueue*: Deque[RaftMessage]
 
-proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0): RaftNode =
+const RaftStateFile = "raft_state.bin"
+
+proc saveState(node: RaftNode) =
+  if node.dataDir.len == 0: return
+  createDir(node.dataDir)
+  let path = node.dataDir / RaftStateFile
+  let tmpPath = path & ".tmp"
+  var s = newFileStream(tmpPath, fmWrite)
+  if s == nil: return
+  s.write(node.currentTerm)
+  s.write(uint32(node.votedFor.len))
+  s.write(node.votedFor)
+  s.write(uint32(node.log.len))
+  for entry in node.log:
+    s.write(entry.term)
+    s.write(entry.index)
+    s.write(uint32(entry.command.len))
+    s.write(entry.command)
+    s.write(uint32(entry.data.len))
+    if entry.data.len > 0:
+      s.writeData(addr entry.data[0], entry.data.len)
+  s.close()
+  moveFile(tmpPath, path)
+
+proc loadState(node: RaftNode) =
+  if node.dataDir.len == 0: return
+  let path = node.dataDir / RaftStateFile
+  if not fileExists(path): return
+  var s = newFileStream(path, fmRead)
+  if s == nil: return
+  try:
+    node.currentTerm = s.readUint64()
+    let votedForLen = int(s.readUint32())
+    if votedForLen > 0:
+      node.votedFor = s.readStr(votedForLen)
+    let logLen = int(s.readUint32())
+    node.log = newSeq[LogEntry](logLen)
+    for i in 0..<logLen:
+      let term = s.readUint64()
+      let index = s.readUint64()
+      let cmdLen = int(s.readUint32())
+      let cmd = s.readStr(cmdLen)
+      let dataLen = int(s.readUint32())
+      var data = newSeq[byte](dataLen)
+      if dataLen > 0:
+        discard s.readData(addr data[0], dataLen)
+      node.log[i] = LogEntry(term: term, index: index, command: cmd, data: data)
+  except:
+    discard
+  s.close()
+
+proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0,
+                  dataDir: string = ""): RaftNode =
   randomize()
-  RaftNode(
+  result = RaftNode(
     id: id,
     state: rsFollower,
     currentTerm: 0,
@@ -92,7 +146,9 @@ proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0): RaftNode =
     votesReceived: initHashSet[string](),
     peerAddrs: initTable[string, tuple[host: string, port: int]](),
     raftPort: raftPort,
+    dataDir: dataDir,
   )
+  result.loadState()
 
 proc newRaftCluster*(): RaftCluster =
   RaftCluster(
@@ -131,6 +187,7 @@ proc becomeFollower*(node: RaftNode, term: uint64) =
   node.currentTerm = term
   node.votedFor = ""
   node.votesReceived.clear()
+  node.saveState()
 
 proc becomeCandidate*(node: RaftNode) =
   node.state = rsCandidate
@@ -138,6 +195,7 @@ proc becomeCandidate*(node: RaftNode) =
   node.votedFor = node.id
   node.votesReceived.clear()
   node.votesReceived.incl(node.id)
+  node.saveState()
 
 proc becomeLeader*(node: RaftNode) =
   node.state = rsLeader
@@ -166,6 +224,7 @@ proc handleRequestVote*(node: RaftNode, msg: RaftMessage): RaftMessage =
 
   if canVote and logOk:
     node.votedFor = msg.senderId
+    node.saveState()
     reply.success = true
     reply.term = node.currentTerm
 
@@ -197,14 +256,20 @@ proc handleAppendEntries*(node: RaftNode, msg: RaftMessage): RaftMessage =
       return reply
 
   # Append new entries
+  var logChanged = false
   for entry in msg.entries:
     let idx = int(entry.index - 1)
     if idx < node.log.len:
       if node.log[idx].term != entry.term:
         node.log.setLen(idx)
         node.log.add(entry)
+        logChanged = true
     else:
       node.log.add(entry)
+      logChanged = true
+
+  if logChanged:
+    node.saveState()
 
   # Update commit index
   if msg.leaderCommit > node.commitIndex:
@@ -258,6 +323,7 @@ proc appendLog*(node: RaftNode, command: string, data: seq[byte] = @[]): LogEntr
     data: data,
   )
   node.log.add(result)
+  node.saveState()
 
 proc handleVoteReply*(node: RaftNode, reply: RaftMessage) =
   if reply.term > node.currentTerm:

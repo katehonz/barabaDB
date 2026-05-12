@@ -229,6 +229,8 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
 proc delete*(tm: TxnManager, txn: Transaction, key: string): bool =
   return tm.write(txn, key, @[])
 
+proc compactVersions*(tm: TxnManager)
+
 proc commit*(tm: TxnManager, txn: Transaction): bool =
   acquire(tm.lock)
   if txn.state != tsActive:
@@ -258,8 +260,40 @@ proc commit*(tm: TxnManager, txn: Transaction): bool =
   tm.committedTxnsSet.incl(txn.id)
   tm.activeTxns.del(txn.id)
   tm.deadlockDetector.removeTxn(uint64(txn.id))
+
+  # Compact version chains periodically (every 100 commits)
+  if tm.committedTxns.len mod 100 == 0:
+    tm.compactVersions()
+
   release(tm.lock)
   return true
+
+proc compactVersions*(tm: TxnManager) =
+  ## Remove old overwritten versions that are no longer visible to any active transaction.
+  for key, versions in tm.globalVersions.mpairs:
+    if versions.len <= 3:
+      continue
+    var newVersions: seq[VersionedRecord] = @[]
+    for i in 0..<versions.len:
+      let v = versions[i]
+      # Always keep the latest (non-deleted) version
+      if v.xmax == TxnId(0):
+        newVersions.add(v)
+        continue
+      # For old overwritten versions, check if any active txn might still see them
+      var mightBeVisible = false
+      for txnId, txn in tm.activeTxns:
+        if txn.state == tsActive:
+          # A version is visible if its creator is not newer than snapshotMaxTxn
+          # and the creator was committed at snapshot time
+          if uint64(v.xmin) <= uint64(txn.snapshotMaxTxn) and
+             v.xmin notin txn.snapshotTxns and
+             v.xmin notin tm.abortedTxns:
+            mightBeVisible = true
+            break
+      if mightBeVisible:
+        newVersions.add(v)
+    versions = newVersions
 
 proc abortTxn*(tm: TxnManager, txn: Transaction): bool =
   acquire(tm.lock)

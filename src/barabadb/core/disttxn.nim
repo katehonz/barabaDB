@@ -166,16 +166,16 @@ proc commit*(txn: DistributedTransaction): bool =
   if allOk:
     txn.state = dtsCommitted
   else:
-    # Rollback committed participants on commit failure
-    for nodeId in committedNodes:
-      var p = txn.participants[nodeId]
-      if p.host.len > 0 and p.port > 0:
-        discard sendDistTxnRpc(p.host, p.port, txn.id, "ROLLBACK")
-      p.committed = false
-      p.aborted = true
-    txn.state = dtsAborted
+    if committedNodes.len > 0:
+      # Some participants already committed — cannot rollback committed nodes
+      # without violating atomicity. Mark as committed and rely on
+      # reconciliation/retry for the remaining participants.
+      txn.state = dtsCommitted
+    else:
+      # No participant committed yet — safe to abort
+      txn.state = dtsAborted
   release(txn.lock)
-  return allOk
+  return allOk or committedNodes.len > 0
 
 proc rollback*(txn: DistributedTransaction): bool =
   acquire(txn.lock)
