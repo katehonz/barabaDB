@@ -90,6 +90,26 @@ proc newRateLimiter*(algo: RateLimitAlgo = rlaTokenBucket,
 proc allowRequest*(rl: RateLimiter, clientId: string): bool =
   acquire(rl.lock)
 
+  # Global rate enforcement
+  var globalOk = true
+  if rl.globalRate > 0:
+    let globalKey = "__global__"
+    case rl.algo
+    of rlaTokenBucket:
+      if globalKey notin rl.buckets:
+        rl.buckets[globalKey] = newTokenBucket(float64(rl.globalRate),
+                                              float64(rl.globalRate) / 60.0)
+      globalOk = rl.buckets[globalKey].consume()
+    of rlaSlidingWindow, rlaFixedWindow:
+      if globalKey notin rl.windows:
+        rl.windows[globalKey] = newSlidingWindow(60_000_000_000, rl.globalRate)
+      globalOk = rl.windows[globalKey].allow()
+
+  if not globalOk:
+    release(rl.lock)
+    return false
+
+  # Per-client rate enforcement
   case rl.algo
   of rlaTokenBucket:
     if clientId notin rl.buckets:
@@ -120,6 +140,25 @@ proc remainingQuota*(rl: RateLimiter, clientId: string): int =
       result = rl.perClientRate - rl.windows[clientId].requestCount()
     else:
       result = rl.perClientRate
+  release(rl.lock)
+
+proc cleanupStaleClients*(rl: RateLimiter, maxClients: int = 10000) =
+  acquire(rl.lock)
+  # Remove oldest clients if exceeding max
+  if rl.buckets.len > maxClients:
+    var toRemove = rl.buckets.len - maxClients
+    for key in rl.buckets.keys:
+      if key != "__global__":
+        rl.buckets.del(key)
+        dec toRemove
+        if toRemove <= 0: break
+  if rl.windows.len > maxClients:
+    var toRemove = rl.windows.len - maxClients
+    for key in rl.windows.keys:
+      if key != "__global__":
+        rl.windows.del(key)
+        dec toRemove
+        if toRemove <= 0: break
   release(rl.lock)
 
 proc resetClient*(rl: RateLimiter, clientId: string) =

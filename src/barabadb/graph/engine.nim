@@ -70,6 +70,10 @@ proc addEdge*(g: Graph, src, dst: NodeId, label: string = "",
               weight: float64 = 1.0): EdgeId =
   acquire(g.lock)
   defer: release(g.lock)
+  if src notin g.nodes:
+    raise newException(KeyError, "Source node does not exist: " & $uint64(src))
+  if dst notin g.nodes:
+    raise newException(KeyError, "Destination node does not exist: " & $uint64(dst))
   let id = EdgeId(g.nextEdgeId)
   inc g.nextEdgeId
   g.edges[id] = Edge(id: id, src: src, dst: dst, label: label,

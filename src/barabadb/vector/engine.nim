@@ -82,6 +82,8 @@ proc manhattanDistance*(a, b: Vector): float64 =
   return sum
 
 proc distance*(a, b: Vector, metric: DistanceMetric): float64 =
+  if a.len != b.len:
+    raise newException(ValueError, "Vector dimension mismatch: " & $a.len & " != " & $b.len)
   case metric
   of dmCosine: cosineDistance(a, b)
   of dmEuclidean: euclideanDistance(a, b)

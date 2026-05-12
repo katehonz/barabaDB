@@ -188,7 +188,10 @@ proc exprToSql(node: Node): string =
       else: " " & $node.binOp & " "
     return exprToSql(node.binLeft) & opStr & exprToSql(node.binRight)
   of nkFuncCall:
-    return node.funcName & "(" & exprToSql(node.funcArgs[0]) & ")"
+    if node.funcArgs.len > 0:
+      return node.funcName & "(" & exprToSql(node.funcArgs[0]) & ")"
+    else:
+      return node.funcName & "()"
   of nkUnaryOp:
     return $node.unOp & " " & exprToSql(node.unOperand)
   else:
@@ -1256,9 +1259,10 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         if i < plan.projectExprs.len:
           let expr = plan.projectExprs[i]
           if expr.kind == irekStar:
-            for k, v in sourceRows[0]:
-              if not k.startsWith("$") and not k.contains("."):
-                newRow[k] = v
+            if sourceRows.len > 0:
+              for k, v in sourceRows[0]:
+                if not k.startsWith("$") and not k.contains("."):
+                  newRow[k] = v
           elif expr.kind == irekAggregate:
             case expr.aggOp
             of irCount:
@@ -2004,9 +2008,10 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
 
     # Fire BEFORE INSERT triggers
     var row = initTable[string, string]()
-    for i, f in mutableFields:
-      if i < mutableValues[0].len:
-        row[f] = mutableValues[0][i]
+    if mutableValues.len > 0:
+      for i, f in mutableFields:
+        if i < mutableValues[0].len:
+          row[f] = mutableValues[0][i]
     fireTriggers(ctx, stmt.insTarget, "before", "insert", row)
 
     var kvPairs: seq[(string, seq[byte])]

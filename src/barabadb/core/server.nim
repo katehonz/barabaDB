@@ -250,6 +250,16 @@ proc verifyToken(secret, tokenStr: string): (bool, string, string) =
   except:
     return (false, "", "")
 
+proc recvWithTimeout(client: AsyncSocket, size: int, timeoutMs: int): Future[string] {.async.} =
+  if timeoutMs <= 0:
+    return await client.recv(size)
+  let fut = client.recv(size)
+  let timeoutFut = sleepAsync(timeoutMs)
+  await fut or timeoutFut
+  if fut.finished:
+    return fut.read()
+  return ""
+
 proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} =
   info("Client " & $clientId & " connected")
   var connCtx = cloneForConnection(server.ctx)
@@ -270,7 +280,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         # Text-based 2PC protocol: read rest of line
         var rest = headerData[7..^1]
         while '\n' notin rest:
-          let more = await client.recv(1024)
+          let more = await client.recvWithTimeout(1024, idleTimeout)
           if more.len == 0: break
           rest.add(more)
         let parts = rest.strip().split(" ")
@@ -308,7 +318,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
       if headerData.len >= 4 and headerData[0..3] == "REP ":
         var rest = headerData[4..^1]
         while '\n' notin rest:
-          let more = await client.recv(1024)
+          let more = await client.recvWithTimeout(1024, idleTimeout)
           if more.len == 0: break
           rest.add(more)
         let parts = rest.strip().split(" ")
@@ -318,7 +328,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           if dataLen > 0:
             var data = ""
             while data.len < dataLen:
-              let chunk = await client.recv(dataLen - data.len)
+              let chunk = await client.recvWithTimeout(dataLen - data.len, idleTimeout)
               if chunk.len == 0: break
               data.add(chunk)
             # Apply replicated data to database
@@ -424,7 +434,8 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
   except Exception as e:
     errorMsg("Client " & $clientId & " error: " & e.msg)
   finally:
-    dec server.activeConnections
+    if server.activeConnections > 0:
+      dec server.activeConnections
     info("Client " & $clientId & " disconnected")
     client.close()
 
