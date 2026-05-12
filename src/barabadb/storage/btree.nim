@@ -119,3 +119,31 @@ proc scan*[K, V](btree: BTreeIndex[K, V], startKey, endKey: K): seq[(K, seq[V])]
     node = node.next
 
 proc len*[K, V](btree: BTreeIndex[K, V]): int = btree.size
+
+proc remove*[K, V](btree: var BTreeIndex[K, V], key: K, value: V) =
+  proc removeRec(node: BTreeNode[K, V]): bool =
+    var i = 0
+    while i < node.keys.len and key > node.keys[i]:
+      inc i
+    if node.isLeaf:
+      if i < node.keys.len and key == node.keys[i]:
+        var vals = node.values[i]
+        var idx = -1
+        for j in 0..<vals.len:
+          if vals[j] == value:
+            idx = j
+            break
+        if idx >= 0:
+          vals.del(idx)
+          if vals.len == 0:
+            node.keys.del(i)
+            node.values.del(i)
+          else:
+            node.values[i] = vals
+          return true
+      return false
+    else:
+      return removeRec(node.children[i])
+
+  if removeRec(btree.root):
+    dec btree.size

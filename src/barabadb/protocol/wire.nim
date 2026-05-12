@@ -4,6 +4,11 @@ import std/endians
 const
   ProtocolVersion* = 1'u32
   Magic* = 0x42415241'u32  # "BARA"
+  MaxWireStringLen* = 64 * 1024 * 1024  # 64 MB
+  MaxWireArrayLen* = 1_000_000
+  MaxWireObjectLen* = 1_000_000
+  MaxWireVectorLen* = 1_000_000
+  MaxWireDeserializeDepth* = 100
 
 type
   MsgKind* = enum
@@ -110,6 +115,8 @@ proc writeBytes*(buf: var seq[byte], data: openArray[byte]) =
     buf.add(b)
 
 proc readUint32*(buf: openArray[byte], pos: var int): uint32 =
+  if pos + 4 > buf.len:
+    raise newException(ValueError, "Wire protocol: truncated uint32")
   var bytes: array[4, byte]
   for i in 0..3:
     bytes[i] = buf[pos + i]
@@ -117,6 +124,8 @@ proc readUint32*(buf: openArray[byte], pos: var int): uint32 =
   pos += 4
 
 proc readUint64*(buf: openArray[byte], pos: var int): uint64 =
+  if pos + 8 > buf.len:
+    raise newException(ValueError, "Wire protocol: truncated uint64")
   var bytes: array[8, byte]
   for i in 0..7:
     bytes[i] = buf[pos + i]
@@ -125,6 +134,10 @@ proc readUint64*(buf: openArray[byte], pos: var int): uint64 =
 
 proc readString*(buf: openArray[byte], pos: var int): string =
   let len = int(readUint32(buf, pos))
+  if len > MaxWireStringLen:
+    raise newException(ValueError, "Wire protocol: string exceeds max length")
+  if pos + len > buf.len:
+    raise newException(ValueError, "Wire protocol: truncated string data")
   result = newString(len)
   for i in 0..<len:
     result[i] = char(buf[pos + i])
@@ -132,6 +145,10 @@ proc readString*(buf: openArray[byte], pos: var int): string =
 
 proc readBytes*(buf: openArray[byte], pos: var int): seq[byte] =
   let len = int(readUint32(buf, pos))
+  if len > MaxWireStringLen:
+    raise newException(ValueError, "Wire protocol: bytes exceed max length")
+  if pos + len > buf.len:
+    raise newException(ValueError, "Wire protocol: truncated bytes data")
   result = newSeq[byte](len)
   for i in 0..<len:
     result[i] = buf[pos + i]
@@ -180,7 +197,11 @@ proc serializeValue*(buf: var seq[byte], val: WireValue) =
   of fkJson:
     buf.writeString(val.jsonVal)
 
-proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
+proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): WireValue =
+  if depth > MaxWireDeserializeDepth:
+    raise newException(ValueError, "Wire protocol: max deserialization depth exceeded")
+  if pos >= buf.len:
+    raise newException(ValueError, "Wire protocol: unexpected end of buffer")
   let kind = FieldKind(buf[pos])
   inc pos
   case kind
@@ -222,20 +243,28 @@ proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
     result = WireValue(kind: fkBytes, bytesVal: readBytes(buf, pos))
   of fkArray:
     let count = int(readUint32(buf, pos))
+    if count > MaxWireArrayLen:
+      raise newException(ValueError, "Wire protocol: array exceeds max length")
     var arr: seq[WireValue] = @[]
     for i in 0..<count:
-      arr.add(deserializeValue(buf, pos))
+      arr.add(deserializeValue(buf, pos, depth + 1))
     result = WireValue(kind: fkArray, arrayVal: arr)
   of fkObject:
     let count = int(readUint32(buf, pos))
+    if count > MaxWireObjectLen:
+      raise newException(ValueError, "Wire protocol: object exceeds max length")
     var obj: seq[(string, WireValue)] = @[]
     for i in 0..<count:
       let name = readString(buf, pos)
-      let val = deserializeValue(buf, pos)
+      let val = deserializeValue(buf, pos, depth + 1)
       obj.add((name, val))
     result = WireValue(kind: fkObject, objVal: obj)
   of fkVector:
     let count = int(readUint32(buf, pos))
+    if count > MaxWireVectorLen:
+      raise newException(ValueError, "Wire protocol: vector exceeds max length")
+    if pos + count * 4 > buf.len:
+      raise newException(ValueError, "Wire protocol: truncated vector data")
     var vec: seq[float32] = @[]
     for i in 0..<count:
       var fl: float32
@@ -283,9 +312,13 @@ proc makeQueryParamsMessage*(requestId: uint32, query: string, params: seq[WireV
 proc readQueryParamsMessage*(payload: openArray[byte]): (string, seq[WireValue]) =
   var pos = 0
   let queryStr = readString(payload, pos)
+  if pos >= payload.len:
+    raise newException(ValueError, "Wire protocol: missing format byte")
   discard payload[pos]  # format byte
   pos += 1
   let paramCount = int(readUint32(payload, pos))
+  if paramCount > MaxWireArrayLen:
+    raise newException(ValueError, "Wire protocol: param count exceeds max")
   var params: seq[WireValue] = @[]
   for i in 0..<paramCount:
     params.add(deserializeValue(payload, pos))

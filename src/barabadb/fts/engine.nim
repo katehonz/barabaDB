@@ -85,9 +85,10 @@ proc simpleStem(word: string): string =
 proc tokenize*(text: string, config: TokenizerConfig = defaultTokenizerConfig()): seq[string] =
   result = @[]
   var word = ""
-  for ch in text:
-    if ch.isAlphaNumeric() or ch in {'_', '-'}:
-      word.add(ch)
+  for r in text.runes:
+    let rStr = $r
+    if r.isAlpha() or rStr == "_" or rStr == "-":
+      word.add(rStr)
     else:
       if word.len > 0:
         var token = word

@@ -79,8 +79,8 @@ proc generateSelfSignedCert*(outputDir: string, commonName: string = "localhost"
   let certPath = outputDir / (commonName & ".crt")
   let keyPath = outputDir / (commonName & ".key")
   createDir(outputDir)
-  let cmd = "openssl req -x509 -newkey rsa:2048 -keyout " & keyPath &
-            " -out " & certPath & " -days 365 -nodes -subj '/CN=" & commonName & "' 2>/dev/null"
+  let cmd = "openssl req -x509 -newkey rsa:2048 -keyout " & quoteShell(keyPath) &
+            " -out " & quoteShell(certPath) & " -days 365 -nodes -subj " & quoteShell("/CN=" & commonName) & " 2>/dev/null"
   if execShellCmd(cmd) == 0 and fileExists(certPath):
     return (certPath, keyPath)
   return ("", "")
@@ -88,7 +88,7 @@ proc generateSelfSignedCert*(outputDir: string, commonName: string = "localhost"
 proc certificateFingerprint*(certPath: string): string =
   if not fileExists(certPath):
     return ""
-  let cmd = "openssl x509 -in " & certPath & " -fingerprint -noout 2>/dev/null"
+  let cmd = "openssl x509 -in " & quoteShell(certPath) & " -fingerprint -noout 2>/dev/null"
   let (output, _) = execCmdEx(cmd)
   for line in output.splitLines():
     if "Fingerprint=" in line:
@@ -100,17 +100,17 @@ proc certificateFingerprint*(certPath: string): string =
 proc isExpired*(certPath: string): bool =
   if not fileExists(certPath):
     return true
-  let cmd = "openssl x509 -in " & certPath & " -checkend 0 2>/dev/null"
+  let cmd = "openssl x509 -in " & quoteShell(certPath) & " -checkend 0 2>/dev/null"
   return execShellCmd(cmd) != 0
 
 proc daysUntilExpiry*(certPath: string): int =
   if not fileExists(certPath):
     return -1
   # Check if expires within 1 day
-  let cmd1 = "openssl x509 -in " & certPath & " -checkend 86400 2>/dev/null"
+  let cmd1 = "openssl x509 -in " & quoteShell(certPath) & " -checkend 86400 2>/dev/null"
   if execShellCmd(cmd1) == 0:
     # Check if expires within 30 days
-    let cmd30 = "openssl x509 -in " & certPath & " -checkend 2592000 2>/dev/null"
+    let cmd30 = "openssl x509 -in " & quoteShell(certPath) & " -checkend 2592000 2>/dev/null"
     if execShellCmd(cmd30) == 0:
       return 365
     return 30

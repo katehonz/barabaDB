@@ -5,6 +5,7 @@ import std/random
 import std/tables
 import std/sets
 import std/monotimes
+import std/locks
 
 type
   DistanceMetric* = enum
@@ -35,6 +36,7 @@ type
     maxM*: int
     metric*: DistanceMetric
     dimensions*: int
+    lock*: Lock
 
   IVFCluster* = object
     centroid*: Vector
@@ -92,7 +94,7 @@ proc distance*(a, b: Vector, metric: DistanceMetric): float64 =
 
 proc newHNSWIndex*(dimensions: int, m: int = 16, efConstruction: int = 200,
                    metric: DistanceMetric = dmCosine): HNSWIndex =
-  HNSWIndex(
+  var idx = HNSWIndex(
     nodes: initTable[uint64, HNSWNode](),
     entryPoint: 0,
     maxLevel: 0,
@@ -102,6 +104,8 @@ proc newHNSWIndex*(dimensions: int, m: int = 16, efConstruction: int = 200,
     metric: metric,
     dimensions: dimensions,
   )
+  initLock(idx.lock)
+  return idx
 
 proc randomLevel(m: int): int =
   ## Geometric distribution: probability of level L is (1/m)^L
@@ -192,6 +196,8 @@ proc addBidirectionalLink(idx: HNSWIndex, nodeId, neighborId: uint64, level: int
 
 proc insert*(idx: HNSWIndex, id: uint64, vector: Vector,
              metadata: Table[string, string] = initTable[string, string]()) =
+  acquire(idx.lock)
+  defer: release(idx.lock)
   let level = randomLevel(idx.m)
   let node = HNSWNode(id: id, vector: vector, metadata: metadata,
                       neighbors: newSeq[seq[uint64]](level + 1))
@@ -228,6 +234,8 @@ proc insert*(idx: HNSWIndex, id: uint64, vector: Vector,
 
 proc search*(idx: HNSWIndex, query: Vector, k: int,
              metric: DistanceMetric = dmCosine): seq[(uint64, float64)] =
+  acquire(idx.lock)
+  defer: release(idx.lock)
   if idx.nodes.len == 0:
     return @[]
 
@@ -251,6 +259,8 @@ proc search*(idx: HNSWIndex, query: Vector, k: int,
 proc searchWithFilter*(idx: HNSWIndex, query: Vector, k: int,
                        filter: proc(metadata: Table[string, string]): bool {.gcsafe.},
                        metric: DistanceMetric = dmCosine): seq[(uint64, float64)] =
+  acquire(idx.lock)
+  defer: release(idx.lock)
   if idx.nodes.len == 0:
     return @[]
 

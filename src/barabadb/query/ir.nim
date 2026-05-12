@@ -21,7 +21,7 @@ type
   IROperator* = enum
     irAdd, irSub, irMul, irDiv, irMod, irPow
     irEq, irNeq, irLt, irLte, irGt, irGte
-    irAnd, irOr, irNot
+    irAnd, irOr, irNot, irNeg
     irIn, irNotIn
     irLike, irILike
     irBetween

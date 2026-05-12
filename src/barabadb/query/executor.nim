@@ -120,6 +120,9 @@ type
     message*: string
     keyValuePairs*: seq[(string, seq[byte])]
 
+proc `==`*(a, b: IndexEntry): bool =
+  a.lsmKey == b.lsmKey and a.rowValue == b.rowValue
+
 proc okResult*(rows: seq[Row] = @[], cols: seq[string] = @[], affected: int = 0, msg: string = "",
                kvPairs: seq[(string, seq[byte])] = @[]): ExecResult =
   ExecResult(success: true, columns: cols, rows: rows, affectedRows: affected, message: msg,
@@ -159,7 +162,7 @@ proc exprToSql(node: Node): string =
   of nkFloatLit:
     return $node.floatVal
   of nkStringLit:
-    return "'" & node.strVal & "'"
+    return "'" & node.strVal.replace("'", "''") & "'"
   of nkBoolLit:
     return if node.boolVal: "true" else: "false"
   of nkNullLit:
@@ -521,14 +524,30 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       try: return $(pow(parseFloat(left), parseFloat(right)))
       except: return "0"
     of irLike:
-      let pattern = right.replace("%", ".*").replace("_", ".")
+      proc escapeRe(s: string): string =
+        result = ""
+        for ch in s:
+          case ch
+          of '\\', '.', '*', '+', '?', '|', '^', '$', '(', ')', '[', ']', '{', '}':
+            result &= "\\" & ch
+          else:
+            result &= ch
+      let pattern = "^" & escapeRe(right).replace("%", ".*").replace("_", ".") & "$"
       try:
         let rePattern = re(pattern)
         if left.match(rePattern): return "true"
       except: discard
       return "false"
     of irILike:
-      let pattern = right.toLower().replace("%", ".*").replace("_", ".")
+      proc escapeRe(s: string): string =
+        result = ""
+        for ch in s:
+          case ch
+          of '\\', '.', '*', '+', '?', '|', '^', '$', '(', ')', '[', ']', '{', '}':
+            result &= "\\" & ch
+          else:
+            result &= ch
+      let pattern = "^" & escapeRe(right.toLower()).replace("%", ".*").replace("_", ".") & "$"
       try:
         let rePattern = re(pattern)
         if left.toLower().match(rePattern): return "true"
@@ -776,6 +795,20 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string,
     else:
       ctx.db.delete(fullKey)
       kvPairs.add((fullKey, @[]))
+    # Update BTree indexes
+    for colName in ctx.btrees.keys.toSeq():
+      if colName.startsWith(table & "."):
+        let colsPart = colName[table.len + 1..^1]
+        let idxCols = colsPart.split(".")
+        var oldVals: seq[string] = @[]
+        for c in idxCols:
+          if c in oldRow:
+            oldVals.add(oldRow[c])
+          else:
+            oldVals.add("")
+        let oldIdxVal = oldVals.join("|")
+        if oldIdxVal.len > 0 and not isNull(oldIdxVal):
+          ctx.btrees[colName].remove(oldIdxVal, IndexEntry(lsmKey: fullKey, rowValue: cast[string](existingVal)))
     # Update FTS indexes
     for ftsKey, ftsIdx in ctx.ftsIndexes:
       if ftsKey.startsWith(table & "."):
@@ -826,6 +859,9 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
           newVals.add(parsed[c])
         else:
           newVals.add("")
+      let oldIdxVal = oldVals.join("|")
+      if oldIdxVal.len > 0 and not isNull(oldIdxVal):
+        ctx.btrees[colName].remove(oldIdxVal, IndexEntry(lsmKey: fullKey, rowValue: cast[string](existing)))
       let newIdxVal = newVals.join("|")
       if newIdxVal.len > 0 and not isNull(newIdxVal):
         ctx.btrees[colName].insert(newIdxVal, IndexEntry(lsmKey: fullKey, rowValue: newVal))
@@ -1036,19 +1072,26 @@ proc lowerExpr*(node: Node): IRExpr =
     result.binRight = lowerExpr(node.binRight)
   of nkUnaryOp:
     result = IRExpr(kind: irekUnary)
-    result.unOp = if node.unOp == ukNot: irNot else: irNot
+    result.unOp = if node.unOp == ukNot: irNot else: irNeg
     result.unExpr = lowerExpr(node.unOperand)
   of nkFuncCall:
-    result = IRExpr(kind: irekAggregate)
     case node.funcName.toLower()
-    of "count": result.aggOp = irCount
-    of "sum": result.aggOp = irSum
-    of "avg": result.aggOp = irAvg
-    of "min": result.aggOp = irMin
-    of "max": result.aggOp = irMax
-    else: result = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkNull))
-    result.aggArgs = @[]
-    for arg in node.funcArgs: result.aggArgs.add(lowerExpr(arg))
+    of "count", "sum", "avg", "min", "max":
+      result = IRExpr(kind: irekAggregate)
+      case node.funcName.toLower()
+      of "count": result.aggOp = irCount
+      of "sum": result.aggOp = irSum
+      of "avg": result.aggOp = irAvg
+      of "min": result.aggOp = irMin
+      of "max": result.aggOp = irMax
+      else: discard
+      result.aggArgs = @[]
+      for arg in node.funcArgs: result.aggArgs.add(lowerExpr(arg))
+    else:
+      result = IRExpr(kind: irekFuncCall)
+      result.irFunc = node.funcName
+      result.irFuncArgs = @[]
+      for arg in node.funcArgs: result.irFuncArgs.add(lowerExpr(arg))
   of nkIsExpr:
     result = IRExpr(kind: irekUnary)
     result.unOp = if node.isNegated: irIsNotNull else: irIsNull

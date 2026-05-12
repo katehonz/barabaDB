@@ -51,9 +51,9 @@ proc parsePrimary(p: var Parser): Node =
   of tkStringLit:
     discard p.advance()
     Node(kind: nkStringLit, strVal: tok.value, line: tok.line, col: tok.col)
-  of tkBoolLit:
+  of tkBoolLit, tkTrue, tkFalse:
     discard p.advance()
-    Node(kind: nkBoolLit, boolVal: tok.value == "true", line: tok.line, col: tok.col)
+    Node(kind: nkBoolLit, boolVal: tok.value == "true" or tok.kind == tkTrue, line: tok.line, col: tok.col)
   of tkNull:
     discard p.advance()
     Node(kind: nkNullLit, line: tok.line, col: tok.col)
