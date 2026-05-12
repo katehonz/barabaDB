@@ -38,7 +38,7 @@ type
     reverseAdj*: Table[NodeId, seq[AdjacencyEntry]]  # incoming
     nextNodeId: uint64
     nextEdgeId: uint64
-    lock: Lock
+    lock*: Lock
 
 proc `==`*(a, b: EdgeId): bool = uint64(a) == uint64(b)
 proc `==`*(a, b: NodeId): bool = uint64(a) == uint64(b)
@@ -352,6 +352,7 @@ proc loadFromFile*(path: string): Graph =
     lock: Lock(),
   )
   initLock(result.lock)
+  acquire(result.lock)
 
   for i in 0 ..< nodeCount:
     let id = NodeId(s.readUint64())
@@ -385,4 +386,5 @@ proc loadFromFile*(path: string): Graph =
     result.reverseAdj[dst].add(AdjacencyEntry(edgeId: id, neighbor: src,
                                                weight: weight, label: label))
 
+  release(result.lock)
   s.close()

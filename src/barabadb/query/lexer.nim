@@ -363,6 +363,7 @@ proc skipBlockComment(l: var Lexer) =
       discard l.advance()
       return
     discard l.advance()
+  raise newException(ValueError, "Unclosed block comment at line " & $l.line & ", col " & $l.col)
 
 proc readString(l: var Lexer, quote: char): string =
   result = ""
@@ -389,6 +390,8 @@ proc readNumber(l: var Lexer, startLine, startCol: int): Token =
   var isFloat = false
   while l.pos < l.input.len and (l.input[l.pos] in Digits or l.input[l.pos] == '.'):
     if l.input[l.pos] == '.':
+      if isFloat:
+        break  # second dot ends the number
       isFloat = true
     numStr.add(l.input[l.pos])
     discard l.advance()

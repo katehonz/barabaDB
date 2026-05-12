@@ -406,14 +406,49 @@ proc getValue(values: seq[string], fields: seq[string], colName: string): string
 proc isNull*(value: string): bool =
   value.len == 0 or value.toLower() == "null"
 
+proc escapeRowVal(v: string): string =
+  v.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=")
+
+proc unescapeRowVal(v: string): string =
+  result = ""
+  var i = 0
+  while i < v.len:
+    if v[i] == '\\' and i + 1 < v.len:
+      case v[i+1]
+      of '\\', ',', '=':
+        result &= v[i+1]
+        i += 2
+        continue
+      else: discard
+    result &= v[i]
+    inc i
+
 proc parseRowData(valStr: string): Table[string, string] =
   ## Parse "col1=val1,col2=val2" into a table
   result = initTable[string, string]()
-  for part in valStr.split(","):
+  var i = 0
+  var part = ""
+  while i < valStr.len:
+    if valStr[i] == '\\' and i + 1 < valStr.len:
+      part &= valStr[i]
+      part &= valStr[i+1]
+      i += 2
+      continue
+    if valStr[i] == ',':
+      let eqPos = part.find('=')
+      if eqPos >= 0:
+        let k = part[0..<eqPos].strip()
+        let v = unescapeRowVal(part[eqPos+1..^1].strip())
+        result[k] = v
+      part = ""
+    else:
+      part &= valStr[i]
+    inc i
+  if part.len > 0:
     let eqPos = part.find('=')
     if eqPos >= 0:
       let k = part[0..<eqPos].strip()
-      let v = part[eqPos+1..^1].strip()
+      let v = unescapeRowVal(part[eqPos+1..^1].strip())
       result[k] = v
 
 proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row]
@@ -844,7 +879,7 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
     return 0
   var parts: seq[string] = @[]
   for col, val in parsed:
-    parts.add(col & "=" & val)
+    parts.add(col & "=" & escapeRowVal(val))
   let newVal = parts.join(",")
   # Update indexes: remove old, insert new
   for colName in ctx.btrees.keys.toSeq():

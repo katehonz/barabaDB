@@ -73,7 +73,14 @@ proc detectCycle*(dd: DeadlockDetector): seq[uint64] =
         while parent.getOrDefault(current, 0'u64) != neighbor and
               parent.getOrDefault(current, 0'u64) != 0:
           current = parent[current]
+          if current == 0: break
           cycle.add(current)
+        # Verify we actually closed the cycle back to neighbor
+        if cycle[^1] != neighbor and parent.getOrDefault(cycle[^1], 0'u64) == neighbor:
+          cycle.add(neighbor)
+        elif cycle[^1] != neighbor:
+          # Incomplete cycle — should not happen with valid parent chain
+          return @[]
         cycle.reverse()
         return cycle
       if neighbor notin visited:

@@ -1,6 +1,7 @@
 ## Cypher-like Graph Query Extension for BaraQL
 import std/tables
 import std/strutils
+import std/locks
 import engine
 
 type
@@ -178,6 +179,9 @@ proc executeCypher*(g: Graph, query: CypherQuery): CypherResult =
 
   if query.pattern.nodes.len == 0:
     return
+
+  acquire(g.lock)
+  defer: release(g.lock)
 
   # Basic MATCH execution
   if query.kind == "MATCH":
