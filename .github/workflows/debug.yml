@@ -31,7 +31,7 @@ jobs:
         run: nim c -d:ssl --threads:on --path:src tests/test_all.nim
 
       - name: Run test_all binary
-        run: ./tests/test_all > test_all.log 2>&1 || true
+        run: ./tests/test_all > test_all.log 2>&1
 
       - name: Upload test_all log to repo
         if: always()
