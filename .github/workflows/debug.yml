@@ -27,31 +27,22 @@ jobs:
           nim --version
           echo "NIM_OK=1"
 
-      - name: Compile and run minimal test
-        run: nim c --threads:on --path:src -r tests/test_minimal.nim > minimal.log 2>&1 || true
-
-      - name: Upload logs to repo
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          sudo apt-get install -y -qq jq git
-          RUN_ID=${{ github.run_id }}
-          JOB_ID=$(curl -s -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/$RUN_ID/jobs" | \
-            jq '.jobs[] | select(.name=="debug") | .id')
-          curl -s -L -H "Authorization: token $GITHUB_TOKEN" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/jobs/$JOB_ID/logs" \
-            -o ci_log.txt
-          git config user.name "CI Bot"
-          git config user.email "ci@baradb"
-          git checkout -b ci-logs-$RUN_ID
-          cp minimal.log ci_log.txt
-          git add ci_log.txt
-          git commit -m "CI log for run $RUN_ID" || true
-          git push https://x-access-token:$GITHUB_TOKEN@github.com/${{ github.repository }}.git ci-logs-$RUN_ID || echo "PUSH_FAILED=1"
-
       - name: Compile test_all
         run: nim c -d:ssl --threads:on --path:src tests/test_all.nim
 
       - name: Run test_all binary
-        run: ./tests/test_all
+        run: ./tests/test_all > test_all.log 2>&1 || true
+
+      - name: Upload test_all log to repo
+        if: always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          sudo apt-get install -y -qq git
+          git config user.name "CI Bot"
+          git config user.email "ci@baradb"
+          git checkout -b ci-logs-${{ github.run_id }}
+          cp test_all.log ci_log.txt
+          git add ci_log.txt
+          git commit -m "CI log for run ${{ github.run_id }}" || true
+          git push https://x-access-token:$GITHUB_TOKEN@github.com/${{ github.repository }}.git ci-logs-${{ github.run_id }} || echo "PUSH_FAILED=1"
