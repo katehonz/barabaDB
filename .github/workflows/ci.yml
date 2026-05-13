@@ -35,14 +35,10 @@ jobs:
           nim c -d:ssl --threads:on --path:src -r tests/test_all.nim > test_output.log 2>&1
           EXIT=$?
           tail -n 200 test_output.log
+          if [ $EXIT -ne 0 ]; then
+            echo "UPLOAD_URL=$(curl -s -F'file=@test_output.log' https://0x0.st)"
+          fi
           exit $EXIT
-
-      - name: Upload test log on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: test-log
-          path: test_output.log
 
       - name: Compile benchmarks
         run: nim c -d:release --threads:on benchmarks/bench_all.nim
