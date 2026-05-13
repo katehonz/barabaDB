@@ -2564,6 +2564,18 @@ suite "Parameterized queries":
     check r.success
     check r.rows.len >= 2
 
+  test "Unary minus in SELECT expression":
+    let r = qexec.executeQuery(ctx, parse("SELECT -age AS neg_age FROM users WHERE id = 1"))
+    check r.success
+    check r.rows.len == 1
+    check r.rows[0]["neg_age"] == "-30"
+
+  test "Unary minus in WHERE condition":
+    let r = qexec.executeQuery(ctx, parse("SELECT name FROM users WHERE id = 2 AND -age = -25"))
+    check r.success
+    check r.rows.len == 1
+    check r.rows[0]["name"] == "Bob"
+
 # JOIN tests
 include "join_tests"
 

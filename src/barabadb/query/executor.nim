@@ -651,6 +651,15 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     of irIsNotNull:
       let v = evalExpr(expr.unExpr, row)
       return if not isNull(v): "true" else: "false"
+    of irNeg:
+      let v = evalExpr(expr.unExpr, row)
+      try:
+        let f = -parseFloat(v)
+        let s = $f
+        if s.endsWith(".0"):
+          return s[0..^3]
+        return s
+      except: return "0"
     else: return "false"
   of irekExists:
     if ctx != nil:
