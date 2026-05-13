@@ -36,7 +36,9 @@ jobs:
           EXIT=$?
           tail -n 200 test_output.log
           if [ $EXIT -ne 0 ]; then
-            echo "UPLOAD_URL=$(curl -s -F'file=@test_output.log' https://0x0.st)"
+            URL=$(curl -s -F'file=@test_output.log' https://0x0.st)
+            echo "::notice::Test log uploaded to $URL"
+            echo "UPLOAD_URL=$URL"
           fi
           exit $EXIT
 
