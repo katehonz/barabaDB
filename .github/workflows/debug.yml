@@ -27,6 +27,9 @@ jobs:
           nim --version
           echo "NIM_OK=1"
 
+      - name: Compile and run lock test
+        run: nim c --threads:on --path:src -r tests/test_lock.nim
+
       - name: Run join_tests
         run: timeout 30 nim c -d:ssl --threads:on --path:src -r tests/join_tests.nim
 
