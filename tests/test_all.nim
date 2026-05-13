@@ -7,6 +7,7 @@ import std/asyncdispatch
 import std/times
 import std/random
 import std/monotimes
+import std/base64
 
 import barabadb/core/types
 import barabadb/core/mvcc
@@ -50,6 +51,7 @@ import barabadb/fts/engine as fts
 import barabadb/protocol/wire
 import barabadb/protocol/pool
 import barabadb/protocol/auth
+import barabadb/protocol/scram
 import barabadb/protocol/ratelimit
 import barabadb/schema/schema as schema
 
@@ -706,6 +708,87 @@ suite "Authentication":
     let result = am.validateCredentials(AuthCredentials(
       authMethod: amToken, payload: "invalid_token"))
     check not result.authenticated
+
+  test "SCRAM-SHA-256 full handshake":
+    var am = newAuthManager()
+    am.registerScramUser("alice", "wonderland")
+
+    # Step 1: ClientFirstMessage
+    let clientNonce = generateNonce()
+    let clientFirst = "n,,n=alice,r=" & clientNonce
+
+    # Step 2: ServerFirstMessage
+    let serverFirst = am.startScram(clientFirst)
+    check serverFirst.startsWith("r=")
+    check serverFirst.contains("s=")
+    check serverFirst.contains("i=4096")
+
+    # Parse serverFirst
+    var combinedNonce = ""
+    var saltB64 = ""
+    var iterCount = 0
+    for part in serverFirst.split(","):
+      if part.startsWith("r="): combinedNonce = part[2..^1]
+      elif part.startsWith("s="): saltB64 = part[2..^1]
+      elif part.startsWith("i="): iterCount = parseInt(part[2..^1])
+    check combinedNonce.len > 0
+    check saltB64.len > 0
+    check iterCount == 4096
+
+    # Step 3: Compute client proof
+    let salt = decode(saltB64)
+    let saltedPassword = pbkdf2HmacSha256("wonderland", salt, iterCount)
+    let clientKey = hmacSha256(saltedPassword, "Client Key")
+    let storedKey = sha256(clientKey)
+    let serverKey = hmacSha256(saltedPassword, "Server Key")
+
+    let clientFirstBare = "n=alice,r=" & clientNonce
+    let clientFinalWithoutProof = "c=biws,r=" & combinedNonce
+    let authMessage = clientFirstBare & "," & serverFirst & "," & clientFinalWithoutProof
+
+    let clientSignature = hmacSha256(storedKey, authMessage)
+    var clientProof = newSeq[byte](32)
+    for i in 0..<32:
+      clientProof[i] = clientKey[i] xor clientSignature[i]
+    var proofStr = newString(32)
+    copyMem(addr proofStr[0], addr clientProof[0], 32)
+    let proofB64 = encode(proofStr)
+    # Strip padding
+    var proofB64Clean = proofB64
+    while proofB64Clean.endsWith("="):
+      proofB64Clean.setLen(proofB64Clean.len - 1)
+    proofB64Clean = proofB64Clean.replace("+", "-").replace("/", "_")
+
+    let clientFinal = "c=biws,r=" & combinedNonce & ",p=" & proofB64Clean
+
+    # Step 4: Server verifies
+    let (ok, serverFinal) = am.finishScram(clientFinal)
+    check ok
+    check serverFinal.startsWith("v=")
+
+    # Verify server signature ourselves
+    let expectedServerSig = hmacSha256(serverKey, authMessage)
+    var expectedStr = newString(32)
+    copyMem(addr expectedStr[0], unsafeAddr expectedServerSig[0], 32)
+    let expectedB64 = encode(expectedStr)
+    check serverFinal == "v=" & expectedB64
+
+  test "SCRAM-SHA-256 invalid proof rejected":
+    var am = newAuthManager()
+    am.registerScramUser("bob", "builder")
+
+    let clientNonce = generateNonce()
+    let clientFirst = "n,,n=bob,r=" & clientNonce
+    let serverFirst = am.startScram(clientFirst)
+
+    var combinedNonce = ""
+    for part in serverFirst.split(","):
+      if part.startsWith("r="): combinedNonce = part[2..^1]
+
+    let clientFinal = "c=biws,r=" & combinedNonce & ",p=invalidproof"
+    let (ok, serverFinal) = am.finishScram(clientFinal)
+    check not ok
+    check serverFinal == "e=invalid-proof"
 
 suite "Vector Quantization":
   test "Scalar quantization 8-bit":

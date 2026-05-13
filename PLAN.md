@@ -104,7 +104,7 @@
 - Моделира sync между document/vector/graph/FTS индекси
 - Резултат: 10-ти TLA+ спек, пълно покритие на core модулите
 
-### Опция C: Auth hardening + SCRAM (3-4 часа)
+### Опция C: Auth hardening + SCRAM ✅
 - Истински SCRAM-SHA-256 със salt, iteration count, challenge-response
 - Резултат: production-grade auth
 

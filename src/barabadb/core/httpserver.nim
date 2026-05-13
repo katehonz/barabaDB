@@ -18,6 +18,7 @@ import ../core/mvcc
 import ../protocol/wire
 import ../core/websocket
 import jwt as jwtlib
+import ../protocol/auth
 
 type
   HttpServer* = ref object
@@ -27,6 +28,7 @@ type
     ctx: ExecutionContext
     metrics*: Metrics
     secretKey*: string
+    authManager*: AuthManager
     ws*: WsServer
 
   Metrics* = ref object
@@ -46,8 +48,10 @@ proc newHttpServer*(config: BaraConfig): HttpServer =
   ctx.onChange = proc(ev: ChangeEvent) =
     let msg = $ev.kind & " " & ev.table
     asyncCheck ws.broadcastToTable(ev.table, msg)
+  let am = newAuthManager(secret)
   HttpServer(config: config, running: false, db: db, ctx: ctx,
              secretKey: secret,
+             authManager: am,
              metrics: Metrics(), ws: ws)
 
 # ----------------------------------------------------------------------
@@ -210,6 +214,46 @@ proc authHandler(server: HttpServer): RequestHandler =
         "user": username,
         "role": "user"
       })
+
+proc scramStartHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      let body = parseJson(request.body)
+      if body == nil or "username" notin body or "clientFirstMessage" notin body:
+        ctx.json(%*{"error": "Missing username or clientFirstMessage"}, 400)
+        return
+      let username = body["username"].getStr()
+      let clientFirst = body["clientFirstMessage"].getStr()
+      try:
+        let serverFirst = server.authManager.startScram(clientFirst)
+        ctx.json(%*{
+          "serverFirstMessage": serverFirst,
+          "status": "continue"
+        })
+      except CatchableError as e:
+        ctx.json(%*{"error": e.msg}, 401)
+
+proc scramFinishHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      let body = parseJson(request.body)
+      if body == nil or "clientFinalMessage" notin body:
+        ctx.json(%*{"error": "Missing clientFinalMessage"}, 400)
+        return
+      let clientFinal = body["clientFinalMessage"].getStr()
+      try:
+        let (ok, serverFinal) = server.authManager.finishScram(clientFinal)
+        if ok:
+          ctx.json(%*{
+            "serverFinalMessage": serverFinal,
+            "status": "authenticated"
+          })
+        else:
+          ctx.json(%*{"error": serverFinal}, 401)
+      except CatchableError as e:
+        ctx.json(%*{"error": e.msg}, 401)
 
 proc openApiHandler(): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
@@ -482,6 +526,8 @@ proc run*(server: HttpServer, port: int = 9470) =
   router.get("/health", healthHandler())
   router.get("/metrics", server.metricsHandler())
   router.post("/auth", server.authHandler())
+  router.post("/auth/scram/start", server.scramStartHandler())
+  router.post("/auth/scram/finish", server.scramFinishHandler())
   router.get("/tables", server.tablesHandler())
   router.get("/api", openApiHandler())
 

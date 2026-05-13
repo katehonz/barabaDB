@@ -1,9 +1,10 @@
-## Authentication — JWT-based auth with SCRAM-SHA-256
+## Authentication — JWT-based auth with real SCRAM-SHA-256
 import std/strutils
 import std/base64
 import std/tables
 import std/times
 import checksums/sha2
+import scram
 
 type
   AuthMethod* = enum
@@ -38,10 +39,22 @@ type
   AuthManager* = ref object
     secretKey*: string
     tokens*: seq[string]
-    users*: Table[string, string]  # username -> password hash
+    users*: Table[string, string]  # username -> password hash (legacy)
+    scramUsers*: Table[string, ScramCredential]
+    scramSessions*: Table[string, ScramServerState]
 
 proc newAuthManager*(secretKey: string = ""): AuthManager =
-  AuthManager(secretKey: secretKey, tokens: @[], users: initTable[string, string]())
+  AuthManager(
+    secretKey: secretKey,
+    tokens: @[],
+    users: initTable[string, string](),
+    scramUsers: initTable[string, ScramCredential](),
+    scramSessions: initTable[string, ScramServerState](),
+  )
+
+# ---------------------------------------------------------------------------
+# Base64 URL-safe helpers
+# ---------------------------------------------------------------------------
 
 proc base64UrlEncode(data: string): string =
   result = encode(data)
@@ -52,6 +65,10 @@ proc base64UrlDecode(data: string): string =
   while s.len mod 4 != 0:
     s &= "="
   return decode(s)
+
+# ---------------------------------------------------------------------------
+# Legacy HMAC-SHA-256 (for JWT signing)
+# ---------------------------------------------------------------------------
 
 proc hmacSha256(key, message: string): string =
   var k = key
@@ -81,6 +98,18 @@ proc hmacSha256(key, message: string): string =
 
   return $outerHash
 
+proc constantTimeCompare(a, b: string): bool =
+  if a.len != b.len:
+    return false
+  var diff = 0
+  for i in 0..<a.len:
+    diff = diff or (ord(a[i]) xor ord(b[i]))
+  return diff == 0
+
+# ---------------------------------------------------------------------------
+# JWT token helpers
+# ---------------------------------------------------------------------------
+
 proc createToken*(am: AuthManager, claims: JWTClaims): string =
   let header = base64UrlEncode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}")
   var payloadJson = "{\"sub\":\"" & claims.sub & "\",\"role\":\"" & claims.role &
@@ -97,14 +126,6 @@ proc createToken*(am: AuthManager, claims: JWTClaims): string =
   let signature = hmacSha256(am.secretKey, data)
   am.tokens.add(data & "." & base64UrlEncode(signature))
   return am.tokens[^1]
-
-proc constantTimeCompare(a, b: string): bool =
-  if a.len != b.len:
-    return false
-  var result = 0
-  for i in 0..<a.len:
-    result = result or (ord(a[i]) xor ord(b[i]))
-  return result == 0
 
 proc verifyToken*(am: AuthManager, token: string): (bool, JWTClaims) =
   let parts = token.split(".")
@@ -167,6 +188,73 @@ proc verifyToken*(am: AuthManager, token: string): (bool, JWTClaims) =
     return (false, JWTClaims())
   return (true, claims)
 
+# ---------------------------------------------------------------------------
+# SCRAM-SHA-256 challenge-response
+# ---------------------------------------------------------------------------
+
+proc registerScramUser*(am: AuthManager, username, password: string,
+                        iterationCount: int = DefaultIterationCount) =
+  ## Register a user with real SCRAM-SHA-256 credentials.
+  let cred = createScramCredential(password, iterationCount = iterationCount)
+  am.scramUsers[username] = cred
+
+proc startScram*(am: AuthManager, clientFirstMessage: string): string =
+  ## Start SCRAM authentication. Returns server-first-message.
+  let (_, username, clientNonce) = parseClientFirst(clientFirstMessage)
+  if username notin am.scramUsers:
+    raise newException(ValueError, "Unknown user: " & username)
+
+  let cred = am.scramUsers[username]
+  let serverNonce = generateNonce()
+  let combinedNonce = clientNonce & serverNonce
+
+  let serverFirst = buildServerFirst(combinedNonce, cred.salt, cred.iterationCount)
+
+  # Compute authMessage for later verification
+  let clientFirstMessageBare = "n=" & username & ",r=" & clientNonce
+  let authMessage = clientFirstMessageBare & "," & serverFirst
+
+  var state = ScramServerState(
+    username: username,
+    clientFirstMessageBare: clientFirstMessageBare,
+    serverFirstMessage: serverFirst,
+    authMessage: authMessage,
+    clientNonce: clientNonce,
+    serverNonce: serverNonce,
+    salt: cred.salt,
+    iterationCount: cred.iterationCount,
+    storedKey: cred.storedKey,
+    serverKey: cred.serverKey,
+  )
+
+  # Store session keyed by combined nonce
+  am.scramSessions[combinedNonce] = state
+  return serverFirst
+
+proc finishScram*(am: AuthManager, clientFinalMessage: string): (bool, string) =
+  ## Finish SCRAM authentication. Returns (success, server-final-message).
+  let (cbind, nonce, clientProof) = parseClientFinal(clientFinalMessage)
+
+  if nonce notin am.scramSessions:
+    return (false, "e=invalid-nonce")
+
+  var state = am.scramSessions[nonce]
+  am.scramSessions.del(nonce)
+
+  # Update authMessage with client-final-message-without-proof
+  let clientFinalWithoutProof = "c=" & cbind & ",r=" & nonce
+  state.authMessage = state.authMessage & "," & clientFinalWithoutProof
+
+  if not verifyClientProof(state, clientProof):
+    return (false, "e=invalid-proof")
+
+  let serverSignature = computeServerSignature(state)
+  return (true, buildServerFinal(serverSignature))
+
+# ---------------------------------------------------------------------------
+# Credential validation dispatcher
+# ---------------------------------------------------------------------------
+
 proc validateCredentials*(am: AuthManager, creds: AuthCredentials): AuthResult =
   case creds.authMethod
   of amNone:
@@ -180,14 +268,19 @@ proc validateCredentials*(am: AuthManager, creds: AuthCredentials): AuthResult =
                           role: claims.role, database: claims.database)
     return AuthResult(authenticated: false, error: "Invalid token")
   of amSCRAMSHA256:
+    ## Legacy fallback: simple hash comparison for backward compatibility.
+    ## Real SCRAM should use startScram() / finishScram().
     if creds.username in am.users:
       let stored = am.users[creds.username]
-      # SCRAM-SHA-256: client sends SHA-256(password) as payload
       let clientHash = if creds.payload.len > 0: creds.payload else: hmacSha256(am.secretKey, "")
       if stored == clientHash or stored == hmacSha256(am.secretKey, creds.payload):
         return AuthResult(authenticated: true, username: creds.username,
                           role: "user", database: "default")
     return AuthResult(authenticated: false, error: "Invalid SCRAM credentials")
+
+# ---------------------------------------------------------------------------
+# Token / user management
+# ---------------------------------------------------------------------------
 
 proc addToken*(am: var AuthManager, token: string) =
   am.tokens.add(token)
@@ -200,4 +293,5 @@ proc revokeToken*(am: var AuthManager, token: string) =
 proc isAuthenticated*(r: AuthResult): bool = r.authenticated
 
 proc addScramUser*(am: var AuthManager, username, passwordHash: string) =
+  ## Legacy helper: stores raw hash. Use registerScramUser() for real SCRAM.
   am.users[username] = passwordHash
