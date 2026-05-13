@@ -35,8 +35,8 @@ jobs:
 
       - name: Build binaries
         run: |
-          nim c -d:release --opt:speed -d:ssl -o:build/baradadb src/baradadb.nim
-          nim c -d:release -o:build/backup src/barabadb/core/backup.nim
+          nim c -d:release --opt:speed -d:ssl --threads:on -o:build/baradadb src/baradadb.nim
+          nim c -d:release --threads:on -o:build/backup src/barabadb/core/backup.nim
 
       - name: Build Docker image
         run: docker build -t baradb:latest .
@@ -160,15 +160,15 @@ jobs:
 
       - name: Run Nim unit tests
         working-directory: clients/nim
-        run: nim c --path:src -r tests/test_client.nim
+        run: nim c --threads:on --path:src -r tests/test_client.nim
 
       - name: Run Nim integration tests
         working-directory: clients/nim
-        run: nim c --path:src -r tests/test_integration.nim
+        run: nim c --threads:on --path:src -r tests/test_integration.nim
 
       - name: Run Nim example
         working-directory: clients/nim
-        run: nim c --path:src -r examples/basic.nim || true
+        run: nim c --threads:on --path:src -r examples/basic.nim || true
 
   test-rust:
     needs: build-server

@@ -24,10 +24,10 @@ jobs:
         run: nimble install --depsOnly -y
 
       - name: Run tests
-        run: nim c -d:ssl --path:src -r tests/test_all.nim
+        run: nim c -d:ssl --threads:on --path:src -r tests/test_all.nim
 
       - name: Compile benchmarks
-        run: nim c -d:release benchmarks/bench_all.nim
+        run: nim c -d:release --threads:on benchmarks/bench_all.nim
 
       - name: Compile stress test
         run: nim c -d:ssl --threads:on --path:src tests/stress_test.nim
@@ -37,7 +37,7 @@ jobs:
 
       - name: Check for unused declarations and imports
         run: |
-          nim c -d:ssl --path:src tests/test_all.nim 2>&1 | tee build.log || true
+          nim c -d:ssl --threads:on --path:src tests/test_all.nim 2>&1 | tee build.log || true
           echo "--- Checking for XDeclaredButNotUsed hints ---"
           grep -E "XDeclaredButNotUsed|UnusedImport" build.log | while read -r line; do
             echo "::warning::$line"
