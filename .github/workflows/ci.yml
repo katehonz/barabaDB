@@ -24,7 +24,11 @@ jobs:
         run: nimble install --depsOnly -y
 
       - name: Run tests
-        run: nim c -d:ssl --threads:on --path:src -r tests/test_all.nim
+        run: |
+          nim c -d:ssl --threads:on --path:src -r tests/test_all.nim > test_output.log 2>&1
+          EXIT=$?
+          tail -n 200 test_output.log
+          exit $EXIT
 
       - name: Compile benchmarks
         run: nim c -d:release --threads:on benchmarks/bench_all.nim
