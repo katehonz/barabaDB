@@ -38,11 +38,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          URL=$(curl -s -F'file=@test_all.log' https://0x0.st)
+          echo "::notice::test_all.log uploaded to $URL"
           sudo apt-get install -y -qq git
           git config user.name "CI Bot"
           git config user.email "ci@baradb"
-          git checkout -b ci-logs-${{ github.run_id }}
+          git checkout -b ci-logs-${{ github.run_id }} || true
           cp test_all.log ci_log.txt
           git add ci_log.txt
           git commit -m "CI log for run ${{ github.run_id }}" || true
-          git push https://x-access-token:$GITHUB_TOKEN@github.com/${{ github.repository }}.git ci-logs-${{ github.run_id }} || echo "PUSH_FAILED=1"
+          git push https://$GITHUB_TOKEN@github.com/${{ github.repository }}.git ci-logs-${{ github.run_id }} || echo "PUSH_FAILED=1"
