@@ -16,7 +16,7 @@ jobs:
           nim-version: '2.2.10'
 
       - name: Install system dependencies
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev libpcre3-dev
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev libpcre3-dev openssl ca-certificates
 
       - name: Install Nim dependencies
         run: nimble install --depsOnly -y
