@@ -169,12 +169,14 @@ proc serializeValue*(buf: var seq[byte], val: WireValue) =
   of fkFloat32:
     var fl = val.float32Val
     var bytes: array[4, byte]
-    copyMem(addr bytes, unsafeAddr fl, 4)
+    var i32 = cast[int32](fl)
+    bigEndian32(addr bytes, unsafeAddr i32)
     buf.add(bytes)
   of fkFloat64:
     var fl = val.float64Val
     var bytes: array[8, byte]
-    copyMem(addr bytes, unsafeAddr fl, 8)
+    var i64 = cast[int64](fl)
+    bigEndian64(addr bytes, unsafeAddr i64)
     buf.add(bytes)
   of fkString: buf.writeString(val.strVal)
   of fkBytes: buf.writeBytes(val.bytesVal)
@@ -192,7 +194,8 @@ proc serializeValue*(buf: var seq[byte], val: WireValue) =
     for f in val.vecVal:
       var fl = f
       var bytes: array[4, byte]
-      copyMem(addr bytes, unsafeAddr fl, 4)
+      var i32 = cast[int32](fl)
+      bigEndian32(addr bytes, unsafeAddr i32)
       buf.add(bytes)
   of fkJson:
     buf.writeString(val.jsonVal)
@@ -227,14 +230,18 @@ proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): Wire
     var fl: float32
     var bytes: array[4, byte]
     for i in 0..3: bytes[i] = buf[pos + i]
-    copyMem(addr fl, unsafeAddr bytes, 4)
+    var i32: int32
+    bigEndian32(addr i32, unsafeAddr bytes)
+    fl = cast[float32](i32)
     pos += 4
     result = WireValue(kind: fkFloat32, float32Val: fl)
   of fkFloat64:
     var fl: float64
     var bytes: array[8, byte]
     for i in 0..7: bytes[i] = buf[pos + i]
-    copyMem(addr fl, unsafeAddr bytes, 8)
+    var i64: int64
+    bigEndian64(addr i64, unsafeAddr bytes)
+    fl = cast[float64](i64)
     pos += 8
     result = WireValue(kind: fkFloat64, float64Val: fl)
   of fkString:
@@ -270,7 +277,9 @@ proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): Wire
       var fl: float32
       var bytes: array[4, byte]
       for j in 0..3: bytes[j] = buf[pos + j]
-      copyMem(addr fl, unsafeAddr bytes, 4)
+      var i32: int32
+      bigEndian32(addr i32, unsafeAddr bytes)
+      fl = cast[float32](i32)
       pos += 4
       vec.add(fl)
     result = WireValue(kind: fkVector, vecVal: vec)

@@ -244,6 +244,8 @@ class Client {
     this.requestId = 0;
     this._buffer = Buffer.alloc(0);
     this._pendingResolve = null;
+    this._requestQueue = [];
+    this._requestLock = false;
   }
 
   async connect() {
@@ -478,70 +480,98 @@ class Client {
     throw new Error(`Unexpected auth response: 0x${header.kind.toString(16)}`);
   }
 
+  async _processQueue() {
+    if (this._requestLock || this._requestQueue.length === 0) return;
+    this._requestLock = true;
+    const { task, resolve, reject } = this._requestQueue.shift();
+    try {
+      const result = await task();
+      resolve(result);
+    } catch (err) {
+      reject(err);
+    } finally {
+      this._requestLock = false;
+      setImmediate(() => this._processQueue());
+    }
+  }
+
+  _enqueue(task) {
+    return new Promise((resolve, reject) => {
+      this._requestQueue.push({ task, resolve, reject });
+      this._processQueue();
+    });
+  }
+
   async ping() {
     if (!this.connected) throw new Error('Not connected');
-    const msg = this._build(MsgKind.PING, Buffer.alloc(0));
-    this.socket.write(msg);
+    return this._enqueue(async () => {
+      const msg = this._build(MsgKind.PING, Buffer.alloc(0));
+      this.socket.write(msg);
 
-    const header = await this._readHeader();
-    if (header.kind === MsgKind.PONG) return true;
-    if (header.kind === MsgKind.ERROR) throw await this._readError(header.length);
-    return false;
+      const header = await this._readHeader();
+      if (header.kind === MsgKind.PONG) return true;
+      if (header.kind === MsgKind.ERROR) throw await this._readError(header.length);
+      return false;
+    });
   }
 
   async query(sql) {
     if (!this.connected) throw new Error('Not connected');
-    const queryBuf = Buffer.from(sql, 'utf-8');
-    const payload = Buffer.alloc(4 + queryBuf.length + 1);
-    payload.writeUInt32BE(queryBuf.length, 0);
-    queryBuf.copy(payload, 4);
-    payload[4 + queryBuf.length] = ResultFormat.BINARY;
+    return this._enqueue(async () => {
+      const queryBuf = Buffer.from(sql, 'utf-8');
+      const payload = Buffer.alloc(4 + queryBuf.length + 1);
+      payload.writeUInt32BE(queryBuf.length, 0);
+      queryBuf.copy(payload, 4);
+      payload[4 + queryBuf.length] = ResultFormat.BINARY;
 
-    const msg = this._build(MsgKind.QUERY, payload);
-    this.socket.write(msg);
+      const msg = this._build(MsgKind.QUERY, payload);
+      this.socket.write(msg);
 
-    const header = await this._readHeader();
-    if (header.kind === MsgKind.ERROR) throw await this._readError(header.length);
-    if (header.kind === MsgKind.DATA) return await this._readDataResponse(header.length);
-    if (header.kind === MsgKind.COMPLETE) {
-      const data = await this._recvExact(header.length);
-      const result = new QueryResult();
-      result.affectedRows = data.readUInt32BE(0);
-      return result;
-    }
-    return new QueryResult();
+      const header = await this._readHeader();
+      if (header.kind === MsgKind.ERROR) throw await this._readError(header.length);
+      if (header.kind === MsgKind.DATA) return await this._readDataResponse(header.length);
+      if (header.kind === MsgKind.COMPLETE) {
+        const data = await this._recvExact(header.length);
+        const result = new QueryResult();
+        result.affectedRows = data.readUInt32BE(0);
+        return result;
+      }
+      return new QueryResult();
+    });
   }
 
   async queryParams(sql, params = []) {
     if (!this.connected) throw new Error('Not connected');
-    const queryBuf = Buffer.from(sql, 'utf-8');
-    const paramParts = [];
-    for (const p of params) {
-      paramParts.push(p.serialize());
-    }
-    const paramsBuf = Buffer.concat(paramParts);
+    return this._enqueue(async () => {
+      const queryBuf = Buffer.from(sql, 'utf-8');
+      const paramParts = [];
+      for (const p of params) {
+        paramParts.push(p.serialize());
+      }
+      const paramsBuf = Buffer.concat(paramParts);
 
-    const payload = Buffer.alloc(4 + queryBuf.length + 1 + 4 + paramsBuf.length);
-    let pos = 0;
-    payload.writeUInt32BE(queryBuf.length, pos); pos += 4;
-    queryBuf.copy(payload, pos); pos += queryBuf.length;
-    payload[pos] = ResultFormat.BINARY; pos++;
-    payload.writeUInt32BE(params.length, pos); pos += 4;
-    paramsBuf.copy(payload, pos);
+      const payload = Buffer.alloc(4 + queryBuf.length + 1 + 4 + paramsBuf.length);
+      let pos = 0;
+      payload.writeUInt32BE(queryBuf.length, pos); pos += 4;
+      queryBuf.copy(payload, pos); pos += queryBuf.length;
+      payload[pos] = ResultFormat.BINARY; pos++;
+      payload.writeUInt32BE(params.length, pos); pos += 4;
+      paramsBuf.copy(payload, pos);
 
-    const msg = this._build(MsgKind.QUERY_PARAMS, payload);
-    this.socket.write(msg);
+      const msg = this._build(MsgKind.QUERY_PARAMS, payload);
+      this.socket.write(msg);
 
-    const header = await this._readHeader();
-    if (header.kind === MsgKind.ERROR) throw await this._readError(header.length);
-    if (header.kind === MsgKind.DATA) return await this._readDataResponse(header.length);
-    if (header.kind === MsgKind.COMPLETE) {
-      const data = await this._recvExact(header.length);
-      const result = new QueryResult();
-      result.affectedRows = data.readUInt32BE(0);
-      return result;
-    }
-    return new QueryResult();
+      const header = await this._readHeader();
+      if (header.kind === MsgKind.ERROR) throw await this._readError(header.length);
+      if (header.kind === MsgKind.DATA) return await this._readDataResponse(header.length);
+      if (header.kind === MsgKind.COMPLETE) {
+        const data = await this._recvExact(header.length);
+        const result = new QueryResult();
+        result.affectedRows = data.readUInt32BE(0);
+        return result;
+      }
+      return new QueryResult();
+    });
   }
 
   async execute(sql) {
