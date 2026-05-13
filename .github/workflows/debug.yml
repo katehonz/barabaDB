@@ -27,6 +27,12 @@ jobs:
           nim --version
           echo "NIM_OK=1"
 
+      - name: Run join_tests
+        run: nim c -d:ssl --threads:on --path:src -r tests/join_tests.nim
+
+      - name: Run tla_faithfulness
+        run: nim c -d:ssl --threads:on --path:src -r tests/tla_faithfulness.nim
+
       - name: Compile test_all
         run: nim c -d:ssl --threads:on --path:src tests/test_all.nim
 
@@ -34,7 +40,7 @@ jobs:
         run: ./tests/test_all > test_all.log 2>&1
 
       - name: Upload test_all log to repo
-        if: always()
+        if: failure()
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
