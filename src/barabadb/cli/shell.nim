@@ -5,7 +5,7 @@ import ../query/lexer
 import ../query/parser
 
 const
-  Version = "0.1.0"
+  Version = "1.1.0"
   Prompt = "bara> "
   ContinuationPrompt = "  .. > "
 
