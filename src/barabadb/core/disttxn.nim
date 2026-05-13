@@ -105,7 +105,7 @@ proc sendDistTxnRpc(host: string, port: int, txnId: uint64, action: string, time
     sock.readLine(response)
     sock.close()
     return response.strip() == "OK"
-  except:
+  except CatchableError:
     return false
 
 proc prepare*(txn: DistributedTransaction): bool =
@@ -133,11 +133,10 @@ proc prepare*(txn: DistributedTransaction): bool =
   else:
     # Rollback already-prepared participants to maintain atomicity
     for nodeId in preparedNodes:
-      var p = txn.participants[nodeId]
-      if p.host.len > 0 and p.port > 0:
-        discard sendDistTxnRpc(p.host, p.port, txn.id, "ROLLBACK")
-      p.prepared = false
-      p.aborted = true
+      if txn.participants[nodeId].host.len > 0 and txn.participants[nodeId].port > 0:
+        discard sendDistTxnRpc(txn.participants[nodeId].host, txn.participants[nodeId].port, txn.id, "ROLLBACK")
+      txn.participants[nodeId].prepared = false
+      txn.participants[nodeId].aborted = true
     txn.state = dtsAborted
 
   release(txn.lock)

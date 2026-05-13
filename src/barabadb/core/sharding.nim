@@ -163,13 +163,15 @@ proc sendMigrationBatch(host: string, port: int, shardId: int,
     sock.send(header)
     for (key, value) in entries:
       # Use \0 as separator between key and value, \n as entry delimiter
-      let entry = key & "\0" & cast[string](value) & "\n"
+      var valStr = newString(value.len)
+      for i, b in value: valStr[i] = char(b)
+      let entry = key & "\0" & valStr & "\n"
       sock.send(entry)
     var response = ""
     sock.readLine(response)
     sock.close()
     return response.strip().startsWith("MIGRATE_OK")
-  except:
+  except CatchableError:
     return false
 
 proc migrateData*(router: var ShardRouter, nodes: seq[string],
@@ -182,13 +184,9 @@ proc migrateData*(router: var ShardRouter, nodes: seq[string],
   if router.localNodeId.len == 0:
     return
 
-  # Find shards this node previously owned but no longer does
-  for i, shard in router.shards:
-    let wasOwner = router.localNodeId in shard.nodeIds
-
   for shard in router.shards.mitems:
-    let nowOwner = router.localNodeId in shard.nodeIds
-    if not nowOwner and router.localNodeId in shard.nodeIds:
+    let isOwner = router.localNodeId in shard.nodeIds
+    if not isOwner:
       # We previously owned this shard but no longer do — ship data to new owner
       let entries = router.iterateKeys(shard.id)
       if entries.len > 0:

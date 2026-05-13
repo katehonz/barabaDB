@@ -326,7 +326,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           rest.add(more)
         let parts = rest.strip().split(" ")
         if parts.len >= 2:
-          let txnId = try: parseUInt(parts[0]) except: 0'u64
+          let txnId = try: uint64(parseBiggestUint(parts[0])) except: 0'u64
           let action = parts[1].toUpper()
           if server.distTxnManager != nil:
             let txn = server.distTxnManager.getTxn(txnId)
