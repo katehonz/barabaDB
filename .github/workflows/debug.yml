@@ -1,0 +1,53 @@
+name: Debug Tests
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  debug:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: '2.2.10'
+
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev libpcre3-dev
+
+      - name: Install Nim dependencies
+        run: nimble install --depsOnly -y
+
+      - name: Compile and run tests
+        run: |
+          nim c -d:ssl --threads:on --path:src tests/test_all.nim > compile.log 2>&1
+          COMPILE_EXIT=$?
+          tail -n 50 compile.log
+          if [ $COMPILE_EXIT -ne 0 ]; then
+            echo "COMPILE_FAILED=1" >> $GITHUB_ENV
+            echo "LOG=$(cat compile.log | sed 's/"/\\"/g' | head -c 6000)" >> $GITHUB_ENV
+            exit 1
+          fi
+          ./tests/test_all > run.log 2>&1
+          RUN_EXIT=$?
+          tail -n 50 run.log
+          if [ $RUN_EXIT -ne 0 ]; then
+            echo "RUN_FAILED=1" >> $GITHUB_ENV
+            echo "LOG=$(cat run.log | sed 's/"/\\"/g' | head -c 6000)" >> $GITHUB_ENV
+            exit 1
+          fi
+
+      - name: Create issue on failure
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY="Debug failure log:\n\n\`\`\`\n${LOG}\n\`\`\`"
+          curl -s -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"title\":\"CI Debug: test failure on ${{ github.sha }}\",\"body\":\"$BODY\"}" \
+            https://api.github.com/repos/${{ github.repository }}/issues
