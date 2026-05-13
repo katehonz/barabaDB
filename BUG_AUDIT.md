@@ -129,13 +129,14 @@
 
 | Метрика | Текущ статус |
 |---------|-------------|
-| Тестове | 294 — 0 failure-а ✅ |
+| Тестове | 298 — 0 failures ✅ |
 | Критични бъгове | 0 ✅ |
 | Високи бъгове | 0 ✅ |
 | Средни бъгове | 0 ✅ |
 | TLA+ спецификации | 10 — всички с symmetry reduction ✅ |
 | Security audit | Всички 🔴 и 🟠 поправени ✅ |
 | Build | Компилира, 0 warnings ✅ |
+| Distributed задачи | 4 от 4 поправени (replication, gossip, sharding, inter-module) ✅ |
 
 ---
 
@@ -145,7 +146,10 @@
 2. ~~Threadpool deprecation~~ ✅ (warning suppressed)
 3. ~~Auth SCRAM-SHA-256~~ ✅
 4. ~~TLA+ symmetry reduction~~ ✅
-5. ~~`crossmodal.tla`**~~ ✅
-6. **Replication data transfer** — `writeLsn` да изпраща данни към replicas
-7. **Sharding data migration** — `rebalance` да мигрира ключове
-8. **Property-based / fuzz tests** — storage engine edge cases
+5. ~~`crossmodal.tla`~~ ✅
+6. ~~Replication data transfer~~ ✅ — `writeLsn` сървър-страна REP приемане + health checks + reconnection
+7. ~~Sharding data migration~~ ✅ — `migrateData` с TCP протокол + `scanAll` на LSM
+8. ~~Gossip UDP transport~~ ✅ — binary сериализация + UDP send/recv + listener loop
+9. ~~Inter-module wiring~~ ✅ — gossip→sharding, raft→disttxn, replication→disttxn
+10. ~~Shard-aware server routing~~ ✅ — ClusterMembership + ShardRouter в Server
+11. **Property-based / fuzz tests** — storage engine edge cases

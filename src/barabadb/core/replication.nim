@@ -5,6 +5,8 @@ import std/locks
 import std/net
 import std/strutils
 import std/nativesockets
+import std/monotimes
+import std/asyncdispatch
 
 
 type
@@ -27,6 +29,7 @@ type
     lastAckLsn*: uint64
     lagBytes*: int
     lagTime*: int64  # nanoseconds
+    lastSeen*: int64
     connected*: bool
 
   ReplicationManager* = ref object
@@ -42,7 +45,8 @@ proc newReplica*(id: string, host: string, port: int): Replica =
   Replica(
     id: id, host: host, port: port,
     state: rsConnecting, lastAckLsn: 0,
-    lagBytes: 0, lagTime: 0, connected: false,
+    lagBytes: 0, lagTime: 0, lastSeen: 0,
+    connected: false,
   )
 
 proc newReplicationManager*(mode: ReplicationMode = rmAsync,
@@ -202,3 +206,69 @@ proc switchMode*(rm: ReplicationManager, mode: ReplicationMode) =
   acquire(rm.lock)
   rm.mode = mode
   release(rm.lock)
+
+# ---------------------------------------------------------------------------
+# Health check and reconnection
+# ---------------------------------------------------------------------------
+
+proc healthCheck*(rm: ReplicationManager) =
+  acquire(rm.lock)
+  for id, replica in rm.replicas:
+    if replica.connected:
+      # Probe connection by sending a heartbeat
+      var sock = newSocket()
+      if not connectWithTimeout(sock, replica.host, Port(replica.port), 1000):
+        replica.connected = false
+        replica.state = rsDisconnected
+      else:
+        sock.send("PING\n")
+        var response = ""
+        try:
+          sock.readLine(response)
+          if response.strip() != "PONG":
+            replica.connected = false
+            replica.state = rsDisconnected
+        except:
+          replica.connected = false
+          replica.state = rsDisconnected
+        sock.close()
+  release(rm.lock)
+
+proc reconnectReplica*(rm: ReplicationManager, id: string): bool =
+  acquire(rm.lock)
+  result = false
+  if id in rm.replicas:
+    let replica = rm.replicas[id]
+    if not replica.connected and replica.host.len > 0 and replica.port > 0:
+      var sock = newSocket()
+      if connectWithTimeout(sock, replica.host, Port(replica.port), 2000):
+        replica.connected = true
+        replica.state = rsStreaming
+        replica.lastSeen = getMonoTime().ticks()
+        result = true
+      sock.close()
+  release(rm.lock)
+
+proc reconnectAll*(rm: ReplicationManager): int =
+  acquire(rm.lock)
+  result = 0
+  for id, replica in rm.replicas:
+    if not replica.connected and replica.host.len > 0 and replica.port > 0:
+      var sock = newSocket()
+      if connectWithTimeout(sock, replica.host, Port(replica.port), 2000):
+        replica.connected = true
+        replica.state = rsStreaming
+        replica.lastSeen = getMonoTime().ticks()
+        inc result
+      sock.close()
+  release(rm.lock)
+
+proc startHealthCheck*(rm: ReplicationManager, intervalMs: int = 5000) {.async.} =
+  while true:
+    await sleepAsync(intervalMs)
+    rm.healthCheck()
+
+proc startReconnectionLoop*(rm: ReplicationManager, intervalMs: int = 10000) {.async.} =
+  while true:
+    await sleepAsync(intervalMs)
+    discard rm.reconnectAll()

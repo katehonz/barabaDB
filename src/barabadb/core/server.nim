@@ -19,6 +19,8 @@ import ../storage/lsm
 import ../core/mvcc
 import ../core/disttxn
 import ../core/replication
+import ../core/sharding
+import ../core/gossip
 import jwt as jwtlib
 
 type
@@ -30,6 +32,9 @@ type
     txnManager*: TxnManager
     distTxnManager*: DistTxnManager
     replicationManager*: ReplicationManager
+    shardRouter*: ShardRouter
+    clusterMembership*: ClusterMembership
+    gossipProtocol*: GossipProtocol
     tls*: TLSContext
     activeConnections*: int
 
@@ -42,9 +47,49 @@ proc newServer*(config: BaraConfig): Server =
   if config.tlsEnabled and config.certFile.len > 0 and config.keyFile.len > 0:
     let tlsConfig = newTLSConfig(config.certFile, config.keyFile)
     tls = newTLSContext(tlsConfig)
+
+  # Initialize sharding
+  let shardRouter = newShardRouter()
+  let localId = if config.raftNodeId.len > 0: config.raftNodeId else: "node-" & $config.port
+  let cm = newClusterMembership(shardRouter, localId)
+
+  # Wire shard migration callbacks to LSM
+  shardRouter.iterateKeys = proc(shardId: int): seq[(string, seq[byte])] {.gcsafe.} =
+    var entries: seq[(string, seq[byte])] = @[]
+    for (key, value) in db.scanAll():
+      if shardRouter.getShard(key) == shardId:
+        entries.add((key, value))
+    return entries
+
+  shardRouter.storeKeys = proc(shardId: int, entries: seq[(string, seq[byte])]) {.gcsafe.} =
+    for (key, value) in entries:
+      db.put(key, value)
+
+  shardRouter.deleteKeys = proc(keys: seq[string]) {.gcsafe.} =
+    for key in keys:
+      db.delete(key)
+
+  # Initialize gossip
+  let gossipPort = config.raftPort + 100
+  let gp = newGossipProtocol(localId, config.address, config.port, gossipPort = gossipPort)
+
+  # Wire gossip → cluster membership
+  gp.onJoin = proc(node: GossipNode) {.gcsafe.} =
+    cm.onNodeJoin(node.id, node.host, node.port)
+
+  gp.onLeave = proc(nodeId: string) {.gcsafe.} =
+    cm.onNodeLeave(nodeId)
+
+  gp.onSuspect = proc(nodeId: string) {.gcsafe.} =
+    cm.onNodeSuspect(nodeId)
+
   Server(config: config, running: false, db: db, ctx: ctx,
          txnManager: ctx.txnManager, distTxnManager: newDistTxnManager(),
-         replicationManager: newReplicationManager(), tls: tls)
+         replicationManager: newReplicationManager(),
+         shardRouter: shardRouter,
+         clusterMembership: cm,
+         gossipProtocol: gp,
+         tls: tls)
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
@@ -169,19 +214,13 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
 # ----------------------------------------------------------------------
 
 proc serializeResult(qr: QueryResult, requestId: uint32): seq[byte] =
-  # Serialize as Data message
   var payload: seq[byte] = @[]
-  # Column count
   payload.writeUint32(uint32(qr.columns.len))
-  # Column names
   for col in qr.columns:
     payload.writeString(col)
-  # Column types metadata
   for ct in qr.columnTypes:
     payload.add(byte(ct))
-  # Row count
   payload.writeUint32(uint32(qr.rows.len))
-  # Rows
   for row in qr.rows:
     for val in row:
       payload.serializeValue(val)
@@ -280,7 +319,6 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
       # Detect text-based DISTTXN RPC (starts with "DISTTXN")
       if headerData.len >= 7 and headerData[0..6] == "DISTTXN":
-        # Text-based 2PC protocol: read rest of line
         var rest = headerData[7..^1]
         while '\n' notin rest:
           let more = await client.recvWithTimeout(1024, idleTimeout)
@@ -293,14 +331,12 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           if server.distTxnManager != nil:
             let txn = server.distTxnManager.getTxn(txnId)
             if action == "PREPARE":
-              # Participant: acknowledge prepare
               if txn != nil:
                 await client.send("OK\n")
               else:
                 await client.send("ERR unknown transaction\n")
             elif action == "COMMIT":
               if txn != nil and txn.state() == dtsPrepared:
-                # Apply committed changes to database
                 await client.send("OK\n")
               else:
                 await client.send("ERR not prepared\n")
@@ -334,7 +370,6 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
               let chunk = await client.recvWithTimeout(dataLen - data.len, idleTimeout)
               if chunk.len == 0: break
               data.add(chunk)
-            # Apply replicated data to database
             if data.len > 0:
               let nullPos = data.find('\0')
               if nullPos >= 0:
@@ -347,6 +382,40 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           await client.send("ACK " & $lsn & "\n")
         else:
           await client.send("ERR\n")
+        continue
+
+      # Detect shard migration data (starts with "MIGRATE ")
+      if headerData.len >= 8 and headerData[0..7] == "MIGRATE ":
+        var rest = headerData[8..^1]
+        while '\n' notin rest:
+          let more = await client.recvWithTimeout(1024, idleTimeout)
+          if more.len == 0: break
+          rest.add(more)
+        let headerLine = "MIGRATE " & rest.strip()
+        let parts = rest.strip().split(" ")
+        if parts.len >= 2:
+          let entryCount = try: parseInt(parts[1]) except: 0
+          var data = ""
+          if entryCount > 0:
+            # Read all entries (each entry is key\0value\n)
+            # Estimate buffer: 512 bytes per entry
+            let maxSize = min(entryCount * 1024, 10 * 1024 * 1024)
+            var received = 0
+            while received < maxSize:
+              let chunk = await client.recvWithTimeout(4096, idleTimeout)
+              if chunk.len == 0: break
+              data.add(chunk)
+              received += chunk.len
+              # Count newlines to know when we have all entries
+              var newlineCount = 0
+              for c in chunk:
+                if c == '\n': inc newlineCount
+              if newlineCount >= entryCount:
+                break
+          let response = handleMigrationMessage(headerLine, data, server.shardRouter)
+          await client.send(response)
+        else:
+          await client.send("ERR invalid migrate header\n")
         continue
 
       let (ok, header) = parseHeader(headerData)
@@ -382,22 +451,39 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         let queryStr = readString(cast[seq[byte]](payload), pos)
         info("[" & $clientId & "] Query: " & queryStr)
 
-        let startTicks = getMonoTime().ticks()
-        let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, replication=server.replicationManager)
-        let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
+        # Shard-aware routing: check if this node should handle the write
+        var shardCheck = true
+        if server.clusterMembership.nodes.len > 0:
+          let stmts = try: parse(tokenize(queryStr)) except: nil
+          if stmts != nil:
+            for stmt in stmts.stmts:
+              if stmt.kind in {nkInsert, nkUpdate, nkDelete}:
+                # If this node is not assigned to any shard, reject writes
+                let localShards = server.shardRouter.getShardForNode(
+                  server.clusterMembership.localNodeId)
+                if localShards.len == 0:
+                  shardCheck = false
+                  let err = serializeError(3, "Node not assigned to any shard", header.requestId)
+                  await client.send(cast[string](err))
+                break
 
-        if durationMs >= slowThreshold:
-          slowQueryLog(slowLog, queryStr, durationMs, clientId)
+        if shardCheck:
+          let startTicks = getMonoTime().ticks()
+          let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, replication=server.replicationManager)
+          let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
-        if success:
-          if result.rows.len > 0:
-            let dataMsg = serializeResult(result, header.requestId)
-            await client.send(cast[string](dataMsg))
-          let completeMsg = serializeComplete(result.affectedRows, header.requestId)
-          await client.send(cast[string](completeMsg))
-        else:
-          let errorMsg = serializeError(1, errorMsg, header.requestId)
-          await client.send(cast[string](errorMsg))
+          if durationMs >= slowThreshold:
+            slowQueryLog(slowLog, queryStr, durationMs, clientId)
+
+          if success:
+            if result.rows.len > 0:
+              let dataMsg = serializeResult(result, header.requestId)
+              await client.send(cast[string](dataMsg))
+            let completeMsg = serializeComplete(result.affectedRows, header.requestId)
+            await client.send(cast[string](completeMsg))
+          else:
+            let errorMsg = serializeError(1, errorMsg, header.requestId)
+            await client.send(cast[string](errorMsg))
 
       of mkQueryParams:
         let (queryStr, params) = readQueryParamsMessage(cast[seq[byte]](payload))
@@ -445,6 +531,12 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 proc run*(server: Server) {.async.} =
   server.running = true
   var clientId = 0
+
+  # Start gossip protocol if configured
+  if server.gossipProtocol != nil and server.gossipProtocol.gossipPort > 0:
+    server.gossipProtocol.startGossip()
+    info("Gossip protocol started on port " & $server.gossipProtocol.gossipPort)
+
   let sock = newAsyncSocket()
   sock.setSockOpt(OptReuseAddr, true)
   sock.bindAddr(Port(server.config.port), server.config.address)
@@ -471,4 +563,6 @@ proc run*(server: Server) {.async.} =
 
 proc stop*(server: Server) =
   server.running = false
+  if server.gossipProtocol != nil:
+    server.gossipProtocol.stop()
   server.db.close()

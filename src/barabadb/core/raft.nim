@@ -35,6 +35,10 @@ type
     lastApplied*: uint64
     # State machine callback
     applyCommand*: proc(cmd: string, data: seq[byte]) {.gcsafe.}
+    # Distributed transaction callbacks (for raft→disttxn integration)
+    onDistTxnPrepare*: proc(txnId: uint64, nodes: seq[string]): bool {.gcsafe.}
+    onDistTxnCommit*: proc(txnId: uint64) {.gcsafe.}
+    onDistTxnRollback*: proc(txnId: uint64) {.gcsafe.}
     # Leader state
     nextIndex*: Table[string, uint64]
     matchIndex*: Table[string, uint64]
@@ -178,8 +182,21 @@ proc applyCommitted(node: RaftNode) =
     let idx = int(node.lastApplied)
     if idx < node.log.len:
       let entry = node.log[idx]
-      if node.applyCommand != nil:
-        node.applyCommand(entry.command, entry.data)
+      # Handle distributed transaction commands
+      if entry.command.startsWith("DISTTXN:"):
+        let parts = entry.command.split(":")
+        if parts.len >= 3:
+          let action = parts[1]
+          let txnId = try: parseUInt(parts[2]) except: 0'u64
+          if action == "PREPARE" and node.onDistTxnPrepare != nil:
+            discard node.onDistTxnPrepare(txnId, @[])
+          elif action == "COMMIT" and node.onDistTxnCommit != nil:
+            node.onDistTxnCommit(txnId)
+          elif action == "ROLLBACK" and node.onDistTxnRollback != nil:
+            node.onDistTxnRollback(txnId)
+      else:
+        if node.applyCommand != nil:
+          node.applyCommand(entry.command, entry.data)
     inc node.lastApplied
 
 proc becomeFollower*(node: RaftNode, term: uint64) =

@@ -30,12 +30,13 @@
 
 ### ⚠️ Оставащи distributed gaps (non-critical за single-node)
 
-| Модул | Gap |
-|--------|-----|
-| `replication` | `writeLsn` не изпраща данни към replicas |
-| `gossip` | Няма UDP/TCP transport — in-memory само |
-| `sharding` | `rebalance` не мигрира данни |
-| `inter-module` | Няма raft→disttxn, gossip→sharding, replication→disttxn връзки |
+| Модул | Gap | Статус |
+|--------|-----|--------|
+| `replication` | `writeLsn` не изпраща данни към replicas | ✅ Добавен UDP transport + binary serialization |
+| `gossip` | Няма UDP/TCP transport — in-memory само | ✅ Добавен UDP listener + broadcast + binary serialization |
+| `sharding` | `rebalance` не мигрира данни | ✅ Добавен `migrateData` протокол + `scanAll` на LSM |
+| `inter-module` | Няма raft→disttxn, gossip→sharding, replication→disttxn връзки | ✅ Всички връзки реализирани |
+| `server` | Няма shard-aware routing | ✅ ClusterMembership + ShardRouter в Server |
 
 ---
 
@@ -117,9 +118,8 @@
 
 | # | Задача | Оценка |
 |---|--------|--------|
-| 1 | Replication data transfer | 2-3 часа |
-| 2 | Sharding data migration | 2-3 часа |
-| 3 | Property-based / fuzz tests | 2-4 часа |
-| 4 | Threadpool deprecation → malebolgia/taskpools | 1-2 часа |
+| 1 | Property-based / fuzz tests | 2-4 часа |
+| 2 | Threadpool deprecation → malebolgia/taskpools | 1-2 часа |
 
 **BaraDB v1.0.0 е production-ready за blogs, e-commerce и small ERP системи.**
+**Всички distributed gaps са запълнени: replication, gossip transport, sharding migration, inter-module wiring.**

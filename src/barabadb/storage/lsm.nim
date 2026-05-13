@@ -508,3 +508,34 @@ proc scanMemTable*(db: LSMTree): seq[Entry] =
     result.add(e)
   for e in db.immutableMem.entries:
     result.add(e)
+
+proc scanAll*(db: LSMTree): seq[(string, seq[byte])] =
+  ## Scan all active (non-deleted) entries from memory and SSTables.
+  ## Used for shard data migration.
+  acquire(db.lock)
+  defer: release(db.lock)
+
+  var seen = initTable[string, bool]()
+
+  # Scan memtable first (most recent)
+  for e in db.memTable.entries:
+    if e.key notin seen:
+      seen[e.key] = true
+      if not e.deleted:
+        result.add((e.key, e.value))
+
+  # Scan immutable memtable
+  for e in db.immutableMem.entries:
+    if e.key notin seen:
+      seen[e.key] = true
+      if not e.deleted:
+        result.add((e.key, e.value))
+
+  # Scan SSTables from newest to oldest
+  for sst in db.sstables:
+    for key, offset in sst.index:
+      if key notin seen:
+        seen[key] = true
+        let (found, entry) = readSSTableEntry(sst, key)
+        if found and not entry.deleted:
+          result.add((entry.key, entry.value))
