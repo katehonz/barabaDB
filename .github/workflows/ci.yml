@@ -30,6 +30,13 @@ jobs:
           tail -n 200 test_output.log
           exit $EXIT
 
+      - name: Upload test log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-log
+          path: test_output.log
+
       - name: Compile benchmarks
         run: nim c -d:release --threads:on benchmarks/bench_all.nim
 
