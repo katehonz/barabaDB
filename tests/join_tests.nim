@@ -3,6 +3,7 @@ import std/os
 import std/strutils
 import std/times
 import std/monotimes
+import std/tables
 import barabadb/core/types
 import barabadb/query/executor as qexec
 import barabadb/query/parser
