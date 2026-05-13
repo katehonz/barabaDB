@@ -23,6 +23,13 @@ jobs:
       - name: Install Nim dependencies
         run: nimble install --depsOnly -y
 
+      - name: Debug environment
+        run: |
+          nim --version
+          nimble list -i
+          uname -a
+          free -h
+
       - name: Run tests
         run: |
           nim c -d:ssl --threads:on --path:src -r tests/test_all.nim > test_output.log 2>&1
