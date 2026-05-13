@@ -22,7 +22,7 @@ jobs:
         run: nimble install --depsOnly -y
 
       - name: Compile and run minimal test
-        run: nim c -d:ssl --threads:on --path:src -r tests/test_minimal.nim
+        run: nim c --threads:on --path:src -r tests/test_minimal.nim
 
       - name: Compile test_all
         run: nim c -d:ssl --threads:on --path:src tests/test_all.nim
