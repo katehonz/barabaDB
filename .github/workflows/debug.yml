@@ -28,7 +28,7 @@ jobs:
           echo "NIM_OK=1"
 
       - name: Run join_tests
-        run: nim c -d:ssl --threads:on --path:src -r tests/join_tests.nim
+        run: timeout 30 nim c -d:ssl --threads:on --path:src -r tests/join_tests.nim
 
       - name: Run tla_faithfulness
         run: nim c -d:ssl --threads:on --path:src -r tests/tla_faithfulness.nim
