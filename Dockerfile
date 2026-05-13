@@ -16,7 +16,7 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="BaraDB Team"
 LABEL description="BaraDB — Multimodal Database Engine"
-LABEL version="1.0.0"
+LABEL version="1.1.0"
 
 # Инсталираме runtime зависимости
 # libpcre3 — нужна за Nim regex (зарежда се динамично)

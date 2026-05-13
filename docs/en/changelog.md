@@ -2,6 +2,45 @@
 
 All notable changes to BaraDB are documented in this file.
 
+## [1.1.0] — 2026-05-13
+
+### Added
+
+- **Client SDKs v1.1.0** — Full-featured clients for all languages:
+  - JavaScript: TypeScript definitions, package.json, examples, unit & integration tests
+  - Python: Restructured as proper package (`baradb/` with `__init__.py` and `core.py`), pyproject.toml, examples, tests (query builder, wire protocol, integration)
+  - Nim: Examples, integration tests, README
+  - Rust: Examples, integration tests, improved Cargo.toml
+- **SCRAM-SHA-256 Authentication** — RFC 7677 compliant authentication with PBKDF2 + HMAC + SHA-256 + nonce/salt generation
+- **HTTP SCRAM Endpoints** — `/auth/scram/start` + `/auth/scram/finish` in HTTP server
+- **Docker Compose Test Configuration** — `docker-compose.test.yml` for test environments
+- **CI/CD Clients Pipeline** — `.github/workflows/clients-ci.yml` for automated client testing
+
+### Fixed
+
+- **Query Executor** — Unary minus (`irNeg`) evaluation now works correctly in SELECT and WHERE clauses
+- **Distributed Transactions** — Rollback after commit attempt no longer violates atomicity
+- **Sharding** — Data migration protocol with TCP + `scanAll` on LSM
+- **Raft** — Majority calculation for even number of nodes fixed
+- **MVCC** — Aborted transactions no longer become visible
+- **LSM-Tree** — Data loss on immutable memtable overwrite fixed; SSTable lookup sorting fixed
+- **Auth** — JWT signature changed to HMAC-SHA256 (no longer trivially forgeable); token expiration (`exp`/`nbf`/`iat`) now validated; signature comparison is now constant-time
+- **Recovery** — `summary()` no longer mutates the database
+- **Wire Protocol** — 64MB limit + bounds checking + max depth to prevent OOM/DoS
+- **SQL Injection** — `exprToSql` now escapes single quotes
+- **ReDoS** — `irLike`/`irILike` now escape regex metacharacters
+- **Graph** — `addEdge` now checks node existence
+- **Vector** — Dimension mismatch validation + HNSW locking
+- **FTS** — UTF-8 tokenization now uses runes instead of bytes
+- **Build** — `nim.cfg` adds `-d:ssl` so `nimble build` works without flags; `--threads:on` added to all CI commands
+
+### Changed
+
+- **Version bumped to 1.1.0** across all components (server, Docker images, clients, CLI)
+- **README** — Version badge updated; all feature tables now reference v1.1.0
+- **TLA+ Formal Verification** — Added `crossmodal.tla`, `backup.tla`, `recovery.tla`; symmetry reduction in all 9 specs
+- **Clean build** — 0 compiler warnings on Nim 2.2.10
+
 ## [0.1.0] — 2025-01-15
 
 ### Added

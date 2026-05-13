@@ -40,7 +40,7 @@ FROM alpine:3.19
 
 LABEL maintainer="BaraDB Team"
 LABEL description="BaraDB — Multimodal Database Engine (source build)"
-LABEL version="1.0.0"
+LABEL version="1.1.0"
 
 # Инсталираме runtime зависимости
 RUN apk add --no-cache ca-certificates su-exec wget pcre
