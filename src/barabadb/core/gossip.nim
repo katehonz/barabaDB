@@ -4,6 +4,7 @@ import std/random
 import std/monotimes
 import std/asyncdispatch
 import std/net
+import std/asyncnet
 import std/strutils
 import std/streams
 import std/os
@@ -36,7 +37,7 @@ type
     fanout*: int              # number of nodes to gossip to per round
     gossipPort*: int
     running*: bool
-    sock*: Socket
+    sock*: AsyncSocket
     onJoin*: proc(node: GossipNode) {.gcsafe.}
     onLeave*: proc(nodeId: string) {.gcsafe.}
     onSuspect*: proc(nodeId: string) {.gcsafe.}
@@ -305,25 +306,21 @@ proc startGossipRound*(gp: GossipProtocol, intervalMs: int = 2000) {.async.} =
     gp.broadcastGossip()
 
 proc startGossipListener*(gp: GossipProtocol) {.async.} =
-  gp.sock = newSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+  gp.sock = newAsyncSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
   gp.sock.setSockOpt(OptReuseAddr, true)
   gp.sock.bindAddr(Port(gp.gossipPort))
   gp.running = true
   while gp.running:
     try:
-      var data = newString(65535)
-      var senderAddr = ""
-      var senderPort: Port
-      let bytesRead = gp.sock.recvFrom(data, 65535, senderAddr, senderPort)
-      if bytesRead > 0:
-        data.setLen(bytesRead)
+      let (data, senderAddr, senderPort) = await gp.sock.recvFrom(65535)
+      if data.len > 0:
         gp.handleIncomingGossip(data, senderAddr)
     except:
       # Small sleep on error to avoid spin
       gp.sock.close()
       # Recreate socket for next iteration
       try:
-        gp.sock = newSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+        gp.sock = newAsyncSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         gp.sock.setSockOpt(OptReuseAddr, true)
         gp.sock.bindAddr(Port(gp.gossipPort))
       except:
