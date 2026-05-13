@@ -119,4 +119,7 @@ TypeOk ==
   /\ shardToNodes \in [Shards -> SUBSET Nodes]
   /\ nextPosition \in 1..(MaxVnode + 1)
 
+\* Symmetry reduction for model checking.
+Symmetry == Permutations({s1, s2, s3}) \cup Permutations({n1, n2})
+
 =============================================================================

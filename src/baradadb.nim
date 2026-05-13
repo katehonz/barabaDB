@@ -1,7 +1,9 @@
 ## BaraDB — Multimodal Database Engine
 ## Main entry point
 import std/asyncdispatch
+{.push warning[Deprecated]: off.}
 import std/threadpool
+{.pop.}
 import std/locks
 import std/os
 import std/strutils

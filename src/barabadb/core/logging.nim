@@ -1,7 +1,6 @@
 ## BaraDB Structured JSON Logger
 import std/json
 import std/times
-import std/os
 
 type
   LogLevel* = enum

@@ -78,14 +78,14 @@ proc writeCommit*(wal: var WriteAheadLog, timestamp: uint64) =
 
 proc sync*(wal: var WriteAheadLog) =
   wal.stream.flush()
-  let fd = posix.open(wal.path, O_RDONLY)
+  let fd = posix.open(cstring(wal.path), O_RDONLY)
   if fd != -1:
     discard posix.fsync(fd)
     discard posix.close(fd)
 
 proc close*(wal: var WriteAheadLog) =
   wal.stream.flush()
-  let fd = posix.open(wal.path, O_RDONLY)
+  let fd = posix.open(cstring(wal.path), O_RDONLY)
   if fd != -1:
     discard posix.fsync(fd)
     discard posix.close(fd)

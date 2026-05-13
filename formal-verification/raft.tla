@@ -302,4 +302,7 @@ LeaderProgress ==
 \* Specification with weak fairness (all actions get a fair chance).
 Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 
+\* Symmetry reduction for model checking.
+Symmetry == Permutations({n1, n2, n3})
+
 =============================================================================

@@ -186,4 +186,7 @@ CommitProgress ==
 \* Specification with weak fairness.
 Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
 
+\* Symmetry reduction for model checking.
+Symmetry == Permutations({k1, k2}) \cup Permutations({v1, v2})
+
 =============================================================================

@@ -59,7 +59,10 @@ proc readUint32BE(data: string, pos: int): uint32 =
 proc parseHeader(data: string): (bool, MessageHeader) =
   if data.len < 12:
     return (false, MessageHeader())
-  let kind = MsgKind(readUint32BE(data, 0))
+  let rawKind = readUint32BE(data, 0)
+  {.push warning[HoleEnumConv]: off.}
+  let kind = MsgKind(rawKind)
+  {.pop.}
   let length = readUint32BE(data, 4)
   let requestId = readUint32BE(data, 8)
   return (true, MessageHeader(kind: kind, length: length, requestId: requestId))

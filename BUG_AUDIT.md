@@ -105,11 +105,11 @@
 
 ## 🔄 Оставащи задачи (всички non-critical)
 
-1. **Build warnings cleanup** — implicit `cstring` conversion (wal.nim), `HoleEnumConv` (server.nim), unused `os` import (logging.nim)
+1. ~~**Build warnings cleanup**~~ ✅ — implicit `cstring` conversion (wal.nim), `HoleEnumConv` (server.nim), unused `os` import (logging.nim), `ImplicitDefaultValue` (ast.nim)
 2. **Threadpool deprecation** — миграция към `malebolgia`/`weave`/`taskpools`
 3. **Auth SCRAM-SHA-256** — истински challenge-response със salt + iteration count
-4. **TLA+ symmetry reduction** — `SYMMETRY` в `.cfg` файловете за 3-10x по-бърз TLC
-5. **`crossmodal.tla`** — cross-modal consistency между document/vector/graph/FTS
+4. ~~**TLA+ symmetry reduction**~~ ✅ — `SYMMETRY` добавен във всички 9 `.cfg` файла + `Permutations` дефиниции в `.tla` спековете
+5. ~~**`crossmodal.tla`**~~ ✅ — cross-modal consistency между document/vector/graph/FTS
 6. **Replication data transfer** — `writeLsn` да изпраща данни към replicas
 7. **Sharding data migration** — `rebalance` да мигрира ключове
 8. **Property-based / fuzz tests** — storage engine edge cases

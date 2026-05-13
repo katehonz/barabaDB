@@ -79,7 +79,7 @@
 |---|--------|---------|-----------|
 | FV-10 | ~~**`backup.tla`**~~ ✅ | `backup.nim` — `BackupSnapshotsValid`, `RestoreIntegrity`, `VerifyIntegrity`, `RetentionInvariant`, `HistoryConsistency`, `BackupIdValid` | Висок |
 | FV-11 | ~~**`recovery.tla`**~~ ✅ | `recovery.nim` — `RedoCommitted`, `RecoveryCompleteness`, `WalIntegrity` | Висок |
-| FV-12 | **`crossmodal.tla`** | `crossmodal.nim` (250 реда) — consistency между document/vector/graph/FTS индекси | Среден |
+| FV-12 | ~~**`crossmodal.tla`**~~ ✅ | `crossmodal.nim` — `MetadataVectorConsistency`, `HybridResultValid`, `CommittedAtomicity`, `AbortedAtomicity`, `TxnStateValid` | Среден |
 
 ### 🔧 Инфраструктурни
 
@@ -90,26 +90,23 @@
 
 ---
 
-## План за утре — Предложение
+## ✅ Сесия 8 — Clean build + TLA+ symmetry reduction
 
-Ако имаш време и желание утре, ето 3 варианта за спринт:
-
-### Опция A: "Clean build" (1-2 часа)
-- Почистване на 4-те build warnings
+### Опция A: "Clean build" ✅
+- Почистване на 5-те build warnings
 - TLA+ symmetry reduction в `.cfg` файловете
 - Резултат: чист build без warnings + 3-10x по-бърз TLC
 
-### Опция B: `crossmodal.tla` (2-3 часа)
+### Оставащи опции за следващ спринт
+
+### Опция B: `crossmodal.tla` ✅
 - TLA+ спек за cross-modal consistency
 - Моделира sync между document/vector/graph/FTS индекси
 - Резултат: 10-ти TLA+ спек, пълно покритие на core модулите
 
 ### Опция C: Auth hardening + SCRAM (3-4 часа)
 - Истински SCRAM-SHA-256 със salt, iteration count, challenge-response
-- Почистване на warnings като бонус
 - Резултат: production-grade auth
-
-**Препоръчвам Опция A** — бързо, видимо подобрение, подготовка за clean v1.0.0 release.
 
 ---
 

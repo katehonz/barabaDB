@@ -62,4 +62,7 @@ TypeOk ==
   /\ edges \subseteq (TxnIds \X TxnIds)
   /\ Cardinality(edges) <= MaxEdges
 
+\* Symmetry reduction for model checking.
+Symmetry == Permutations({t1, t2, t3, t4, t5})
+
 =============================================================================

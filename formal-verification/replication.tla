@@ -157,4 +157,7 @@ TypeOk ==
   /\ appliedLsn \in 0..MaxLsn
   /\ ackedBy \in [0..MaxLsn -> SUBSET Replicas]
 
+\* Symmetry reduction for model checking.
+Symmetry == Permutations({r1, r2, r3})
+
 =============================================================================

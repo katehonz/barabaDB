@@ -11,6 +11,8 @@ import std/strformat
 import barabadb/core/raft
 import barabadb/core/mvcc
 import barabadb/core/disttxn
+import barabadb/core/crossmodal
+import std/os
 
 # ---------------------------------------------------------------------------
 # Raft Faithfulness — verify invariants from raft.tla in Nim code
@@ -184,3 +186,80 @@ suite "2PC TLA+ Faithfulness":
     let stateAfter = txn.state
     check stateBefore == stateAfter
     check stateAfter == dtsCommitted
+
+
+# ---------------------------------------------------------------------------
+# Cross-Modal TLA+ Faithfulness — verify invariants from crossmodal.tla
+# ---------------------------------------------------------------------------
+
+suite "Cross-Modal TLA+ Faithfulness":
+  test "MetadataVectorConsistency: insertVector updates metadata for filtered search":
+    let engine = newCrossModalEngine("/tmp/baradb_tla_crossmodal_1")
+    engine.insertVector(1, @[1.0'f32, 0.0'f32], {"cat": "A"}.toTable)
+    engine.insertVector(2, @[0.0'f32, 1.0'f32], {"cat": "B"}.toTable)
+
+    # Filtered search uses metadata internally
+    let results = engine.searchVectorFiltered(
+      @[1.0'f32, 0.0'f32], 5,
+      proc(meta: Table[string, string]): bool =
+        meta.getOrDefault("cat") == "A"
+    )
+    check results.len >= 1
+    check results[0][0] == 1'u64
+
+  test "HybridResultValid: hybrid query draws from correct indices":
+    let engine = newCrossModalEngine("/tmp/baradb_tla_crossmodal_2")
+    engine.insertVector(1, @[1.0'f32, 0.0'f32], {"cat": "A"}.toTable)
+    engine.indexText(1, "fast database engine")
+
+    var query = newCrossModalQuery(qmHybrid)
+    query.vector = @[1.0'f32, 0.0'f32]
+    query.vectorK = 5
+    query.searchQuery = "fast"
+    query.vecWeight = 1.0
+    query.ftsWeight = 1.0
+
+    let result = engine.hybridSearch(query)
+    # Vector results should contain entity 1
+    let vecIds = result.vecResults.mapIt(it[0])
+    check vecIds.contains(1'u64)
+    # FTS results should contain entity 1
+    check result.ftsResults.contains(1'u64)
+    # Total results should match hybridScores length
+    check result.totalResults == result.hybridScores.len
+
+  test "CrossModalAtomicity: all participants commit or all abort":
+    var txn = newTPCTransaction(1)
+    txn.addParticipant("doc")
+    txn.addParticipant("vec")
+    txn.addParticipant("graph")
+    check txn.participantCount == 3
+
+    let prepOk = txn.prepare()
+    check prepOk
+    check txn.isPrepared
+    for p in txn.participants:
+      check p.prepared
+      check not p.committed
+      check not p.aborted
+
+    let commitOk = txn.commit()
+    check commitOk
+    check txn.isCommitted
+    for p in txn.participants:
+      check p.committed
+      check not p.aborted
+
+  test "CrossModalAbort: rollback after prepare aborts all participants":
+    var txn = newTPCTransaction(2)
+    txn.addParticipant("doc")
+    txn.addParticipant("fts")
+    check txn.prepare()
+    check txn.isPrepared
+
+    let rollbackOk = txn.rollback()
+    check rollbackOk
+    check txn.isAborted
+    for p in txn.participants:
+      check p.aborted
+      check not p.committed

@@ -238,4 +238,7 @@ DecideAbortAction == \E t \in 1..MaxTxnId : DecideAbort(t)
 Spec == Init /\ [][Next]_vars /\ WF_vars(Next)
            /\ SF_vars(DecideCommitAction) /\ SF_vars(DecideAbortAction)
 
+\* Symmetry reduction for model checking.
+Symmetry == Permutations({p1, p2, p3})
+
 =============================================================================

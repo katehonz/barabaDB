@@ -459,7 +459,7 @@ type
     of nkStatementList:
       stmts*: seq[Node]
 
-proc newNode*(kind: NodeKind, line, col: int = 0): Node =
+proc newNode*(kind: NodeKind, line: int = 0, col: int = 0): Node =
   result = Node(kind: kind, line: line, col: col)
   case kind
   of nkSelect: result.selResult = @[]
