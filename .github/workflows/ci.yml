@@ -35,12 +35,19 @@ jobs:
           nim c -d:ssl --threads:on --path:src -r tests/test_all.nim > test_output.log 2>&1
           EXIT=$?
           tail -n 200 test_output.log
-          if [ $EXIT -ne 0 ]; then
-            URL=$(curl -s -F'file=@test_output.log' https://0x0.st)
-            echo "::notice::Test log uploaded to $URL"
-            echo "UPLOAD_URL=$URL"
-          fi
           exit $EXIT
+
+      - name: Post test log as commit comment
+        if: failure()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BODY=$(cat test_output.log | sed 's/"/\\"/g' | head -c 60000)
+          curl -s -X POST \
+            -H "Authorization: token $GITHUB_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{\"body\":\"Test failure log:\\n\\n\\`\\`\\`\\n$BODY\\n\\`\\`\\`\"}" \
+            https://api.github.com/repos/${{ github.repository }}/commits/${{ github.sha }}/comments
 
       - name: Compile benchmarks
         run: nim c -d:release --threads:on benchmarks/bench_all.nim
