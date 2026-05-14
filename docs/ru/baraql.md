@@ -490,3 +490,108 @@ LIMIT 10;
 -- Параллельное выполнение
 SELECT /*+ PARALLEL(4) */ * FROM large_table;
 ```
+
+## Оконные функции
+
+```sql
+-- Функции ранжирования
+SELECT
+  name,
+  department,
+  ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS rn,
+  RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS r,
+  DENSE_RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS dr
+FROM employees;
+
+-- Функции значения
+SELECT
+  name,
+  salary,
+  LAG(salary, 1, 0) OVER (ORDER BY salary) AS prev_salary,
+  LEAD(salary, 1, 0) OVER (ORDER BY salary) AS next_salary,
+  FIRST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS cheapest,
+  LAST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS most_expensive
+FROM employees;
+
+-- Функции распределения
+SELECT name, NTILE(4) OVER (ORDER BY salary) AS quartile FROM employees;
+```
+
+### Спецификации фрейма
+
+```sql
+-- ROWS фрейм
+SUM(salary) OVER (
+  PARTITION BY department
+  ORDER BY hire_date
+  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW
+)
+
+-- RANGE фрейм
+SUM(salary) OVER (
+  PARTITION BY department
+  ORDER BY hire_date
+  RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+)
+```
+
+## Мультитенантный ERP
+
+BaraDB поддерживает работу нескольких компаний (арендаторов) в одной базе данных, используя **безопасность на уровне строк (RLS)** в сочетании с **переменными сессии**.
+
+### Переменные сессии
+
+```sql
+SET app.tenant_id = 'company-123';
+SELECT current_setting('app.tenant_id') AS tenant;
+```
+
+### Текущий пользователь / роль
+
+```sql
+SELECT current_user AS me, current_role AS my_role;
+```
+
+### Изоляция арендаторов через RLS
+
+```sql
+-- Включить RLS на таблице
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+
+-- Создать политику фильтрации по арендатору
+CREATE POLICY tenant_isolation ON invoices
+  FOR SELECT USING (tenant_id = current_setting('app.tenant_id'));
+
+-- Каждая сессия видит только свои данные
+SET app.tenant_id = 'company-a';
+SELECT * FROM invoices;  -- только строки company-a
+```
+
+### Зачем мультитенантность?
+
+- **Один экземпляр, много арендаторов** — не нужно запускать 100 отдельных баз данных
+- **JSONB документы** — гибкая схема, легко добавлять поля для каждого арендатора
+- **RLS гарантирует изоляцию** — база данных обеспечивает границы арендаторов, а не только приложение
+
+## Поддерживаемые ключевые слова
+
+| Категория | Ключевые слова |
+|----------|----------|
+| DQL | SELECT, FROM, WHERE, ORDER BY, GROUP BY, HAVING, LIMIT, OFFSET, DISTINCT |
+| DML | INSERT, UPDATE, DELETE, SET, VALUES |
+| DDL | CREATE TYPE, DROP TYPE, CREATE INDEX, DROP INDEX, ALTER TYPE |
+| Join | INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL JOIN, CROSS JOIN, ON |
+| Set | UNION, UNION ALL, INTERSECT, EXCEPT |
+| CTEs | WITH, RECURSIVE, AS |
+| Case | CASE, WHEN, THEN, ELSE, END |
+| Transaction | BEGIN, COMMIT, ROLLBACK, SAVEPOINT |
+| Graph | MATCH, RETURN, WHERE, shortestPath, type |
+| FTS | MATCH, AGAINST, relevance, IN BOOLEAN MODE, WITH FUZZINESS |
+| Vector | cosine_distance, euclidean_distance, inner_product, l1_distance, l2_distance, <-> |
+| JSON | ->, ->> |
+| FTS | @@ (BM25 match) |
+| Recovery | RECOVER TO TIMESTAMP |
+| Functions | count, sum, avg, min, max, stddev, variance, abs, sqrt, lower, upper, len, trim, substr, now, last_insert_id, current_setting |
+| Session | SET, current_setting, current_user, current_role |
+| Window | OVER, PARTITION BY, ROWS, RANGE, UNBOUNDED PRECEDING, CURRENT ROW, FOLLOWING |
+| Window Functions | ROW_NUMBER, RANK, DENSE_RANK, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTILE |

@@ -15,6 +15,7 @@
 | macOS | x86_64 | ✅ Пълна поддръжка |
 | macOS | ARM64 (Apple Silicon) | ✅ Пълна поддръжка |
 | Windows | x86_64 | ✅ Поддръжка |
+| FreeBSD | x86_64 | 🟡 Тествано от общността |
 
 ## Инсталиране на Nim
 
@@ -48,10 +49,13 @@ sudo port install nim
 ### Windows
 
 ```powershell
-# Winget
+# С choosenim
+curl.exe -A "MSYS2_$(uname -m)" -L https://nim-lang.org/choosenim/init.ps1 | powershell -
+
+# С winget
 winget install nim
 
-# Scoop
+# С scoop
 scoop install nim
 ```
 
@@ -79,9 +83,15 @@ sudo pacman -S openssl
 
 ### macOS
 
+OpenSSL е включен в системата. Ако е необходимо:
+
 ```bash
 brew install openssl
 ```
+
+### Windows
+
+OpenSSL е включен в Nim Windows дистрибуцията. За ръчни компилации, изтеглете от [slproweb.com](https://slproweb.com/products/Win32OpenSSL.html).
 
 ## Компилиране на BaraDB
 
@@ -103,26 +113,29 @@ nimble install -d -y
 #### Debug Компилация
 
 ```bash
-nim c -d:ssl -o:build/baradadb src/baradadb.nim
+nim c -d:ssl --threads:on -o:build/baradadb src/baradadb.nim
 ```
 
 #### Release Компилация (Препоръчителна)
 
 ```bash
-nim c -d:ssl -d:release --opt:speed -o:build/baradadb src/baradadb.nim
+nim c -d:ssl --threads:on -d:release --opt:speed -o:build/baradadb src/baradadb.nim
 ```
 
-#### Използване на Nimble
+#### Използване на Nimble Tasks
 
 ```bash
+# Debug компилация
 nimble build_debug
+
+# Release компилация
 nimble build_release
 ```
 
 #### Минимален Размер
 
 ```bash
-nim c -d:ssl -d:release --opt:size -o:build/baradadb src/baradadb.nim
+nim c -d:ssl --threads:on -d:release --opt:size -o:build/baradadb src/baradadb.nim
 strip build/baradadb
 ```
 
@@ -130,17 +143,31 @@ strip build/baradadb
 
 ```bash
 ./build/baradadb --version
-# Очакван резултат: BaraDB v0.1.0 — Multimodal Database Engine
+# Очакван резултат: BaraDB v1.1.0 — Multimodal Database Engine
 ```
 
 ## Стартиране на Тестове
 
-```bash
-# Всички тестове (262 теста, 56 сюита)
-nim c -d:ssl -r tests/test_all.nim
+### Всички Тестове
 
-# Бенчмаркове
-nim c -d:ssl -d:release -r benchmarks/bench_all.nim
+```bash
+nim c --path:src -d:ssl --threads:on -r tests/test_all.nim
+```
+
+### Специфични Тестови Сюити
+
+```bash
+# Storage тестове
+nim c --path:src -d:ssl --threads:on -r tests/test_all.nim
+
+# Stress тестове
+nim c --path:src -d:ssl --threads:on -d:release -r tests/stress_test.nim
+```
+
+### Бенчмаркове
+
+```bash
+nim c --path:src -d:ssl --threads:on -d:release -r benchmarks/bench_all.nim
 ```
 
 ## Опции за Инсталация
@@ -148,16 +175,46 @@ nim c -d:ssl -d:release -r benchmarks/bench_all.nim
 ### Системна Инсталация
 
 ```bash
+# Компилиране на release binary
 nimble build_release
+
+# Инсталиране в /usr/local/bin
 sudo cp build/baradadb /usr/local/bin/
 sudo chmod +x /usr/local/bin/baradadb
+
+# Създаване на директория за данни
 sudo mkdir -p /var/lib/baradb
+sudo chmod 755 /var/lib/baradb
+```
+
+### Предварително Компилиран Binary
+
+Изтеглете най-новата версия за вашата платформа:
+
+```bash
+# Linux x86_64
+wget https://github.com/katehonz/barabaDB/releases/latest/download/baradadb-linux-amd64
+chmod +x baradadb-linux-amd64
+mv baradadb-linux-amd64 /usr/local/bin/baradadb
+
+# Linux ARM64
+wget https://github.com/katehonz/barabaDB/releases/latest/download/baradadb-linux-arm64
+chmod +x baradadb-linux-arm64
+mv baradadb-linux-arm64 /usr/local/bin/baradadb
+
+# macOS
+wget https://github.com/katehonz/barabaDB/releases/latest/download/baradadb-darwin-amd64
+chmod +x baradadb-darwin-amd64
+mv baradadb-darwin-amd64 /usr/local/bin/baradadb
 ```
 
 ### Docker
 
 ```bash
+# Изтегляне на официален образ
 docker pull barabadb/barabadb:latest
+
+# Стартиране
 docker run -d \
   -p 9472:9472 \
   -p 9470:9470 \
@@ -172,11 +229,15 @@ docker run -d \
 docker-compose up -d
 ```
 
-### Вградено Използване
+### Вградено Използване (Nim Проекти)
+
+Добавете към вашия `.nimble` файл:
 
 ```nim
-requires "barabadb >= 0.1.0"
+requires "barabadb >= 1.1.0"
 ```
+
+Използване в кода:
 
 ```nim
 import barabadb/storage/lsm
@@ -193,16 +254,52 @@ db.close()
 # Стартиране на сървъра
 ./build/baradadb
 
-# Тестване на HTTP API
+# Очакван изход:
+# BaraDB v1.1.0 — Multimodal Database Engine
+# BaraDB TCP listening on 127.0.0.1:9472
+
+# Тестване с HTTP API
 curl http://localhost:9470/health
 
-# Интерактивна конзола
+# Интерактивна обвивка
 ./build/baradadb --shell
+```
+
+## Отстраняване на Проблеми с Инсталацията
+
+### "cannot open file: hunos"
+
+```bash
+nimble install -d -y
+```
+
+### "BaraDB requires SSL support"
+
+Винаги компилирайте с `-d:ssl`:
+
+```bash
+nim c -d:ssl --threads:on -o:build/baradadb src/baradadb.nim
+```
+
+### Бавна компилация
+
+Използвайте паралелна компилация:
+
+```bash
+nim c -d:ssl --threads:on -d:release --parallelBuild:4 -o:build/baradadb src/baradadb.nim
+```
+
+### Голям размер на binary-то
+
+Използвайте оптимизация на размера:
+
+```bash
+nim c -d:ssl --threads:on -d:release --opt:size --passL:-s -o:build/baradadb src/baradadb.nim
 ```
 
 ## Следващи Стъпки
 
-- [Бързо Стартиране](bg/quickstart.md)
-- [Конфигурация](en/configuration.md)
-- [Архитектура](bg/architecture.md)
-- [BaraQL Заявки](bg/baraql.md)
+- [Бърз Старт](quickstart.md)
+- [Конфигурационна Референция](configuration.md)
+- [Преглед на Архитектурата](architecture.md)
+- [BaraQL Език за Заявки](baraql.md)

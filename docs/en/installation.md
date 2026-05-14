@@ -144,7 +144,7 @@ strip build/baradadb
 
 ```bash
 ./build/baradadb --version
-# Expected: BaraDB v0.1.0 — Multimodal Database Engine
+# Expected: BaraDB v1.1.0 — Multimodal Database Engine
 ```
 
 ## Running Tests
@@ -259,7 +259,7 @@ db.close()
 ./build/baradadb
 
 # Expected output:
-# BaraDB v0.1.0 — Multimodal Database Engine
+# BaraDB v1.1.0 — Multimodal Database Engine
 # BaraDB TCP listening on 127.0.0.1:9472
 
 # Test with HTTP API

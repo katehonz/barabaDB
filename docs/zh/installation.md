@@ -144,7 +144,7 @@ strip build/baradadb
 
 ```bash
 ./build/baradadb --version
-# 预期输出: BaraDB v0.1.0 — Multimodal Database Engine
+# 预期输出: BaraDB v1.1.0 — Multimodal Database Engine
 ```
 
 ## 运行测试
@@ -259,7 +259,7 @@ db.close()
 ./build/baradadb
 
 # 预期输出:
-# BaraDB v0.1.0 — Multimodal Database Engine
+# BaraDB v1.1.0 — Multimodal Database Engine
 # BaraDB TCP listening on 127.0.0.1:9472
 
 # 使用 HTTP API 测试

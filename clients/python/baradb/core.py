@@ -1,33 +1,38 @@
 """
-BaraDB Python Client
+BaraDB Python Async Client
 
-Binary protocol client for BaraDB database.
-Communicates via the BaraDB Wire Protocol (binary, big-endian).
+Official async Python client for BaraDB — Multimodal Database Engine.
+Communicates via the BaraDB Wire Protocol (binary, big-endian, TCP).
 
 Install:
     pip install baradb
 
 Quick Start:
+    import asyncio
     from baradb import Client
-    client = Client("localhost", 9472)
-    client.connect()
-    result = client.query("SELECT name FROM users WHERE age > 18")
-    for row in result:
-        print(row["name"])
-    client.close()
+
+    async def main():
+        client = Client("localhost", 9472)
+        await client.connect()
+        result = await client.query("SELECT name FROM users WHERE age > 18")
+        for row in result:
+            print(row["name"])
+        await client.close()
+
+    asyncio.run(main())
 
 Parameterized Queries:
-    result = client.query_params("SELECT * FROM users WHERE age > $1", [WireValue.int64(18)])
+    result = await client.query_params(
+        "SELECT * FROM users WHERE age > $1",
+        [WireValue.int64(18)]
+    )
 
 Authentication:
-    client = Client("localhost", 9472, username="admin", password="secret")
-    client.connect()
-    client.auth("jwt-token-here")
+    await client.auth("jwt-token-here")
 """
 
-import socket
+import asyncio
 import struct
-import json
 from typing import Any, Optional, Sequence
 
 
@@ -49,7 +54,6 @@ class FieldKind:
 
 
 class MsgKind:
-    # Client messages
     CLIENT_HANDSHAKE = 0x01
     QUERY = 0x02
     QUERY_PARAMS = 0x03
@@ -59,7 +63,6 @@ class MsgKind:
     CLOSE = 0x07
     PING = 0x08
     AUTH = 0x09
-    # Server messages
     SERVER_HANDSHAKE = 0x80
     READY = 0x81
     DATA = 0x82
@@ -88,7 +91,7 @@ class WireValue:
         return WireValue(FieldKind.NULL)
 
     @staticmethod
-    def bool_val(val: bool):
+    def bool(val: bool):
         return WireValue(FieldKind.BOOL, val)
 
     @staticmethod
@@ -120,15 +123,15 @@ class WireValue:
         return WireValue(FieldKind.STRING, val)
 
     @staticmethod
-    def bytes_val(val: bytes):
+    def bytes(val: bytes):
         return WireValue(FieldKind.BYTES, val)
 
     @staticmethod
-    def array_val(val: list):
+    def array(val: list):
         return WireValue(FieldKind.ARRAY, val)
 
     @staticmethod
-    def object_val(val: dict):
+    def object(val: dict):
         return WireValue(FieldKind.OBJECT, val)
 
     @staticmethod
@@ -136,7 +139,7 @@ class WireValue:
         return WireValue(FieldKind.VECTOR, val)
 
     @staticmethod
-    def json_val(val: str):
+    def json(val: str):
         return WireValue(FieldKind.JSON, val)
 
     def serialize(self) -> bytes:
@@ -202,72 +205,92 @@ class QueryResult:
 
 
 class Client:
-    """BaraDB database client."""
+    """Async BaraDB database client."""
 
     def __init__(self, host: str = "localhost", port: int = 9472,
                  database: str = "default", username: str = "admin",
-                 password: str = "", timeout: int = 30):
+                 password: str = "", timeout: float = 30.0):
         self.host = host
         self.port = port
         self.database = database
         self.username = username
         self.password = password
         self.timeout = timeout
-        self._sock: Optional[socket.socket] = None
+        self._reader: Optional[asyncio.StreamReader] = None
+        self._writer: Optional[asyncio.StreamWriter] = None
         self._connected = False
         self._request_id = 0
+        self._buffer = bytearray()
+        self._pending_resolve = None
+        self._request_queue: list = []
+        self._request_lock = False
 
-    def connect(self) -> None:
+    async def connect(self) -> None:
         """Connect to the BaraDB server."""
-        self._sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self._sock.settimeout(self.timeout)
-        self._sock.connect((self.host, self.port))
+        self._reader, self._writer = await asyncio.wait_for(
+            asyncio.open_connection(self.host, self.port),
+            timeout=self.timeout
+        )
         self._connected = True
 
-    def close(self) -> None:
-        if self._sock:
+    async def close(self) -> None:
+        """Close the connection to the server."""
+        if self._writer and self._connected:
             try:
                 msg = self._build_message(MsgKind.CLOSE, b"")
-                self._sock.send(msg)
+                self._writer.write(msg)
+                await self._writer.drain()
             except Exception:
                 pass
-            self._sock.close()
+        if self._writer:
+            self._writer.close()
+            await self._writer.wait_closed()
+            self._writer = None
+        self._reader = None
         self._connected = False
 
     def is_connected(self) -> bool:
+        """Check if client is connected."""
         return self._connected
 
     def _next_id(self) -> int:
         self._request_id += 1
         return self._request_id
 
-    def _recv_exact(self, size: int) -> bytes:
+    async def _recv_exact(self, size: int) -> bytes:
         """Receive exactly `size` bytes from the socket."""
-        data = b""
-        while len(data) < size:
-            chunk = self._sock.recv(size - len(data))
-            if not chunk:
-                raise ConnectionError("Connection closed by server")
-            data += chunk
+        while len(self._buffer) < size:
+            try:
+                chunk = await asyncio.wait_for(
+                    self._reader.read(size - len(self._buffer)),
+                    timeout=self.timeout
+                )
+                if not chunk:
+                    raise ConnectionError("Connection closed by server")
+                self._buffer.extend(chunk)
+            except asyncio.TimeoutError:
+                raise TimeoutError("Receive timeout")
+        data = bytes(self._buffer[:size])
+        del self._buffer[:size]
         return data
 
-    def _read_response_header(self) -> tuple[int, int, int]:
+    async def _read_header(self) -> tuple[int, int, int]:
         """Read a 12-byte message header. Returns (kind, length, request_id)."""
-        header = self._recv_exact(12)
+        header = await self._recv_exact(12)
         kind, length, req_id = struct.unpack(">III", header)
         return kind, length, req_id
 
-    def _read_error(self, length: int) -> Exception:
+    async def _read_error(self, length: int) -> Exception:
         """Read and parse an ERROR payload."""
-        data = self._recv_exact(length)
+        data = await self._recv_exact(length)
         code = struct.unpack(">I", data[:4])[0]
         msg_len = struct.unpack(">I", data[4:8])[0]
         error_msg = data[8:8 + msg_len].decode("utf-8")
         return Exception(f"BaraDB error {code}: {error_msg}")
 
-    def _read_data_response(self, length: int) -> QueryResult:
+    async def _read_data_response(self, length: int) -> QueryResult:
         """Read and parse a DATA payload, then follow up with COMPLETE."""
-        data = self._recv_exact(length)
+        data = await self._recv_exact(length)
         pos = [0]
 
         col_count = struct.unpack(">I", data[pos[0]:pos[0]+4])[0]
@@ -299,95 +322,138 @@ class Client:
         result.rows = rows
         result.row_count = row_count
 
-        comp_kind, comp_len, _ = self._read_response_header()
+        comp_kind, comp_len, _ = await self._read_header()
         if comp_kind == MsgKind.COMPLETE:
-            comp_data = self._recv_exact(comp_len)
+            comp_data = await self._recv_exact(comp_len)
             result.affected_rows = struct.unpack(">I", comp_data[:4])[0]
         elif comp_kind == MsgKind.ERROR:
-            raise self._read_error(comp_len)
+            raise await self._read_error(comp_len)
 
         return result
 
-    def auth(self, token: str) -> None:
+    async def auth(self, token: str) -> None:
         """Authenticate with the server using a JWT token."""
+        if not self._connected:
+            raise Exception("Not connected")
         encoded = token.encode("utf-8")
         payload = struct.pack(">I", len(encoded)) + encoded
         msg = self._build_message(MsgKind.AUTH, payload)
-        self._sock.send(msg)
+        self._writer.write(msg)
+        await self._writer.drain()
 
-        kind, length, _ = self._read_response_header()
+        kind, length, _ = await self._read_header()
         if kind == MsgKind.AUTH_OK:
             return
         elif kind == MsgKind.ERROR:
-            raise self._read_error(length)
+            raise await self._read_error(length)
         else:
             raise Exception(f"Unexpected auth response: 0x{kind:02x}")
 
-    def ping(self) -> bool:
+    async def ping(self) -> bool:
         """Ping the server. Returns True if pong received."""
+        if not self._connected:
+            raise Exception("Not connected")
         msg = self._build_message(MsgKind.PING, b"")
-        self._sock.send(msg)
+        self._writer.write(msg)
+        await self._writer.drain()
 
-        kind, length, _ = self._read_response_header()
+        kind, length, _ = await self._read_header()
         if kind == MsgKind.PONG:
             return True
         elif kind == MsgKind.ERROR:
-            raise self._read_error(length)
+            raise await self._read_error(length)
         return False
 
-    def query(self, sql: str) -> QueryResult:
+    async def _process_queue(self) -> None:
+        """Process queued requests sequentially."""
+        if self._request_lock or len(self._request_queue) == 0:
+            return
+        self._request_lock = True
+        task_data = self._request_queue.pop(0)
+        try:
+            result = await task_data["task"]()
+            task_data["resolve"](result)
+        except Exception as err:
+            task_data["reject"](err)
+        finally:
+            self._request_lock = False
+            asyncio.create_task(self._process_queue())
+
+    def _enqueue(self, task) -> None:
+        """Add a task to the request queue."""
+        future = asyncio.Future()
+        self._request_queue.append({"task": task, "resolve": future.set_result, "reject": future.set_exception})
+        asyncio.create_task(self._process_queue())
+        return future
+
+    async def query(self, sql: str) -> QueryResult:
         """Execute a BaraQL query."""
-        payload = self._encode_string(sql)
-        payload += bytes([ResultFormat.BINARY])
+        if not self._connected:
+            raise Exception("Not connected")
 
-        msg = self._build_message(MsgKind.QUERY, payload)
-        self._sock.send(msg)
+        async def _do_query():
+            payload = self._encode_string(sql)
+            payload += bytes([ResultFormat.BINARY])
 
-        kind, length, _ = self._read_response_header()
+            msg = self._build_message(MsgKind.QUERY, payload)
+            self._writer.write(msg)
+            await self._writer.drain()
 
-        if kind == MsgKind.ERROR:
-            raise self._read_error(length)
+            kind, length, _ = await self._read_header()
 
-        if kind == MsgKind.DATA:
-            return self._read_data_response(length)
+            if kind == MsgKind.ERROR:
+                raise await self._read_error(length)
 
-        if kind == MsgKind.COMPLETE:
-            data = self._recv_exact(length)
-            result = QueryResult()
-            result.affected_rows = struct.unpack(">I", data[:4])[0]
-            return result
+            if kind == MsgKind.DATA:
+                return await self._read_data_response(length)
 
-        return QueryResult()
+            if kind == MsgKind.COMPLETE:
+                data = await self._recv_exact(length)
+                result = QueryResult()
+                result.affected_rows = struct.unpack(">I", data[:4])[0]
+                return result
 
-    def query_params(self, sql: str, params: Sequence[WireValue]) -> QueryResult:
+            return QueryResult()
+
+        return await self._enqueue(_do_query)
+
+    async def query_params(self, sql: str, params: Sequence[WireValue]) -> QueryResult:
         """Execute a parameterized BaraQL query."""
-        payload = self._encode_string(sql)
-        payload += bytes([ResultFormat.BINARY])
-        payload += struct.pack(">I", len(params))
-        for p in params:
-            payload += p.serialize()
+        if not self._connected:
+            raise Exception("Not connected")
 
-        msg = self._build_message(MsgKind.QUERY_PARAMS, payload)
-        self._sock.send(msg)
+        async def _do_query_params():
+            payload = self._encode_string(sql)
+            payload += bytes([ResultFormat.BINARY])
+            payload += struct.pack(">I", len(params))
+            for p in params:
+                payload += p.serialize()
 
-        kind, length, _ = self._read_response_header()
+            msg = self._build_message(MsgKind.QUERY_PARAMS, payload)
+            self._writer.write(msg)
+            await self._writer.drain()
 
-        if kind == MsgKind.ERROR:
-            raise self._read_error(length)
+            kind, length, _ = await self._read_header()
 
-        if kind == MsgKind.DATA:
-            return self._read_data_response(length)
+            if kind == MsgKind.ERROR:
+                raise await self._read_error(length)
 
-        if kind == MsgKind.COMPLETE:
-            data = self._recv_exact(length)
-            result = QueryResult()
-            result.affected_rows = struct.unpack(">I", data[:4])[0]
-            return result
+            if kind == MsgKind.DATA:
+                return await self._read_data_response(length)
 
-        return QueryResult()
+            if kind == MsgKind.COMPLETE:
+                data = await self._recv_exact(length)
+                result = QueryResult()
+                result.affected_rows = struct.unpack(">I", data[:4])[0]
+                return result
 
-    def execute(self, sql: str) -> int:
-        result = self.query(sql)
+            return QueryResult()
+
+        return await self._enqueue(_do_query_params)
+
+    async def execute(self, sql: str) -> int:
+        """Execute a query and return affected rows count."""
+        result = await self.query(sql)
         return result.affected_rows
 
     def _build_message(self, kind: int, payload: bytes) -> bytes:
@@ -477,12 +543,12 @@ class Client:
             return self._read_string(data, pos)
         return None
 
-    def __enter__(self):
-        self.connect()
+    async def __aenter__(self):
+        await self.connect()
         return self
 
-    def __exit__(self, *args):
-        self.close()
+    async def __aexit__(self, *args):
+        await self.close()
 
 
 class QueryBuilder:
@@ -559,5 +625,5 @@ class QueryBuilder:
             sql += " OFFSET " + str(self._offset)
         return sql
 
-    def exec(self) -> QueryResult:
-        return self.client.query(self.build())
+    async def exec(self) -> QueryResult:
+        return await self.client.query(self.build())

@@ -144,7 +144,7 @@ strip build/baradadb
 
 ```bash
 ./build/baradadb --version
-# انتظار: BaraDB v0.1.0 — Multimodal Database Engine
+# انتظار: BaraDB v1.1.0 — Multimodal Database Engine
 ```
 
 ## اجرای تست‌ها
@@ -259,7 +259,7 @@ db.close()
 ./build/baradadb
 
 # خروجی مورد انتظار:
-# BaraDB v0.1.0 — Multimodal Database Engine
+# BaraDB v1.1.0 — Multimodal Database Engine
 # BaraDB TCP listening on 127.0.0.1:9472
 
 # تست با HTTP API

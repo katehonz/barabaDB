@@ -490,3 +490,108 @@ LIMIT 10;
 -- 并行执行
 SELECT /*+ PARALLEL(4) */ * FROM large_table;
 ```
+
+## 窗口函数
+
+```sql
+-- 排名函数
+SELECT
+  name,
+  department,
+  ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS rn,
+  RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS r,
+  DENSE_RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS dr
+FROM employees;
+
+-- 值函数
+SELECT
+  name,
+  salary,
+  LAG(salary, 1, 0) OVER (ORDER BY salary) AS prev_salary,
+  LEAD(salary, 1, 0) OVER (ORDER BY salary) AS next_salary,
+  FIRST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS cheapest,
+  LAST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS most_expensive
+FROM employees;
+
+-- 分布函数
+SELECT name, NTILE(4) OVER (ORDER BY salary) AS quartile FROM employees;
+```
+
+### 帧规格
+
+```sql
+-- ROWS 帧
+SUM(salary) OVER (
+  PARTITION BY department
+  ORDER BY hire_date
+  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW
+)
+
+-- RANGE 帧
+SUM(salary) OVER (
+  PARTITION BY department
+  ORDER BY hire_date
+  RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+)
+```
+
+## 多租户 ERP
+
+BaraDB 支持在单个数据库实例中运行多个公司（租户），使用**行级安全性（RLS）**结合**会话变量**。
+
+### 会话变量
+
+```sql
+SET app.tenant_id = 'company-123';
+SELECT current_setting('app.tenant_id') AS tenant;
+```
+
+### 当前用户 / 角色
+
+```sql
+SELECT current_user AS me, current_role AS my_role;
+```
+
+### RLS 租户隔离
+
+```sql
+-- 在表上启用 RLS
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+
+-- 创建按租户过滤的策略
+CREATE POLICY tenant_isolation ON invoices
+  FOR SELECT USING (tenant_id = current_setting('app.tenant_id'));
+
+-- 每个会话只能看到自己的数据
+SET app.tenant_id = 'company-a';
+SELECT * FROM invoices;  -- 仅限 company-a 的行
+```
+
+### 为什么选择多租户？
+
+- **一个实例，多个租户** — 无需运行 100 个独立的数据库
+- **JSONB 文档** — 模式灵活的存储，易于为每个租户添加字段
+- **RLS 保证隔离** — 数据库强制执行租户边界，而不仅仅是应用程序
+
+## 支持的关键字
+
+| 类别 | 关键字 |
+|----------|----------|
+| DQL | SELECT, FROM, WHERE, ORDER BY, GROUP BY, HAVING, LIMIT, OFFSET, DISTINCT |
+| DML | INSERT, UPDATE, DELETE, SET, VALUES |
+| DDL | CREATE TYPE, DROP TYPE, CREATE INDEX, DROP INDEX, ALTER TYPE |
+| Join | INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL JOIN, CROSS JOIN, ON |
+| Set | UNION, UNION ALL, INTERSECT, EXCEPT |
+| CTEs | WITH, RECURSIVE, AS |
+| Case | CASE, WHEN, THEN, ELSE, END |
+| Transaction | BEGIN, COMMIT, ROLLBACK, SAVEPOINT |
+| Graph | MATCH, RETURN, WHERE, shortestPath, type |
+| FTS | MATCH, AGAINST, relevance, IN BOOLEAN MODE, WITH FUZZINESS |
+| Vector | cosine_distance, euclidean_distance, inner_product, l1_distance, l2_distance, <-> |
+| JSON | ->, ->> |
+| FTS | @@ (BM25 match) |
+| Recovery | RECOVER TO TIMESTAMP |
+| Functions | count, sum, avg, min, max, stddev, variance, abs, sqrt, lower, upper, len, trim, substr, now, last_insert_id, current_setting |
+| Session | SET, current_setting, current_user, current_role |
+| Window | OVER, PARTITION BY, ROWS, RANGE, UNBOUNDED PRECEDING, CURRENT ROW, FOLLOWING |
+| Window Functions | ROW_NUMBER, RANK, DENSE_RANK, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTILE |

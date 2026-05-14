@@ -490,3 +490,108 @@ LIMIT 10;
 -- اجرای موازی
 SELECT /*+ PARALLEL(4) */ * FROM large_table;
 ```
+
+## توابع پنجره‌ای
+
+```sql
+-- توابع رتبه‌بندی
+SELECT
+  name,
+  department,
+  ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS rn,
+  RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS r,
+  DENSE_RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS dr
+FROM employees;
+
+-- توابع مقدار
+SELECT
+  name,
+  salary,
+  LAG(salary, 1, 0) OVER (ORDER BY salary) AS prev_salary,
+  LEAD(salary, 1, 0) OVER (ORDER BY salary) AS next_salary,
+  FIRST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS cheapest,
+  LAST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS most_expensive
+FROM employees;
+
+-- توابع توزیع
+SELECT name, NTILE(4) OVER (ORDER BY salary) AS quartile FROM employees;
+```
+
+### مشخصات فریم
+
+```sql
+-- فریم ROWS
+SUM(salary) OVER (
+  PARTITION BY department
+  ORDER BY hire_date
+  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW
+)
+
+-- فریم RANGE
+SUM(salary) OVER (
+  PARTITION BY department
+  ORDER BY hire_date
+  RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+)
+```
+
+## ERP چند مستأجری
+
+BaraDB از اجرای چندین شرکت (tenant) در یک نمونه پایگاه داده پشتیبانی می‌کند، با استفاده از **امنیت سطح سطر (RLS)** همراه با **متغیرهای جلسه**.
+
+### متغیرهای جلسه
+
+```sql
+SET app.tenant_id = 'company-123';
+SELECT current_setting('app.tenant_id') AS tenant;
+```
+
+### کاربر / نقش فعلی
+
+```sql
+SELECT current_user AS me, current_role AS my_role;
+```
+
+### جداسازی مستأجر با RLS
+
+```sql
+-- فعال کردن RLS روی جدول
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+
+-- ایجاد سیاست فیلترینگ بر اساس مستأجر
+CREATE POLICY tenant_isolation ON invoices
+  FOR SELECT USING (tenant_id = current_setting('app.tenant_id'));
+
+-- هر جلسه فقط داده‌های خود را می‌بیند
+SET app.tenant_id = 'company-a';
+SELECT * FROM invoices;  -- فقط ردیف‌های company-a
+```
+
+### چرا چند مستأجری؟
+
+- **یک نمونه، مستأجران زیاد** — نیازی به اجرای ۱۰۰ پایگاه داده جداگانه نیست
+- **اسناد JSONB** — ذخیره‌سازی با طرح انعطاف‌پذیر، افزودن آسان فیلدها برای هر مستأجر
+- **RLS تضمین می‌کند** — پایگاه داده مرزهای مستأجر را اعمال می‌کند، نه فقط برنامه
+
+## کلمات کلیدی پشتیبانی‌شده
+
+| دسته | کلمات کلیدی |
+|----------|----------|
+| DQL | SELECT, FROM, WHERE, ORDER BY, GROUP BY, HAVING, LIMIT, OFFSET, DISTINCT |
+| DML | INSERT, UPDATE, DELETE, SET, VALUES |
+| DDL | CREATE TYPE, DROP TYPE, CREATE INDEX, DROP INDEX, ALTER TYPE |
+| Join | INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL JOIN, CROSS JOIN, ON |
+| Set | UNION, UNION ALL, INTERSECT, EXCEPT |
+| CTEs | WITH, RECURSIVE, AS |
+| Case | CASE, WHEN, THEN, ELSE, END |
+| Transaction | BEGIN, COMMIT, ROLLBACK, SAVEPOINT |
+| Graph | MATCH, RETURN, WHERE, shortestPath, type |
+| FTS | MATCH, AGAINST, relevance, IN BOOLEAN MODE, WITH FUZZINESS |
+| Vector | cosine_distance, euclidean_distance, inner_product, l1_distance, l2_distance, <-> |
+| JSON | ->, ->> |
+| FTS | @@ (BM25 match) |
+| Recovery | RECOVER TO TIMESTAMP |
+| Functions | count, sum, avg, min, max, stddev, variance, abs, sqrt, lower, upper, len, trim, substr, now, last_insert_id, current_setting |
+| Session | SET, current_setting, current_user, current_role |
+| Window | OVER, PARTITION BY, ROWS, RANGE, UNBOUNDED PRECEDING, CURRENT ROW, FOLLOWING |
+| Window Functions | ROW_NUMBER, RANK, DENSE_RANK, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTILE |

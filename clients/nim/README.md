@@ -15,7 +15,7 @@ Official Nim client for **BaraDB** — a multimodal database engine.
 Add to your `.nimble` file:
 
 ```nim
-requires "baradb >= 1.0.0"
+requires "baradb >= 1.1.0"
 ```
 
 Or clone locally:

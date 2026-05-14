@@ -1,36 +1,42 @@
-//! BaraDB Rust Client
+//! BaraDB Async Rust Client
 //!
-//! Binary protocol client for BaraDB database.
-//! Zero external dependencies — uses only `std`.
+//! Async binary protocol client for BaraDB database.
+//! Uses Tokio for async I/O operations.
 //!
 //! # Example
 //! ```no_run
 //! use baradb::{Client, WireValue};
 //!
-//! let mut client = Client::connect("localhost", 9472).unwrap();
-//! let result = client.query("SELECT name FROM users WHERE age > 18").unwrap();
-//! for row in result.rows() {
-//!     if let Some(WireValue::String(name)) = row.get("name") {
-//!         println!("{}", name);
+//! #[tokio::main]
+//! async fn main() {
+//!     let mut client = Client::connect("localhost", 9472).await.unwrap();
+//!     let result = client.query("SELECT name FROM users WHERE age > 18").await.unwrap();
+//!     for row in result.rows() {
+//!         if let Some(WireValue::String(name)) = row.get("name") {
+//!             println!("{}", name);
+//!         }
 //!     }
+//!     client.close().await;
 //! }
-//! client.close();
 //! ```
 //!
 //! # Parameterized Queries
 //! ```no_run
 //! use baradb::{Client, WireValue};
 //!
-//! let mut client = Client::connect("localhost", 9472).unwrap();
-//! let result = client.query_params(
-//!     "SELECT * FROM users WHERE age > $1",
-//!     &[WireValue::Int64(18)],
-//! ).unwrap();
+//! #[tokio::main]
+//! async fn main() {
+//!     let mut client = Client::connect("localhost", 9472).await.unwrap();
+//!     let result = client.query_params(
+//!         "SELECT * FROM users WHERE age > $1",
+//!         &[WireValue::Int64(18)],
+//!     ).await.unwrap();
+//! }
 //! ```
 
 use std::collections::HashMap;
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 // Client message kinds
 const MK_CLIENT_HANDSHAKE: u32 = 0x01;
@@ -221,43 +227,41 @@ impl QueryResult {
     }
 }
 
-/// BaraDB client
+/// BaraDB async client
 pub struct Client {
-    config: Config,
     stream: TcpStream,
     connected: bool,
     request_id: u32,
+    read_buf: Vec<u8>,
 }
 
 impl Client {
-    pub fn connect(host: &str, port: u16) -> Result<Self, Box<dyn std::error::Error>> {
-        let config = Config {
-            host: host.to_string(),
-            port,
-            ..Default::default()
-        };
-        Self::connect_with_config(config)
-    }
-
-    pub fn connect_with_config(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
-        let addr = format!("{}:{}", config.host, config.port);
-        let stream = TcpStream::connect(&addr)?;
-        stream.set_nodelay(true)?;
+    /// Connect to a BaraDB server
+    pub async fn connect(host: &str, port: u16) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let addr = format!("{}:{}", host, port);
+        let stream = TcpStream::connect(&addr).await?;
         Ok(Client {
-            config,
             stream,
             connected: true,
             request_id: 0,
+            read_buf: Vec::new(),
         })
     }
 
-    pub fn close(&mut self) {
+    /// Connect with custom configuration
+    pub async fn connect_with_config(config: Config) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::connect(&config.host, config.port).await
+    }
+
+    /// Close the connection
+    pub async fn close(&mut self) {
         if self.connected {
-            let _ = self.send_close();
+            let _ = self.send_close().await;
         }
         self.connected = false;
     }
 
+    /// Check if connected
     pub fn is_connected(&self) -> bool {
         self.connected
     }
@@ -267,27 +271,39 @@ impl Client {
         self.request_id
     }
 
-    fn send_close(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    async fn send_close(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let msg = build_message(MK_CLOSE, self.next_id(), &[]);
-        self.stream.write_all(&msg)?;
+        self.stream.write_all(&msg).await?;
         Ok(())
     }
 
-    fn read_header(&mut self) -> Result<(u32, u32, u32), Box<dyn std::error::Error>> {
-        let mut header = [0u8; 12];
-        self.stream.read_exact(&mut header)?;
+    async fn read_exact(&mut self, mut n: usize) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
+        let mut buf = vec![0u8; n];
+        let mut pos = 0;
+        while pos < n {
+            let read = self.stream.read(&mut buf[pos..]).await?;
+            if read == 0 {
+                return Err("Connection closed".into());
+            }
+            pos += read;
+        }
+        Ok(buf)
+    }
+
+    async fn read_header(&mut self) -> Result<(u32, u32, u32), Box<dyn std::error::Error + Send + Sync>> {
+        let header = self.read_exact(12).await?;
         let kind = u32::from_be_bytes([header[0], header[1], header[2], header[3]]);
         let length = u32::from_be_bytes([header[4], header[5], header[6], header[7]]);
         let req_id = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
         Ok((kind, length, req_id))
     }
 
-    fn read_payload(&mut self, length: u32) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-        let mut payload = vec![0u8; length as usize];
+    async fn read_payload(&mut self, length: u32) -> Result<Vec<u8>, Box<dyn std::error::Error + Send + Sync>> {
         if length > 0 {
-            self.stream.read_exact(&mut payload)?;
+            self.read_exact(length as usize).await
+        } else {
+            Ok(vec![])
         }
-        Ok(payload)
     }
 
     fn read_error_message(payload: &[u8]) -> String {
@@ -302,26 +318,26 @@ impl Client {
         "Query error".to_string()
     }
 
-    fn read_data_response(&mut self, payload: &[u8]) -> Result<QueryResult, Box<dyn std::error::Error>> {
+    async fn read_data_response(&mut self, payload: &[u8]) -> Result<QueryResult, Box<dyn std::error::Error + Send + Sync>> {
         let mut pos = 0usize;
-        let col_count = read_u32(payload, &mut pos) as usize;
+        let col_count = read_u32(payload, &mut pos);
 
-        let mut columns = Vec::with_capacity(col_count);
+        let mut columns = Vec::with_capacity(col_count as usize);
         for _ in 0..col_count {
             columns.push(read_string(payload, &mut pos));
         }
 
-        let mut col_types = Vec::with_capacity(col_count);
+        let mut col_types = Vec::with_capacity(col_count as usize);
         for _ in 0..col_count {
             col_types.push(payload[pos]);
             pos += 1;
         }
 
-        let row_count = read_u32(payload, &mut pos) as usize;
-        let mut rows = Vec::with_capacity(row_count);
+        let row_count = read_u32(payload, &mut pos);
+        let mut rows = Vec::with_capacity(row_count as usize);
         for _ in 0..row_count {
             let mut row = HashMap::new();
-            for c in 0..col_count {
+            for c in 0..col_count as usize {
                 let val = read_wire_value(payload, &mut pos);
                 row.insert(columns[c].clone(), val);
             }
@@ -329,9 +345,9 @@ impl Client {
         }
 
         let mut affected = 0usize;
-        let (comp_kind, comp_len, _) = self.read_header()?;
+        let (comp_kind, comp_len, _) = self.read_header().await?;
         if comp_kind == MK_COMPLETE {
-            let comp_payload = self.read_payload(comp_len)?;
+            let comp_payload = self.read_payload(comp_len).await?;
             if comp_payload.len() >= 4 {
                 affected = u32::from_be_bytes([comp_payload[0], comp_payload[1], comp_payload[2], comp_payload[3]]) as usize;
             }
@@ -340,44 +356,47 @@ impl Client {
         Ok(QueryResult { columns, column_types: col_types, rows, affected_rows: affected })
     }
 
-    pub fn auth(&mut self, token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    /// Authenticate with JWT token
+    pub async fn auth(&mut self, token: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         if !self.connected {
             return Err("Not connected".into());
         }
         let payload = encode_string(token);
         let msg = build_message(MK_AUTH, self.next_id(), &payload);
-        self.stream.write_all(&msg)?;
+        self.stream.write_all(&msg).await?;
 
-        let (kind, length, _) = self.read_header()?;
+        let (kind, length, _) = self.read_header().await?;
         match kind {
             MK_AUTH_OK => Ok(()),
             MK_ERROR => {
-                let p = self.read_payload(length)?;
+                let p = self.read_payload(length).await?;
                 Err(Self::read_error_message(&p).into())
             }
             _ => Err(format!("Unexpected auth response: 0x{:02x}", kind).into()),
         }
     }
 
-    pub fn ping(&mut self) -> Result<bool, Box<dyn std::error::Error>> {
+    /// Ping the server
+    pub async fn ping(&mut self) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
         if !self.connected {
             return Err("Not connected".into());
         }
         let msg = build_message(MK_PING, self.next_id(), &[]);
-        self.stream.write_all(&msg)?;
+        self.stream.write_all(&msg).await?;
 
-        let (kind, length, _) = self.read_header()?;
+        let (kind, length, _) = self.read_header().await?;
         match kind {
             MK_PONG => Ok(true),
             MK_ERROR => {
-                let p = self.read_payload(length)?;
+                let p = self.read_payload(length).await?;
                 Err(Self::read_error_message(&p).into())
             }
             _ => Ok(false),
         }
     }
 
-    pub fn query(&mut self, sql: &str) -> Result<QueryResult, Box<dyn std::error::Error>> {
+    /// Execute a query
+    pub async fn query(&mut self, sql: &str) -> Result<QueryResult, Box<dyn std::error::Error + Send + Sync>> {
         if !self.connected {
             return Err("Not connected".into());
         }
@@ -386,14 +405,14 @@ impl Client {
         payload.push(0x00); // ResultFormat::BINARY
 
         let msg = build_message(MK_QUERY, self.next_id(), &payload);
-        self.stream.write_all(&msg)?;
+        self.stream.write_all(&msg).await?;
 
-        let (kind, length, _) = self.read_header()?;
-        let resp_payload = self.read_payload(length)?;
+        let (kind, length, _) = self.read_header().await?;
+        let resp_payload = self.read_payload(length).await?;
 
         match kind {
             MK_READY => Ok(QueryResult { columns: vec![], column_types: vec![], rows: vec![], affected_rows: 0 }),
-            MK_DATA => self.read_data_response(&resp_payload),
+            MK_DATA => self.read_data_response(&resp_payload).await,
             MK_COMPLETE => {
                 let affected = if resp_payload.len() >= 4 {
                     u32::from_be_bytes([resp_payload[0], resp_payload[1], resp_payload[2], resp_payload[3]]) as usize
@@ -405,7 +424,8 @@ impl Client {
         }
     }
 
-    pub fn query_params(&mut self, sql: &str, params: &[WireValue]) -> Result<QueryResult, Box<dyn std::error::Error>> {
+    /// Execute a parameterized query
+    pub async fn query_params(&mut self, sql: &str, params: &[WireValue]) -> Result<QueryResult, Box<dyn std::error::Error + Send + Sync>> {
         if !self.connected {
             return Err("Not connected".into());
         }
@@ -418,14 +438,14 @@ impl Client {
         }
 
         let msg = build_message(MK_QUERY_PARAMS, self.next_id(), &payload);
-        self.stream.write_all(&msg)?;
+        self.stream.write_all(&msg).await?;
 
-        let (kind, length, _) = self.read_header()?;
-        let resp_payload = self.read_payload(length)?;
+        let (kind, length, _) = self.read_header().await?;
+        let resp_payload = self.read_payload(length).await?;
 
         match kind {
             MK_READY => Ok(QueryResult { columns: vec![], column_types: vec![], rows: vec![], affected_rows: 0 }),
-            MK_DATA => self.read_data_response(&resp_payload),
+            MK_DATA => self.read_data_response(&resp_payload).await,
             MK_COMPLETE => {
                 let affected = if resp_payload.len() >= 4 {
                     u32::from_be_bytes([resp_payload[0], resp_payload[1], resp_payload[2], resp_payload[3]]) as usize
@@ -437,12 +457,14 @@ impl Client {
         }
     }
 
-    pub fn execute(&mut self, sql: &str) -> Result<usize, Box<dyn std::error::Error>> {
-        let result = self.query(sql)?;
+    /// Execute and return affected rows
+    pub async fn execute(&mut self, sql: &str) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        let result = self.query(sql).await?;
         Ok(result.affected_rows())
     }
 }
 
+/// Query builder for fluent SQL construction
 pub struct QueryBuilder<'a> {
     client: &'a mut Client,
     select_cols: Vec<String>,
@@ -457,6 +479,7 @@ pub struct QueryBuilder<'a> {
 }
 
 impl<'a> QueryBuilder<'a> {
+    /// Create a new query builder
     pub fn new(client: &'a mut Client) -> Self {
         QueryBuilder {
             client,
@@ -472,56 +495,67 @@ impl<'a> QueryBuilder<'a> {
         }
     }
 
+    /// Add columns to SELECT
     pub fn select(mut self, cols: &[&str]) -> Self {
         self.select_cols.extend(cols.iter().map(|s| s.to_string()));
         self
     }
 
+    /// Set the FROM table
     pub fn from(mut self, table: &str) -> Self {
         self.from_table = table.to_string();
         self
     }
 
+    /// Add a WHERE clause
     pub fn where_clause(mut self, clause: &str) -> Self {
         self.where_clauses.push(clause.to_string());
         self
     }
 
+    /// Add a JOIN clause
     pub fn join(mut self, table: &str, on: &str) -> Self {
         self.joins.push(format!("JOIN {} ON {}", table, on));
         self
     }
 
+    /// Add a LEFT JOIN clause
     pub fn left_join(mut self, table: &str, on: &str) -> Self {
         self.joins.push(format!("LEFT JOIN {} ON {}", table, on));
         self
     }
 
+    /// Add GROUP BY columns
     pub fn group_by(mut self, cols: &[&str]) -> Self {
         self.group_by.extend(cols.iter().map(|s| s.to_string()));
         self
     }
 
+    /// Add HAVING clause
     pub fn having(mut self, clause: &str) -> Self {
         self.having = clause.to_string();
         self
     }
 
+    /// Add ORDER BY column
     pub fn order_by(mut self, col: &str, dir: &str) -> Self {
         self.order_by.push(format!("{} {}", col, dir));
         self
     }
 
+    /// Set LIMIT
     pub fn limit(mut self, n: usize) -> Self {
         self.limit = n;
         self
     }
 
+    /// Set OFFSET
     pub fn offset(mut self, n: usize) -> Self {
         self.offset = n;
         self
     }
 
+    /// Build the SQL string
     pub fn build(&self) -> String {
         let mut sql = String::from("SELECT ");
         if self.select_cols.is_empty() {
@@ -555,9 +589,10 @@ impl<'a> QueryBuilder<'a> {
         sql
     }
 
-    pub fn exec(self) -> Result<QueryResult, Box<dyn std::error::Error>> {
+    /// Execute the query
+    pub async fn exec(self) -> Result<QueryResult, Box<dyn std::error::Error + Send + Sync>> {
         let sql = self.build();
-        self.client.query(&sql)
+        self.client.query(&sql).await
     }
 }
 

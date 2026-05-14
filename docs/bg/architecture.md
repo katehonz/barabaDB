@@ -2,150 +2,125 @@
 
 ## Преглед
 
-BaraDB е **мултимодална база данни** написана на Nim, която комбинира документно (KV), графично, векторно, колонно и пълнотекстово търсене в един двигател с обединен език за заявки наречен **BaraQL**.
+BaraDB е **мултимодален database engine**, написан на Nim, който комбинира документно (KV), графово, векторно, колонково и пълнотекстово съхранение в един engine с унифициран език за заявки наречен **BaraQL**.
 
-## Слоеста Архитектура
+## Слоеве на Архитектурата
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│ 1. СЛОЙ ЗА КЛИЕНТИ                                       │
-│    Binary Protocol │ HTTP/REST │ WebSocket │ Embedded    │
+│ 1. КЛИЕНТСКИ СЛОЙ                                        │
+│    Бинарен Протокол │ HTTP/REST │ WebSocket │ Embedded   │
 ├─────────────────────────────────────────────────────────┤
-│ 2. ЗАЯВКИ СЛОЙ (BaraQL)                                  │
+│ 2. QUERY СЛОЙ (BaraQL)                                   │
 │    Lexer → Parser → AST → IR → Optimizer → Codegen      │
 ├─────────────────────────────────────────────────────────┤
-│ 3. ИЗПЪЛНИТЕЛЕН ДВИГАТЕЛ                                  │
-│    Document │ Graph │ Vector │ Columnar │ FTS            │
+│ 3. ИЗПЪЛНИТЕЛЕН ENGINE                                   │
+│    Документен │ Графов │ Векторен │ Колонков │ FTS       │
 ├─────────────────────────────────────────────────────────┤
-│ 4. СЪХРАНЕНИЕ                                             │
+│ 4. СЪХРАНЕНИЕ                                            │
 │    LSM-Tree │ B-Tree │ WAL │ Bloom │ Compaction │ Cache  │
 ├─────────────────────────────────────────────────────────┤
-│ 5. РАЗПРЕДЕЛЕНО                                           │
-│    Raft Consensus │ Sharding │ Replication │ Gossip      │
+│ 5. РАЗПРЕДЕЛЕНИ                                          │
+│    Raft Консенсус │ Шардиране │ Репликация │ Gossip      │
 └─────────────────────────────────────────────────────────┘
 ```
 
 ## Слой 1: Клиентски Слой
 
-Множество протоколи за комуникация:
+Множество комуникационни протоколи:
 
-- **Binary Protocol** (`protocol/wire.nim`): Ефективен big-endian бинарен протокол с 16 типа съобщения
-- **HTTP/REST** (`core/httpserver.nim`): JSON REST API с мулти-трединг
-- **WebSocket** (`core/websocket.nim`): Пълен дуплекс стрийминг
+- **Бинарен Протокол** (`protocol/wire.nim`): Ефективен big-endian бинарен протокол с 16 типа съобщения
+- **HTTP/REST** (`core/httpserver.nim`): JSON-базиран REST API с multi-threading
+- **WebSocket** (`core/websocket.nim`): Full-duplex стрийминг
 - **Embedded** (`storage/lsm.nim`): Директен in-process достъп
 
-### Управление на Връзките
+### Управление на Връзки
 
-- **Connection Pool** (`protocol/pool.nim`): Мин/макс лимити на връзки
-- **Rate Limiting** (`protocol/ratelimit.nim`): Token-bucket лимитиране
-- **Authentication** (`protocol/auth.nim`): JWT с HMAC-SHA256
-- **TLS/SSL** (`protocol/ssl.nim`): TLS 1.3 с авто-генерирани сертификати
+- **Connection Pool** (`protocol/pool.nim`): Min/max лимити на връзки с idle timeout
+- **Rate Limiting** (`protocol/ratelimit.nim`): Token-bucket глобални и per-client лимити
+- **Автентикация** (`protocol/auth.nim`): JWT с HMAC-SHA256 и достъп на база роли
+- **TLS/SSL** (`protocol/ssl.nim`): TLS 1.3 с автоматично генерирани сертификати
 
-## Слой 2: Заявки (BaraQL)
+## Слой 2: Query Слой (BaraQL)
 
-Pipeline-а на BaraQL:
+BaraQL конвейрът:
 
 1. **Lexer** (`query/lexer.nim`): Токенизира входа в 80+ типа токени
-2. **Parser** (`query/parser.nim`): Рекурсивен descent парсър произвеждащ AST
+2. **Parser** (`query/parser.nim`): Recursive descent parser генериращ AST
 3. **AST** (`query/ast.nim`): 300+ реда покриващи 25+ вида възли
-4. **IR** (`query/ir.nim`): Междинно представяне за планове за изпълнение
-5. **Optimizer** (`query/adaptive.nim`): Адаптивен крос-модален оптимизатор
-6. **Codegen** (`query/codegen.nim`): Транслира IR към операции върху съхранение
+4. **IR** (`query/ir.nim`): Intermediate representation за планове за изпълнение
+5. **Optimizer** (`query/adaptive.nim`): Adaptive cross-modal оптимизация на заявки
+6. **Codegen** (`query/codegen.nim`): Превежда IR към storage операции
 7. **Executor** (`query/executor.nim`): Изпълнява планове с паралелизация
 
-### Крос-Модално Планиране
+## Слой 3: Изпълнителен Engine
 
-Оптимизаторът определя реда на изпълнение между двигателите:
+### Документен/KV Engine
+- **LSM-Tree** (`storage/lsm.nim`): Write-оптимизирано съхранение с MemTable, WAL, SSTables
+- **B-Tree Индекс** (`storage/btree.nim`): Подреден индекс за range сканиране с COW
 
-```
-1. Оценка на селективност за всеки предикат
-2. Най-селективният предикат се изпълнява първи
-3. Bloom филтри за KV търсения
-4. Паралелизация на независими клонове
-```
+### Vector Engine (`vector/`)
+- **HNSW Индекс** (`vector/engine.nim`): Hierarchical Navigable Small World граф
+- **IVF-PQ Индекс** (`vector/engine.nim`): Inverted File Index с Product Quantization
+- **SIMD Операции** (`vector/simd.nim`): AVX2-оптимизирани изчисления на разстояние
+- **Квантуване** (`vector/quant.nim`): Скаларно, продуктово и бинарно квантуване
 
-## Слой 3: Изпълнителен Двигател
-
-### Document/KV Двигател
-- **LSM-Tree** (`storage/lsm.nim`): Оптимизиран за запис с MemTable, WAL, SSTables
-- **B-Tree Index** (`storage/btree.nim`): Подреден индекс за диапазони с COW
-
-### Vector Engine
-- **HNSW** (`vector/engine.nim`): Иерархичен навигируем малък свят
-- **IVF-PQ** (`vector/engine.nim`): Инвертиран файл с продуктово квантуване
-- **SIMD** (`vector/simd.nim`): AVX2-оптимизирани изчисления на разстояния
-- **Quantization** (`vector/quant.nim`): Скаларно, продуктово и бинарно квантуване
-
-### Graph Engine
-- **Списък със съседи** (`graph/engine.nim`): Насочен граф с тегла
+### Graph Engine (`graph/`)
+- **Adjacency List** (`graph/engine.nim`): Насочен граф с тегла на ребрата
 - **Алгоритми** (`graph/engine.nim`): BFS, DFS, Dijkstra, PageRank
 - **Community Detection** (`graph/community.nim`): Louvain алгоритъм
-- **Pattern Matching** (`graph/community.nim`): Subgraph isomorphism
-- **Cypher Parser** (`graph/cypher.nim`): Cypher-подобни заявки
+- **Pattern Matching** (`graph/community.nim`): Subgraph изоморфизъм
+- **Cypher Parser** (`graph/cypher.nim`): Cypher-подобни графови заявки
 
-### FTS
-- **Инвертиран индекс** (`fts/engine.nim`): Термин-документ индекс
-- **Ранжиране** (`fts/engine.nim`): BM25 и TF-IDF
-- **Fuzzy Search** (`fts/engine.nim`): Levenshtein разстояние
-- **Многоезичен** (`fts/multilang.nim`): Токенизация за EN, BG, DE, FR, RU
+### Full-Text Search (`fts/`)
+- **Inverted Index** (`fts/engine.nim`): Термин-документен индекс
+- **Ранжиране** (`fts/engine.nim`): BM25 и TF-IDF оценяване
+- **Fuzzy Търсене** (`fts/engine.nim`): Съвпадение с Levenshtein разстояние
+- **Многоезичност** (`fts/multilang.nim`): Токенизатори за EN, BG, DE, FR, RU
 
-### Columnar Engine
-- **Колонно съхранение** (`core/columnar.nim`): Аналитични заявки
-- **Компресия**: RLE и dictionary encoding
-- **SIMD агрегати**: Ускорени агрегатни функции
+### Columnar Engine (`core/columnar.nim`)
+- Колонково съхранение за аналитични заявки
+- RLE и dictionary encoding
+- SIMD-ускорени агрегати
 
 ## Слой 4: Съхранение
 
 - **LSM-Tree** (`storage/lsm.nim`): MemTable, WAL, SSTable, Bloom Filter, Compaction
-- **Page Cache** (`storage/compaction.nim`): LRU кеш
-- **Memory-mapped I/O** (`storage/mmap.nim`): mmap-базиран достъп
-- **Recovery** (`storage/recovery.nim`): WAL replay и възстановяване
+- **Page Cache** (`storage/compaction.nim`): LRU кеш с проследяване на hit rate
+- **Memory-mapped I/O** (`storage/mmap.nim`): mmap-базиран достъп до файлове
+- **Recovery** (`storage/recovery.nim`): WAL replay и crash recovery
 
-### Път на Запис
+## Слой 5: Разпределение
 
-```
-Client → Protocol → Auth → Parser → AST → IR → Codegen
-  → StorageOp → MVCC Txn → WAL Write → MemTable → Commit
-```
+- **Raft Консенсус** (`core/raft.nim`): Leader election, log репликация
+- **Шардиране** (`core/sharding.nim`): Hash, range и consistent hashing
+- **Репликация** (`core/replication.nim`): Sync, async, semi-sync режими
+- **Gossip Протокол** (`core/gossip.nim`): SWIM-подобно управление на членство
+- **Разпределени Транзакции** (`core/disttxn.nim`): Two-phase commit
 
-### Път на Четене
-
-```
-Client → Protocol → Auth → Parser → AST → IR → Codegen
-  → StorageOp → MVCC Snapshot → MemTable → SSTable → Result
-```
-
-## Слой 5: Разпределено
-
-- **Raft Consensus** (`core/raft.nim`): Лидерско избиране, репликация на логове
-- **Sharding** (`core/sharding.nim`): Hash, range и консистентно хеширане
-- **Replication** (`core/replication.nim`): Sync, async, semi-sync режими
-- **Gossip Protocol** (`core/gossip.nim`): SWIM-подобно управление на членство
-- **Distributed Transactions** (`core/disttxn.nim`): Two-phase commit
-
-## Ключови Дизайн Решения
+## Ключови Дизайнерски Решения
 
 1. **Чист Nim**: Без Cython, Python или Rust зависимости
-2. **Обединено Съхранение**: Един двигател за KV, граф, вектор, FTS и колонно
-3. **Вграден Режим**: Работи като библиотека или сървър
-4. **Бинарен Протокол**: Ефективен wire протокол
+2. **Унифицирано Съхранение**: Един engine обработва KV, graph, vector, FTS и columnar
+3. **Embedded Режим**: Може да работи като библиотека или сървър
+4. **Бинарен Протокол**: Персонализиран ефективен wire протокол
 5. **MVCC**: Multi-version concurrency control
-6. **Schema-First**: Строго типизирана система с наследяване
-7. **Крос-Модал**: Един език за заявки през всички модели данни
-8. **Формално Верифициран**: Разпределените алгоритми са специфицирани в TLA+ и проверени с TLC
+6. **Schema-First**: Силно типизирана система от схеми с наследяване
+7. **Cross-Modal**: Един език за заявки за всички модели на данни
+8. **Формално Верифициран**: Основните разпределени алгоритми са специфицирани в TLA+ и проверени с TLC
 
 ## Статистика на Модулите
 
 | Категория | Модули | Редове Код | Предназначение |
 |-----------|--------|------------|----------------|
-| Core | 16 | ~4,200 | Сървър, протоколи, транзакции, разпределено |
+| Core | 16 | ~4,200 | Сървър, протоколи, транзакции, разпределени |
 | Storage | 7 | ~3,100 | LSM, B-Tree, WAL, bloom, compaction, mmap |
-| Query | 7 | ~2,800 | Lexer, parser, AST, IR, оптимизатор, codegen, executor |
+| Query | 7 | ~2,800 | Lexer, parser, AST, IR, optimizer, codegen, executor |
 | Vector | 3 | ~1,200 | HNSW, IVF-PQ, квантуване, SIMD |
-| Graph | 3 | ~1,000 | Списък със съседи, алгоритми, community detection |
-| FTS | 2 | ~900 | Инвертиран индекс, BM25, fuzzy, многоезичен |
+| Graph | 3 | ~1,000 | Adjacency list, алгоритми, community detection |
+| FTS | 2 | ~900 | Inverted index, BM25, fuzzy, многоезичност |
 | Protocol | 7 | ~2,400 | Wire, HTTP, WebSocket, pool, auth, rate limit, SSL |
 | Schema | 1 | ~600 | Типове, връзки, наследяване, миграции |
-| Client | 2 | ~800 | Nim binary client, file helpers |
-| CLI | 1 | ~400 | Интерактивна BaraQL конзола |
+| Client | 2 | ~800 | Nim бинарен клиент, файлови помощници |
+| CLI | 1 | ~400 | Интерактивна BaraQL обвивка |
 | **Общо** | **49** | **~14,100** | |
