@@ -5,7 +5,7 @@ edition = "2021"
 authors = ["BaraDB Team <team@baradb.dev>"]
 description = "Official async Rust client for BaraDB — binary protocol client"
 license = "Apache-2.0"
-repository = "https://github.com/katehonz/barabaDB"
+repository = "https://github.com/barabadb/baradadb.git"
 documentation = "https://docs.baradb.dev"
 readme = "README.md"
 keywords = ["database", "baradb", "multimodal", "client", "wire-protocol"]
@@ -16,6 +16,7 @@ rust-version = "1.70"
 tokio = { version = "1.35", features = ["full"] }
 
 [dev-dependencies]
+tokio = { version = "1.35", features = ["full"] }
 
 [[example]]
 name = "basic"

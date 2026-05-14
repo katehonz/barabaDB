@@ -21,7 +21,7 @@ pip install baradb
 Or from source:
 
 ```bash
-git clone https://github.com/katehonz/barabaDB.git
+git clone https://github.com/barabadb/baradadb.git
 cd clients/python
 pip install -e ".[dev]"
 ```

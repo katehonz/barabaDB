@@ -1,15 +1,17 @@
 ## BaraDB Nim Client — Integration Tests
-## Requires a running BaraDB server on localhost:9472.
+## Requires a running BaraDB server.
+## Set BARADB_HOST / BARADB_PORT env vars to override defaults.
 
 import std/unittest
 import std/asyncdispatch
 import std/asyncnet
 import std/strutils
+import std/os
 import baradb/client
 
 const
-  TestHost = "127.0.0.1"
-  TestPort = 9472
+  TestHost = getEnv("BARADB_HOST", "127.0.0.1")
+  TestPort = parseInt(getEnv("BARADB_PORT", "9472"))
 
 proc serverAvailable(): bool =
   try:

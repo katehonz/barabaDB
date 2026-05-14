@@ -18,11 +18,11 @@ class TestWireValue:
         assert data == b"\x00"
 
     def test_bool_true(self):
-        wv = WireValue.bool_val(True)
+        wv = WireValue.bool(True)
         assert wv.serialize() == b"\x01\x01"
 
     def test_bool_false(self):
-        wv = WireValue.bool_val(False)
+        wv = WireValue.bool(False)
         assert wv.serialize() == b"\x01\x00"
 
     def test_int8(self):
@@ -70,7 +70,7 @@ class TestWireValue:
         assert data[5:] == b"hello"
 
     def test_bytes(self):
-        wv = WireValue.bytes_val(b"\xde\xad\xbe\xef")
+        wv = WireValue.bytes(b"\xde\xad\xbe\xef")
         data = wv.serialize()
         assert data[0] == FieldKind.BYTES
         length = struct.unpack(">I", data[1:5])[0]
@@ -87,7 +87,7 @@ class TestWireValue:
         assert floats == [1.0, 2.0, 3.0]
 
     def test_json(self):
-        wv = WireValue.json_val('{"key": "value"}')
+        wv = WireValue.json('{"key": "value"}')
         data = wv.serialize()
         assert data[0] == FieldKind.JSON
         length = struct.unpack(">I", data[1:5])[0]
@@ -95,7 +95,7 @@ class TestWireValue:
 
     def test_array(self):
         inner = [WireValue.string("a"), WireValue.string("b")]
-        wv = WireValue.array_val(inner)
+        wv = WireValue.array(inner)
         data = wv.serialize()
         assert data[0] == FieldKind.ARRAY
         count = struct.unpack(">I", data[1:5])[0]
@@ -103,7 +103,7 @@ class TestWireValue:
 
     def test_object(self):
         inner = {"name": WireValue.string("Bara"), "age": WireValue.int32(42)}
-        wv = WireValue.object_val(inner)
+        wv = WireValue.object(inner)
         data = wv.serialize()
         assert data[0] == FieldKind.OBJECT
         count = struct.unpack(">I", data[1:5])[0]

@@ -1,0 +1,101 @@
+# BaraDB — Client Integration Test Stack
+#
+# This compose file starts BaraDB server and runs all client test suites.
+# Because test containers run in parallel, do NOT use --abort-on-container-exit
+# (the first finished container would kill the others).
+#
+# Recommended usage:
+#   ./scripts/test-clients.sh
+#
+# Or manually run each suite:
+#   docker compose -f docker-compose.test.yml up -d baradb
+#   docker compose -f docker-compose.test.yml run --rm test-python
+#   docker compose -f docker-compose.test.yml run --rm test-javascript
+#   docker compose -f docker-compose.test.yml run --rm test-nim
+#   docker compose -f docker-compose.test.yml run --rm test-rust
+#   docker compose -f docker-compose.test.yml down
+
+services:
+  baradb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: baradb:latest
+    ports:
+      - "9472:9472"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:9912/health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+  test-python:
+    image: python:3.12-slim
+    depends_on:
+      baradb:
+        condition: service_healthy
+    environment:
+      - BARADB_HOST=baradb
+      - BARADB_PORT=9472
+    volumes:
+      - ./clients/python:/workspace
+    working_dir: /workspace
+    command: >
+      sh -c "
+        pip install pytest pytest-asyncio -q &&
+        pip install -e ".[dev]" -q &&
+        pytest tests/test_wire_protocol.py tests/test_query_builder.py -v &&
+        pytest tests/test_integration.py -v
+      "
+
+  test-javascript:
+    image: node:20-slim
+    depends_on:
+      baradb:
+        condition: service_healthy
+    environment:
+      - BARADB_HOST=baradb
+      - BARADB_PORT=9472
+    volumes:
+      - ./clients/javascript:/workspace
+    working_dir: /workspace
+    command: >
+      sh -c "
+        node --test tests/unit.test.js &&
+        node --test tests/integration.test.js
+      "
+
+  test-nim:
+    image: nimlang/nim:2.2.10
+    depends_on:
+      baradb:
+        condition: service_healthy
+    environment:
+      - BARADB_HOST=baradb
+      - BARADB_PORT=9472
+    volumes:
+      - ./clients/nim:/workspace
+      - ./clients/nim/src:/workspace/src
+    working_dir: /workspace
+    command: >
+      sh -c "
+        nim c --path:src -r tests/test_client.nim &&
+        nim c --path:src -r tests/test_integration.nim
+      "
+
+  test-rust:
+    image: rust:1.78
+    depends_on:
+      baradb:
+        condition: service_healthy
+    environment:
+      - BARADB_HOST=baradb
+      - BARADB_PORT=9472
+    volumes:
+      - ./clients/rust:/workspace
+    working_dir: /workspace
+    command: >
+      sh -c "
+        cargo test -- --test-threads=1
+      "

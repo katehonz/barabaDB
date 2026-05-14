@@ -37,6 +37,5 @@ clients/rust/target/
 # Nim compiled binaries
 clients/nim/src/baradb/client
 src/barabadb/storage/compaction
-docker-compose.test.yml
 src/barabadb/query/executor
 tests/join_tests

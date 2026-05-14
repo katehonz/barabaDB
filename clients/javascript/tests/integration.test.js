@@ -8,8 +8,8 @@ const assert = require('node:assert');
 const net = require('net');
 const { Client, WireValue, QueryBuilder } = require('../baradb');
 
-const HOST = 'localhost';
-const PORT = 9472;
+const HOST = process.env.BARADB_HOST || 'localhost';
+const PORT = parseInt(process.env.BARADB_PORT || '9472', 10);
 
 function serverAvailable() {
   return new Promise((resolve) => {
