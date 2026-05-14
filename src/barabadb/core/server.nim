@@ -436,9 +436,11 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
       case header.kind
       of mkAuth:
         let tokenStr = parseAuthMessage(cast[seq[byte]](payload))
-        let (valid, userId, _) = verifyToken(secret, tokenStr)
+        let (valid, userId, role) = verifyToken(secret, tokenStr)
         if valid:
           authenticated = true
+          connCtx.currentUser = userId
+          connCtx.currentRole = role
           let okMsg = makeAuthOkMessage(header.requestId)
           await client.send(cast[string](okMsg))
           info("Client " & $clientId & " authenticated as " & userId)

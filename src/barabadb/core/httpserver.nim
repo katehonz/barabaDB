@@ -108,6 +108,8 @@ proc queryHandler(server: HttpServer): RequestHandler =
       let ctx = newContext(request)
       server.metrics.queriesTotal += 1
 
+      var userId = ""
+      var role = ""
       # Auth check
       if server.config.authEnabled:
         let authHeader = request.headers["Authorization"]
@@ -115,10 +117,12 @@ proc queryHandler(server: HttpServer): RequestHandler =
           ctx.json(%*{"error": "Unauthorized"}, 401)
           return
         let tokenStr = authHeader[7..^1]
-        let (valid, userId, role) = server.verifyToken(tokenStr)
+        let (valid, uid, r) = server.verifyToken(tokenStr)
         if not valid:
           ctx.json(%*{"error": "Unauthorized"}, 401)
           return
+        userId = uid
+        role = r
 
       let body = parseJson(request.body)
       if body == nil or "query" notin body:
@@ -131,6 +135,8 @@ proc queryHandler(server: HttpServer): RequestHandler =
         return
 
       var reqCtx = cloneForConnection(server.ctx)
+      reqCtx.currentUser = userId
+      reqCtx.currentRole = role
       let tokens = tokenize(queryStr)
       let astNode = parse(tokens)
 

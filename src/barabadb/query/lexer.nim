@@ -147,6 +147,10 @@ type
     tkArrowR       # ->
     tkArrowRR      # ->>
     tkFtsMatch     # @@
+    tkJsonContains # @>
+    tkJsonContainedBy # <@
+    tkJsonHasAny   # ?|
+    tkJsonHasAll   # ?&
     tkSimilar
     tkNearest
     tkTo
@@ -157,12 +161,15 @@ type
     # Window functions
     tkOver
     tkPartition
+    tkRow
     tkRows
     tkRange
     tkUnbounded
     tkPreceding
     tkFollowing
     tkCurrent
+    tkCurrentUser
+    tkCurrentRole
     tkRowNumber
     tkRank
     tkDenseRank
@@ -365,12 +372,15 @@ const keywords*: Table[string, TokenKind] = {
   "path": tkPath,
   "over": tkOver,
   "partition": tkPartition,
+  "row": tkRow,
   "rows": tkRows,
   "range": tkRange,
   "unbounded": tkUnbounded,
   "preceding": tkPreceding,
   "following": tkFollowing,
   "current": tkCurrent,
+  "current_user": tkCurrentUser,
+  "current_role": tkCurrentRole,
   "row_number": tkRowNumber,
   "rank": tkRank,
   "dense_rank": tkDenseRank,
@@ -586,6 +596,10 @@ proc nextToken*(l: var Lexer): Token =
       discard l.advance()
       discard l.advance()
       return Token(kind: tkNotEq, value: "<>", line: startLine, col: startCol)
+    if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '@':
+      discard l.advance()
+      discard l.advance()
+      return Token(kind: tkJsonContainedBy, value: "<@", line: startLine, col: startCol)
     discard l.advance()
     return Token(kind: tkLt, value: "<", line: startLine, col: startCol)
   of '>':
@@ -596,6 +610,16 @@ proc nextToken*(l: var Lexer): Token =
     discard l.advance()
     return Token(kind: tkGt, value: ">", line: startLine, col: startCol)
   of '?':
+    if l.pos + 2 < l.input.len and l.input[l.pos + 1] == '|':
+      discard l.advance()
+      discard l.advance()
+      discard l.advance()
+      return Token(kind: tkJsonHasAny, value: "?|", line: startLine, col: startCol)
+    if l.pos + 2 < l.input.len and l.input[l.pos + 1] == '&':
+      discard l.advance()
+      discard l.advance()
+      discard l.advance()
+      return Token(kind: tkJsonHasAll, value: "?&", line: startLine, col: startCol)
     if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '?':
       discard l.advance()
       discard l.advance()
@@ -607,6 +631,10 @@ proc nextToken*(l: var Lexer): Token =
       discard l.advance()
       discard l.advance()
       return Token(kind: tkFtsMatch, value: "@@", line: startLine, col: startCol)
+    if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '>':
+      discard l.advance()
+      discard l.advance()
+      return Token(kind: tkJsonContains, value: "@>", line: startLine, col: startCol)
     discard l.advance()
     return Token(kind: tkInvalid, value: "@", line: startLine, col: startCol)
   of '.':

@@ -69,6 +69,7 @@ type
     policies*: Table[string, seq[PolicyDef]]  # table name -> policies
     currentUser*: string
     currentRole*: string
+    sessionVars*: Table[string, string]  # session-scoped key/value variables
 
   MigrationRecord* = object
     name*: string
@@ -149,6 +150,7 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
                    users: initTable[string, UserDef](),
                    policies: initTable[string, seq[PolicyDef]](),
                    currentUser: "", currentRole: "",
+                   sessionVars: initTable[string, string](),
                    onChange: nil)
   restoreSchema(result)
 
@@ -323,6 +325,7 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
                    users: ctx.users, policies: ctx.policies,
                    txnManager: ctx.txnManager,
                    currentUser: ctx.currentUser, currentRole: ctx.currentRole,
+                   sessionVars: ctx.sessionVars,
                    pendingTxn: nil, onChange: ctx.onChange)
 
 # ----------------------------------------------------------------------
@@ -504,7 +507,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
   of irekStar:
     return "*"
   of irekJsonPath:
-    let srcVal = evalExpr(expr.jpExpr, row)
+    let srcVal = evalExpr(expr.jpExpr, row, ctx)
     if srcVal.len == 0: return ""
     try:
       let node = parseJson(srcVal)
@@ -527,8 +530,8 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     except:
       return ""
   of irekBinary:
-    let left = evalExpr(expr.binLeft, row)
-    let right = evalExpr(expr.binRight, row)
+    let left = evalExpr(expr.binLeft, row, ctx)
+    let right = evalExpr(expr.binRight, row, ctx)
     case expr.binOp
     of irEq:
       if left == right: return "true"
@@ -669,20 +672,93 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if vecA.len == 0 or vecB.len == 0:
         return "0"
       return $vengine.euclideanDistance(vecA, vecB)
+    of irJsonContains:
+      # Check if left JSON contains right JSON
+      try:
+        let leftNode = parseJson(left)
+        let rightNode = parseJson(right)
+        if leftNode.kind == JObject and rightNode.kind == JObject:
+          for key, val in rightNode:
+            if not leftNode.hasKey(key) or $(leftNode[key]) != $val:
+              return "false"
+          return "true"
+        elif leftNode.kind == JArray and rightNode.kind == JArray:
+          for ritem in rightNode:
+            var found = false
+            for litem in leftNode:
+              if $(litem) == $(ritem):
+                found = true
+                break
+            if not found:
+              return "false"
+          return "true"
+        else:
+          return if $(leftNode) == $(rightNode): "true" else: "false"
+      except:
+        return "false"
+    of irJsonContainedBy:
+      # Check if left JSON is contained by right JSON (reverse of contains)
+      try:
+        let leftNode = parseJson(left)
+        let rightNode = parseJson(right)
+        if leftNode.kind == JObject and rightNode.kind == JObject:
+          for key, val in leftNode:
+            if not rightNode.hasKey(key) or $(rightNode[key]) != $val:
+              return "false"
+          return "true"
+        elif leftNode.kind == JArray and rightNode.kind == JArray:
+          for litem in leftNode:
+            var found = false
+            for ritem in rightNode:
+              if $(ritem) == $(litem):
+                found = true
+                break
+            if not found:
+              return "false"
+          return "true"
+        else:
+          return if $(leftNode) == $(rightNode): "true" else: "false"
+      except:
+        return "false"
+    of irJsonHasAny:
+      # Check if JSON object has any of the keys in right array
+      try:
+        let leftNode = parseJson(left)
+        let rightNode = parseJson(right)
+        if leftNode.kind == JObject and rightNode.kind == JArray:
+          for key in rightNode:
+            if key.kind == JString and leftNode.hasKey(key.getStr()):
+              return "true"
+        return "false"
+      except:
+        return "false"
+    of irJsonHasAll:
+      # Check if JSON object has all of the keys in right array
+      try:
+        let leftNode = parseJson(left)
+        let rightNode = parseJson(right)
+        if leftNode.kind == JObject and rightNode.kind == JArray:
+          for key in rightNode:
+            if key.kind == JString and not leftNode.hasKey(key.getStr()):
+              return "false"
+          return "true"
+        return "false"
+      except:
+        return "false"
     else: return "false"
   of irekUnary:
     case expr.unOp
     of irNot:
-      let v = evalExpr(expr.unExpr, row)
+      let v = evalExpr(expr.unExpr, row, ctx)
       return if v == "true": "false" else: "true"
     of irIsNull:
-      let v = evalExpr(expr.unExpr, row)
+      let v = evalExpr(expr.unExpr, row, ctx)
       return if isNull(v): "true" else: "false"
     of irIsNotNull:
-      let v = evalExpr(expr.unExpr, row)
+      let v = evalExpr(expr.unExpr, row, ctx)
       return if not isNull(v): "true" else: "false"
     of irNeg:
-      let v = evalExpr(expr.unExpr, row)
+      let v = evalExpr(expr.unExpr, row, ctx)
       try:
         let f = -parseFloat(v)
         let s = $f
@@ -716,6 +792,37 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         return "0"
       let arg = evalExpr(expr.irFuncArgs[0], row, ctx)
       return $parseVectorString(arg).len
+    of "json_has_key":
+      if expr.irFuncArgs.len < 2:
+        return "false"
+      let jsonStr = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let key = evalExpr(expr.irFuncArgs[1], row, ctx)
+      try:
+        let node = parseJson(jsonStr)
+        if node.kind == JObject:
+          return if node.hasKey(key): "true" else: "false"
+        elif node.kind == JArray:
+          try:
+            let idx = parseInt(key)
+            return if idx >= 0 and idx < node.len: "true" else: "false"
+          except:
+            return "false"
+        return "false"
+      except:
+        return "false"
+    of "current_setting":
+      if expr.irFuncArgs.len < 1:
+        return ""
+      let key = evalExpr(expr.irFuncArgs[0], row, ctx)
+      if ctx != nil and key in ctx.sessionVars:
+        return ctx.sessionVars[key]
+      return ""
+    of "current_user":
+      if ctx != nil: return ctx.currentUser
+      return ""
+    of "current_role":
+      if ctx != nil: return ctx.currentRole
+      return ""
     else:
       # Unknown function: try to evaluate args and return first arg as fallback
       if expr.irFuncArgs.len > 0:
@@ -773,7 +880,7 @@ proc passesPolicy(ctx: ExecutionContext, tableName, command: string, row: Row): 
       continue
     if pol.usingExpr != nil:
       let expr = lowerExpr(pol.usingExpr)
-      if evalExpr(expr, row) != "true":
+      if evalExpr(expr, row, ctx) != "true":
         return false
   return true
 
@@ -788,7 +895,7 @@ proc checkInsertPolicy(ctx: ExecutionContext, tableName: string, row: Row): bool
       continue
     if pol.withCheckExpr != nil:
       let expr = lowerExpr(pol.withCheckExpr)
-      if evalExpr(expr, row) != "true":
+      if evalExpr(expr, row, ctx) != "true":
         return false
   return true
 
@@ -1151,7 +1258,7 @@ proc validateConstraints*(ctx: ExecutionContext, tableName: string,
           else:
             row[f] = ""
         let checkExpr = lowerExpr(check.checkNode)
-        let checkResult = evalExpr(checkExpr, row)
+        let checkResult = evalExpr(checkExpr, row, ctx)
         if checkResult != "true":
           return (false, "CHECK constraint '" & check.name & "' violated")
 
@@ -1199,6 +1306,14 @@ proc lowerExpr*(node: Node): IRExpr =
   of nkNullLit:
     result = IRExpr(kind: irekLiteral)
     result.literal = IRLiteral(kind: vkNull)
+  of nkCurrentUser:
+    result = IRExpr(kind: irekFuncCall)
+    result.irFunc = "current_user"
+    result.irFuncArgs = @[]
+  of nkCurrentRole:
+    result = IRExpr(kind: irekFuncCall)
+    result.irFunc = "current_role"
+    result.irFuncArgs = @[]
   of nkIdent:
     result = IRExpr(kind: irekField)
     result.fieldPath = @[node.identName]
@@ -1229,6 +1344,10 @@ proc lowerExpr*(node: Node): IRExpr =
     of bkOr: irOp = irOr
     of bkFtsMatch: irOp = irFtsMatch
     of bkDistance: irOp = irDistance
+    of bkJsonContains: irOp = irJsonContains
+    of bkJsonContainedBy: irOp = irJsonContainedBy
+    of bkJsonHasAny: irOp = irJsonHasAny
+    of bkJsonHasAll: irOp = irJsonHasAll
     else: irOp = irEq
     result.binOp = irOp
     result.binLeft = lowerExpr(node.binLeft)
@@ -1408,7 +1527,7 @@ proc lowerSelect*(node: Node): IRPlan =
     filterPlan.filterCond = lowerExpr(node.selWhere.whereExpr)
     result = filterPlan
 
-  if node.selGroupBy.len > 0:
+  if node.selGroupBy.len > 0 or node.selGroupingSetsKind != gskNone:
     let groupPlan = IRPlan(kind: irpkGroupBy)
     groupPlan.groupSource = result
     groupPlan.groupKeys = @[]
@@ -1477,17 +1596,17 @@ proc lowerSelect*(node: Node): IRPlan =
 # Window Function Computation
 # ----------------------------------------------------------------------
 
-proc partitionKey(row: Row, partExprs: seq[IRExpr]): string =
+proc partitionKey(row: Row, partExprs: seq[IRExpr], ctx: ExecutionContext = nil): string =
   ## Compute a string partition key for a row
   result = ""
   for expr in partExprs:
-    result &= evalExpr(expr, row) & "|"
+    result &= evalExpr(expr, row, ctx) & "|"
 
-proc compareRowsByOrder(a, b: Row, orderExprs: seq[IRExpr], orderDirs: seq[bool]): int =
+proc compareRowsByOrder(a, b: Row, orderExprs: seq[IRExpr], orderDirs: seq[bool], ctx: ExecutionContext = nil): int =
   ## Compare two rows by their ORDER BY expressions
   for i, expr in orderExprs:
-    let va = evalExpr(expr, a)
-    let vb = evalExpr(expr, b)
+    let va = evalExpr(expr, a, ctx)
+    let vb = evalExpr(expr, b, ctx)
     var cmpRes = 0
     try:
       let fa = parseFloat(va)
@@ -1500,18 +1619,63 @@ proc compareRowsByOrder(a, b: Row, orderExprs: seq[IRExpr], orderDirs: seq[bool]
       return if orderDirs.len > i and orderDirs[i]: -cmpRes else: cmpRes
   return 0
 
-proc computeWindowValues*(rows: seq[Row], expr: IRExpr): seq[string] =
+proc resolveFrameBounds(pos, partLen: int, frameStart, frameEnd: string): (int, int) =
+  ## Resolve frame boundaries for ROWS mode.
+  ## Returns (startPos, endPos) inclusive within the partition.
+  var startPos = 0
+  var endPos = partLen - 1
+
+  # Parse start boundary
+  if frameStart == "UNBOUNDED PRECEDING":
+    startPos = 0
+  elif frameStart == "CURRENT ROW":
+    startPos = pos
+  elif frameStart.endsWith(" PRECEDING"):
+    let nStr = frameStart[0..^11]
+    var n = 0
+    try: n = parseInt(nStr) except: n = 0
+    startPos = max(0, pos - n)
+  elif frameStart.endsWith(" FOLLOWING"):
+    let nStr = frameStart[0..^11]
+    var n = 0
+    try: n = parseInt(nStr) except: n = 0
+    startPos = min(partLen - 1, pos + n)
+
+  # Parse end boundary
+  if frameEnd == "UNBOUNDED FOLLOWING":
+    endPos = partLen - 1
+  elif frameEnd == "CURRENT ROW":
+    endPos = pos
+  elif frameEnd.endsWith(" PRECEDING"):
+    let nStr = frameEnd[0..^11]
+    var n = 0
+    try: n = parseInt(nStr) except: n = 0
+    endPos = max(0, pos - n)
+  elif frameEnd.endsWith(" FOLLOWING"):
+    let nStr = frameEnd[0..^11]
+    var n = 0
+    try: n = parseInt(nStr) except: n = 0
+    endPos = min(partLen - 1, pos + n)
+
+  if startPos > endPos:
+    startPos = endPos
+  return (startPos, endPos)
+
+proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = nil): seq[string] =
   ## Compute a window function for all rows, returning a value per row.
   ## The expr must be of kind irekWindowFunc.
   result = newSeq[string](rows.len)
   if rows.len == 0: return
 
   let wfName = expr.wfName.toLower()
+  let frameMode = expr.wfFrameMode
+  let frameStart = expr.wfFrameStart
+  let frameEnd = expr.wfFrameEnd
 
   # Partition rows
   var groups = initTable[string, seq[int]]()
   for i, row in rows:
-    let pk = partitionKey(row, expr.wfPartition)
+    let pk = partitionKey(row, expr.wfPartition, ctx)
     if pk notin groups:
       groups[pk] = @[]
     groups[pk].add(i)
@@ -1520,7 +1684,7 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr): seq[string] =
   for pk, idxs in groups:
     var sortedIdxs = idxs
     sortedIdxs.sort(proc(a, b: int): int =
-      compareRowsByOrder(rows[a], rows[b], expr.wfOrderBy, expr.wfOrderDirs)
+      compareRowsByOrder(rows[a], rows[b], expr.wfOrderBy, expr.wfOrderDirs, ctx)
     )
 
     case wfName
@@ -1531,7 +1695,7 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr): seq[string] =
       var currentRank = 1
       for pos, rowIdx in sortedIdxs:
         if pos > 0:
-          let cmpRes = compareRowsByOrder(rows[sortedIdxs[pos - 1]], rows[rowIdx], expr.wfOrderBy, expr.wfOrderDirs)
+          let cmpRes = compareRowsByOrder(rows[sortedIdxs[pos - 1]], rows[rowIdx], expr.wfOrderBy, expr.wfOrderDirs, ctx)
           if cmpRes != 0:
             currentRank = pos + 1
         result[rowIdx] = $currentRank
@@ -1539,14 +1703,14 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr): seq[string] =
       var currentRank = 1
       for pos, rowIdx in sortedIdxs:
         if pos > 0:
-          let cmpRes = compareRowsByOrder(rows[sortedIdxs[pos - 1]], rows[rowIdx], expr.wfOrderBy, expr.wfOrderDirs)
+          let cmpRes = compareRowsByOrder(rows[sortedIdxs[pos - 1]], rows[rowIdx], expr.wfOrderBy, expr.wfOrderDirs, ctx)
           if cmpRes != 0:
             currentRank += 1
         result[rowIdx] = $currentRank
     of "ntile":
       var n = 1
       if expr.wfArgs.len > 0:
-        try: n = parseInt(evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]])) except: n = 1
+        try: n = parseInt(evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]], ctx)) except: n = 1
       if n < 1: n = 1
       let groupSize = sortedIdxs.len div n
       let remainder = sortedIdxs.len mod n
@@ -1565,36 +1729,36 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr): seq[string] =
       var offset = 1
       var defaultVal = ""
       if expr.wfArgs.len > 1:
-        try: offset = parseInt(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]])) except: offset = 1
+        try: offset = parseInt(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx)) except: offset = 1
       if expr.wfArgs.len > 2:
-        defaultVal = evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]])
+        defaultVal = evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]], ctx)
       for pos, rowIdx in sortedIdxs:
         let targetPos = pos + offset
         if targetPos < sortedIdxs.len:
-          result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]])
+          result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]], ctx)
         else:
           result[rowIdx] = defaultVal
     of "lag":
       var offset = 1
       var defaultVal = ""
       if expr.wfArgs.len > 1:
-        try: offset = parseInt(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]])) except: offset = 1
+        try: offset = parseInt(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx)) except: offset = 1
       if expr.wfArgs.len > 2:
-        defaultVal = evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]])
+        defaultVal = evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]], ctx)
       for pos, rowIdx in sortedIdxs:
         let targetPos = pos - offset
         if targetPos >= 0:
-          result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]])
+          result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]], ctx)
         else:
           result[rowIdx] = defaultVal
     of "first_value":
-      let firstVal = evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]])
-      for rowIdx in sortedIdxs:
-        result[rowIdx] = firstVal
+      for pos, rowIdx in sortedIdxs:
+        let (fStart, fEnd) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
+        result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[fStart]], ctx)
     of "last_value":
-      let lastVal = evalExpr(expr.wfArgs[0], rows[sortedIdxs[^1]])
-      for rowIdx in sortedIdxs:
-        result[rowIdx] = lastVal
+      for pos, rowIdx in sortedIdxs:
+        let (fStart, fEnd) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
+        result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[fEnd]], ctx)
     else:
       # Unknown window function — fill with empty
       for rowIdx in sortedIdxs:
@@ -1621,8 +1785,12 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         result.add(row)
 
   of irpkProject:
-    let sourceRows = executePlan(ctx, plan.projectSource)
+    var sourceRows = executePlan(ctx, plan.projectSource)
     if plan.projectAliases.len == 0: return sourceRows
+    # Scalar SELECT (no FROM): create a dummy row so expressions can be evaluated
+    if sourceRows.len == 0 and plan.projectSource != nil and
+       plan.projectSource.kind == irpkScan and plan.projectSource.scanTable.len == 0:
+      sourceRows = @[initTable[string, string]()]
 
     # Check if this projection contains aggregates without GROUP BY
     var hasAggs = false
@@ -1660,7 +1828,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
                 if not k.startsWith("$") and not k.contains("."):
                   newRow[k] = v
             else:
-              let val = evalExpr(expr, row)
+              let val = evalExpr(expr, row, ctx)
               if alias.len > 0: newRow[alias] = val
               else: newRow["col" & $i] = val
         if newRow.len > 0:
@@ -1686,7 +1854,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             if expr.aggFilter != nil:
               filteredRows = @[]
               for row in sourceRows:
-                if evalExpr(expr.aggFilter, row) == "true":
+                if evalExpr(expr.aggFilter, row, ctx) == "true":
                   filteredRows.add(row)
             case expr.aggOp
             of irCount:
@@ -1695,49 +1863,49 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               else:
                 var count = 0
                 for row in filteredRows:
-                  let v = evalExpr(expr.aggArgs[0], row)
+                  let v = evalExpr(expr.aggArgs[0], row, ctx)
                   if v.len > 0: count += 1
                 newRow[alias] = $count
             of irSum:
               var sum = 0.0
               for row in filteredRows:
-                let v = evalExpr(expr.aggArgs[0], row)
+                let v = evalExpr(expr.aggArgs[0], row, ctx)
                 try: sum += parseFloat(v) except: discard
               newRow[alias] = $sum
             of irAvg:
               var sum = 0.0
               var count = 0
               for row in filteredRows:
-                let v = evalExpr(expr.aggArgs[0], row)
+                let v = evalExpr(expr.aggArgs[0], row, ctx)
                 try: sum += parseFloat(v); count += 1 except: discard
               newRow[alias] = if count > 0: $(sum / float(count)) else: "0"
             of irMin:
               var minVal = ""
               for row in filteredRows:
-                let v = evalExpr(expr.aggArgs[0], row)
+                let v = evalExpr(expr.aggArgs[0], row, ctx)
                 if minVal == "" or v < minVal: minVal = v
               newRow[alias] = minVal
             of irMax:
               var maxVal = ""
               for row in filteredRows:
-                let v = evalExpr(expr.aggArgs[0], row)
+                let v = evalExpr(expr.aggArgs[0], row, ctx)
                 if maxVal == "" or v > maxVal: maxVal = v
               newRow[alias] = maxVal
             of irArrayAgg:
               var arr: seq[string]
               for row in filteredRows:
                 if expr.aggArgs.len > 0:
-                  arr.add(evalExpr(expr.aggArgs[0], row))
+                  arr.add(evalExpr(expr.aggArgs[0], row, ctx))
               newRow[alias] = "[" & arr.join(", ") & "]"
             of irStringAgg:
               var parts: seq[string]
-              let delim = if expr.aggArgs.len > 1: evalExpr(expr.aggArgs[1], initTable[string, string]()) else: ","
+              let delim = if expr.aggArgs.len > 1: evalExpr(expr.aggArgs[1], initTable[string, string](), ctx) else: ","
               for row in filteredRows:
                 if expr.aggArgs.len > 0:
-                  parts.add(evalExpr(expr.aggArgs[0], row))
+                  parts.add(evalExpr(expr.aggArgs[0], row, ctx))
               newRow[alias] = parts.join(delim)
           else:
-            let val = evalExpr(expr, if sourceRows.len > 0: sourceRows[0] else: initTable[string, string]())
+            let val = evalExpr(expr, if sourceRows.len > 0: sourceRows[0] else: initTable[string, string](), ctx)
             if alias.len > 0: newRow[alias] = val
             else: newRow["col" & $i] = val
       result = @[newRow]
@@ -1768,7 +1936,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               if alias.len > 0: newRow[alias] = "0"
               else: newRow["col" & $i] = "0"
           else:
-            let val = evalExpr(expr, row)
+            let val = evalExpr(expr, row, ctx)
             if alias.len > 0: newRow[alias] = val
             else: newRow["col" & $i] = val
       if newRow.len > 0:
@@ -1782,8 +1950,8 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     let sortExpr = plan.sortExprs[0]
     let ascending = if plan.sortDirs.len > 0: plan.sortDirs[0] else: true
     proc sortCmp(a, b: Row): int =
-      let va = evalExpr(sortExpr, a)
-      let vb = evalExpr(sortExpr, b)
+      let va = evalExpr(sortExpr, a, ctx)
+      let vb = evalExpr(sortExpr, b, ctx)
       try:
         let fa = parseFloat(va)
         let fb = parseFloat(vb)
@@ -1839,7 +2007,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       for row in sourceRows:
         var groupKey = ""
         for gk in gkeys:
-          groupKey &= evalExpr(gk, row) & "|"
+          groupKey &= evalExpr(gk, row, ctx) & "|"
         if groupKey notin groups:
           groups[groupKey] = @[]
         groups[groupKey].add(row)
@@ -1847,7 +2015,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         var aggRow: Table[string, string]
         for gkExpr in gkeys:
           if gkExpr.kind == irekField and gkExpr.fieldPath.len > 0:
-            aggRow[gkExpr.fieldPath[^1]] = evalExpr(gkExpr, groupRows[0])
+            aggRow[gkExpr.fieldPath[^1]] = evalExpr(gkExpr, groupRows[0], ctx)
         # Compute each aggregate expression
         for aggExpr in plan.groupAggs:
           let aggKey = "$agg_" & $aggExpr.aggOp & "_" & $plan.groupAggs.find(aggExpr)
@@ -1855,7 +2023,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           if aggExpr.aggFilter != nil:
             filteredRows = @[]
             for row in groupRows:
-              if evalExpr(aggExpr.aggFilter, row) == "true":
+              if evalExpr(aggExpr.aggFilter, row, ctx) == "true":
                 filteredRows.add(row)
           case aggExpr.aggOp
           of irCount:
@@ -1864,50 +2032,50 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             else:
               var count = 0
               for row in filteredRows:
-                let v = evalExpr(aggExpr.aggArgs[0], row)
+                let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
                 if v.len > 0: count += 1
               aggRow[aggKey] = $count
           of irSum:
             var sum = 0.0
             for row in filteredRows:
-              let v = evalExpr(aggExpr.aggArgs[0], row)
+              let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
               try: sum += parseFloat(v) except: discard
             aggRow[aggKey] = $sum
           of irAvg:
             var sum = 0.0
             var count = 0
             for row in filteredRows:
-              let v = evalExpr(aggExpr.aggArgs[0], row)
+              let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
               try: sum += parseFloat(v); count += 1 except: discard
             aggRow[aggKey] = if count > 0: $(sum / float(count)) else: "0"
           of irMin:
             var minVal = ""
             for row in filteredRows:
-              let v = evalExpr(aggExpr.aggArgs[0], row)
+              let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
               if minVal == "" or v < minVal: minVal = v
             aggRow[aggKey] = minVal
           of irMax:
             var maxVal = ""
             for row in filteredRows:
-              let v = evalExpr(aggExpr.aggArgs[0], row)
+              let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
               if maxVal == "" or v > maxVal: maxVal = v
             aggRow[aggKey] = maxVal
           of irArrayAgg:
             var arr: seq[string]
             for row in filteredRows:
               if aggExpr.aggArgs.len > 0:
-                arr.add(evalExpr(aggExpr.aggArgs[0], row))
+                arr.add(evalExpr(aggExpr.aggArgs[0], row, ctx))
             aggRow[aggKey] = "[" & arr.join(", ") & "]"
           of irStringAgg:
             var parts: seq[string]
-            let delim = if aggExpr.aggArgs.len > 1: evalExpr(aggExpr.aggArgs[1], initTable[string, string]()) else: ","
+            let delim = if aggExpr.aggArgs.len > 1: evalExpr(aggExpr.aggArgs[1], initTable[string, string](), ctx) else: ","
             for row in filteredRows:
               if aggExpr.aggArgs.len > 0:
-                parts.add(evalExpr(aggExpr.aggArgs[0], row))
+                parts.add(evalExpr(aggExpr.aggArgs[0], row, ctx))
             aggRow[aggKey] = parts.join(delim)
         # Apply HAVING filter
         if plan.groupHaving != nil:
-          if evalExpr(plan.groupHaving, aggRow) != "true":
+          if evalExpr(plan.groupHaving, aggRow, ctx) != "true":
             continue
         result.add(aggRow)
     return result
@@ -1979,9 +2147,9 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         var mergedRows: seq[Row]
         for r in rawRightRows:
           let merged = mergeRow(l, r, leftAlias, rightAlias)
-          if rightFilter != nil and evalExpr(rightFilter, merged) != "true":
+          if rightFilter != nil and evalExpr(rightFilter, merged, ctx) != "true":
             continue
-          if plan.joinCond != nil and evalExpr(plan.joinCond, merged) != "true":
+          if plan.joinCond != nil and evalExpr(plan.joinCond, merged, ctx) != "true":
             continue
           mergedRows.add(merged)
 
@@ -1989,8 +2157,8 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         if rightSortExprs.len > 0 and mergedRows.len > 1:
           mergedRows.sort(proc(a, b: Row): int =
             for i, sExpr in rightSortExprs:
-              let aVal = evalExpr(sExpr, a)
-              let bVal = evalExpr(sExpr, b)
+              let aVal = evalExpr(sExpr, a, ctx)
+              let bVal = evalExpr(sExpr, b, ctx)
               let asc = if i < rightSortDirs.len: rightSortDirs[i] else: true
               var cmp = 0
               let aNum = parseFloat(aVal)
@@ -2060,7 +2228,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       var matched = false
       for r in rightRows:
         let merged = mergeRow(l, r, leftAlias, rightAlias)
-        if plan.joinCond == nil or evalExpr(plan.joinCond, merged) == "true":
+        if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
           result.add(merged)
           matched = true
       if not matched and (plan.joinKind == irjkLeft or plan.joinKind == irjkFull):
@@ -2084,7 +2252,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         var found = false
         for l in leftRows:
           let merged = mergeRow(l, r, leftAlias, rightAlias)
-          if plan.joinCond == nil or evalExpr(plan.joinCond, merged) == "true":
+          if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
             found = true
             break
         if not found:
@@ -2152,32 +2320,32 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             else:
               var count = 0
               for row in matchingRows:
-                let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+                let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
                 if v.len > 0: count += 1
               aggResult = $count
           of irSum:
             var sum = 0.0
             for row in matchingRows:
-              let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+              let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
               try: sum += parseFloat(v) except: discard
             aggResult = $sum
           of irAvg:
             var sum = 0.0
             var count = 0
             for row in matchingRows:
-              let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+              let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
               try: sum += parseFloat(v); count += 1 except: discard
             aggResult = if count > 0: $(sum / float(count)) else: "0"
           of irMin:
             var minVal = ""
             for row in matchingRows:
-              let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+              let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
               if minVal == "" or v < minVal: minVal = v
             aggResult = minVal
           of irMax:
             var maxVal = ""
             for row in matchingRows:
-              let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+              let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
               if maxVal == "" or v > maxVal: maxVal = v
             aggResult = maxVal
           else: discard
@@ -2469,15 +2637,15 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
           let whereIr = lowerExpr(stmt.selWhere.whereExpr)
           var tmp: seq[Row] = @[]
           for row in filteredRows:
-            if evalExpr(whereIr, row) == "true":
+            if evalExpr(whereIr, row, ctx) == "true":
               tmp.add(row)
           filteredRows = tmp
         if stmt.selOrderBy.len > 0:
           let sortExpr = lowerExpr(stmt.selOrderBy[0].orderByExpr)
           let asc = stmt.selOrderBy[0].orderByDir == sdAsc
           proc sortCmp(a, b: Row): int =
-            let va = evalExpr(sortExpr, a)
-            let vb = evalExpr(sortExpr, b)
+            let va = evalExpr(sortExpr, a, ctx)
+            let vb = evalExpr(sortExpr, b, ctx)
             try:
               let fa = parseFloat(va)
               let fb = parseFloat(vb)
@@ -2798,7 +2966,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
       # Check WHERE
       if stmt.updWhere != nil and stmt.updWhere.whereExpr != nil:
         let whereExpr = lowerExpr(stmt.updWhere.whereExpr)
-        if evalExpr(whereExpr, row) != "true": continue
+        if evalExpr(whereExpr, row, ctx) != "true": continue
       # Get key from row
       if "$key" in row:
         let old = row["$key"]
@@ -2839,7 +3007,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     for row in rows:
       if stmt.delWhere != nil and stmt.delWhere.whereExpr != nil:
         let whereExpr = lowerExpr(stmt.delWhere.whereExpr)
-        if evalExpr(whereExpr, row) != "true": continue
+        if evalExpr(whereExpr, row, ctx) != "true": continue
       if "$key" in row:
         let old = row["$key"]
         # Fire BEFORE DELETE triggers
@@ -2879,7 +3047,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         for k, v in tgtRow:
           rowWithTarget[stmt.mergeTargetAlias & "." & k] = v
         let onExpr = lowerExpr(stmt.mergeOn)
-        if evalExpr(onExpr, rowWithTarget) == "true":
+        if evalExpr(onExpr, rowWithTarget, ctx) == "true":
           matched = true
           if stmt.mergeMatchedUpdate.len > 0 and "$key" in tgtRow:
             var updateSets = initTable[string, string]()
@@ -2887,7 +3055,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
               if s.kind == nkBinOp and s.binOp == bkAssign:
                 if s.binLeft.kind == nkIdent:
                   let valExpr = lowerExpr(s.binRight)
-                  updateSets[s.binLeft.identName] = evalExpr(valExpr, rowWithTarget)
+                  updateSets[s.binLeft.identName] = evalExpr(valExpr, rowWithTarget, ctx)
             var newRow = tgtRow
             for col, val in updateSets:
               newRow[col] = val
@@ -2907,7 +3075,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
             if i < stmt.mergeNotMatchedValues.len:
               let v = stmt.mergeNotMatchedValues[i]
               let valExpr = lowerExpr(v)
-              values.add(evalExpr(valExpr, combinedRow))
+              values.add(evalExpr(valExpr, combinedRow, ctx))
             else:
               values.add("")
         if fields.len > 0:
@@ -3284,14 +3452,16 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
       # Full-text search index
       var ftsIdx = fts.newInvertedIndex()
       let rows = execScan(ctx, stmt.ciTarget)
-      var docId: uint64 = 0
       for row in rows:
+        let lsmKey = if "$key" in row: row["$key"] else: ""
+        let docKey = stmt.ciTarget & "." & lsmKey
+        var docId: uint64 = 0
+        for ch in docKey:
+          docId = docId * 31 + uint64(ord(ch))
         for col in stmt.ciColumns:
           let text = if col in row: row[col] else: ""
           if text.len > 0:
             ftsIdx.addDocument(docId, text)
-        let lsmKey = if "$key" in row: row["$key"] else: ""
-        docId += 1
       ctx.ftsIndexes[colKey] = ftsIdx
       return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING FTS")
 
@@ -3425,6 +3595,10 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     let grantKey = "_schema:grants:" & stmt.rvTable & ":" & stmt.rvPrivilege & ":" & stmt.rvGrantee
     ctx.db.delete(grantKey)
     return okResult(msg="REVOKE " & stmt.rvPrivilege & " ON " & stmt.rvTable & " FROM " & stmt.rvGrantee)
+
+  of nkSetVar:
+    ctx.sessionVars[stmt.svName] = stmt.svValue
+    return okResult(msg="SET " & stmt.svName & " = " & stmt.svValue)
 
   else:
     return errResult("Unsupported statement type: " & $stmt.kind)

@@ -2287,6 +2287,69 @@ suite "Row-Level Security":
     check res.success
     check res.rows.len == 1  # superuser sees all (only 1 row exists)
 
+suite "Session Variables and Multi-Tenant":
+  test "SET statement parse":
+    let ast = parse("SET app.tenant_id = 'company-123'")
+    check ast.stmts.len == 1
+    check ast.stmts[0].kind == nkSetVar
+    check ast.stmts[0].svName == "app.tenant_id"
+    check ast.stmts[0].svValue == "company-123"
+
+  test "SET and current_setting":
+    let tmpDir = getTempDir() / "baradb_session_test_" & $getMonoTime().ticks
+    var db = newLSMTree(tmpDir)
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("SET app.tenant_id = 'company-123'"))
+    let r = qexec.executeQuery(ctx, parse("SELECT current_setting('app.tenant_id') AS tenant"))
+    check r.success
+    check r.rows.len == 1
+    check r.rows[0]["tenant"] == "company-123"
+
+  test "current_user in SELECT":
+    let tmpDir = getTempDir() / "baradb_user_test_" & $getMonoTime().ticks
+    var db = newLSMTree(tmpDir)
+    var ctx = qexec.newExecutionContext(db)
+    ctx.currentUser = "alice"
+    let r = qexec.executeQuery(ctx, parse("SELECT current_user AS me"))
+    check r.success
+    check r.rows.len == 1
+    check r.rows[0]["me"] == "alice"
+
+  test "current_role in SELECT":
+    let tmpDir = getTempDir() / "baradb_role_test_" & $getMonoTime().ticks
+    var db = newLSMTree(tmpDir)
+    var ctx = qexec.newExecutionContext(db)
+    ctx.currentRole = "admin"
+    let r = qexec.executeQuery(ctx, parse("SELECT current_role AS role"))
+    check r.success
+    check r.rows.len == 1
+    check r.rows[0]["role"] == "admin"
+
+  test "Multi-tenant RLS with current_setting":
+    let tmpDir = getTempDir() / "baradb_multitenant_test_" & $getMonoTime().ticks
+    var db = newLSMTree(tmpDir)
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE invoices (id INTEGER, tenant_id TEXT, amount INT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO invoices (id, tenant_id, amount) VALUES (1, 'company-a', 100)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO invoices (id, tenant_id, amount) VALUES (2, 'company-b', 200)"))
+    # Set session variable for tenant
+    discard qexec.executeQuery(ctx, parse("SET app.tenant_id = 'company-a'"))
+    # Create policy that uses current_setting
+    ctx.users["app"] = qexec.UserDef(name: "app", passwordHash: "", isSuperuser: false, roles: @[])
+    ctx.currentUser = "app"
+    ctx.policies["invoices"] = @[
+      qexec.PolicyDef(name: "tenant_isolation", tableName: "invoices", command: "SELECT",
+                usingExpr: Node(kind: nkBinOp, binOp: bkEq,
+                  binLeft: Node(kind: nkIdent, identName: "tenant_id"),
+                  binRight: Node(kind: nkFuncCall, funcName: "current_setting",
+                    funcArgs: @[Node(kind: nkStringLit, strVal: "app.tenant_id")])),
+                withCheckExpr: nil)
+    ]
+    let r = qexec.executeQuery(ctx, parse("SELECT id, tenant_id FROM invoices"))
+    check r.success
+    check r.rows.len == 1
+    check r.rows[0]["tenant_id"] == "company-a"
+
 suite "UTF-8 Support":
   test "Tokenize UTF-8 identifiers":
     let tokens = lex.tokenize("SELECT имя FROM потребители")
@@ -2303,7 +2366,8 @@ suite "UTF-8 Support":
     check ast.stmts[0].selWhere.whereExpr.binRight.strVal == "София"
 
   test "Execute query with UTF-8 data":
-    var db = newLSMTree("")
+    let tmpDir = getTempDir() / "baradb_test_" & $getMonoTime().ticks
+    var db = newLSMTree(tmpDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE TABLE потребители (имя TEXT, град TEXT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO потребители (имя, град) VALUES ('Иван', 'София'), ('Мария', 'Пловдив')"))
@@ -2315,7 +2379,8 @@ suite "UTF-8 Support":
 
 suite "B-Tree Range Scan":
   test "BETWEEN uses index range scan":
-    var db = newLSMTree("")
+    let tmpDir = getTempDir() / "baradb_test_" & $getMonoTime().ticks
+    var db = newLSMTree(tmpDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE TABLE products (id INTEGER, name TEXT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO products (id, name) VALUES (1, 'apple'), (2, 'banana'), (3, 'cherry'), (4, 'date'), (5, 'elderberry')"))
@@ -2325,7 +2390,8 @@ suite "B-Tree Range Scan":
     check res.rows.len == 3
 
   test "Greater than uses index range scan":
-    var db = newLSMTree("")
+    let tmpDir = getTempDir() / "baradb_test_" & $getMonoTime().ticks
+    var db = newLSMTree(tmpDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE TABLE nums (id INTEGER, val TEXT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO nums (id, val) VALUES (1, '10'), (2, '20'), (3, '30'), (4, '40'), (5, '50')"))
@@ -2335,7 +2401,8 @@ suite "B-Tree Range Scan":
     check res.rows.len == 3
 
   test "Less than or equal uses index range scan":
-    var db = newLSMTree("")
+    let tmpDir = getTempDir() / "baradb_test_" & $getMonoTime().ticks
+    var db = newLSMTree(tmpDir)
     var ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE TABLE nums2 (id INTEGER, val TEXT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO nums2 (id, val) VALUES (1, '10'), (2, '20'), (3, '30'), (4, '40'), (5, '50')"))
@@ -2458,13 +2525,18 @@ suite "Enhanced Migrations":
 suite "Parameterized queries":
   var db: LSMTree
   var ctx: qexec.ExecutionContext
+  var tmpDir: string
+  var paramInitialized = false
 
   setup:
-    db = newLSMTree("")
-    ctx = qexec.newExecutionContext(db)
-    discard qexec.executeQuery(ctx, parse("CREATE TABLE users (id INT, name TEXT, age INT)"))
-    discard qexec.executeQuery(ctx, parse("INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)"))
-    discard qexec.executeQuery(ctx, parse("INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)"))
+    if not paramInitialized:
+      tmpDir = getTempDir() / "baradb_param_test_" & $getMonoTime().ticks
+      db = newLSMTree(tmpDir)
+      ctx = qexec.newExecutionContext(db)
+      discard qexec.executeQuery(ctx, parse("CREATE TABLE users (id INT, name TEXT, age INT, active BOOLEAN)"))
+      discard qexec.executeQuery(ctx, parse("INSERT INTO users (id, name, age, active) VALUES (1, 'Alice', 30, true)"))
+      discard qexec.executeQuery(ctx, parse("INSERT INTO users (id, name, age, active) VALUES (2, 'Bob', 25, false)"))
+      paramInitialized = true
 
   test "SELECT with placeholder params":
     let sql = "SELECT * FROM users WHERE id = ?"
@@ -2583,6 +2655,34 @@ suite "Parameterized queries":
     check r.success
     check r.rows.len >= 1
 
+  test "JSON contains @>":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE IF NOT EXISTS jsontest2 (id INT PRIMARY KEY, data JSON)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO jsontest2 (id, data) VALUES (1, '{\"name\": \"Alice\", \"age\": 30}')"))
+    let r = qexec.executeQuery(ctx, parse("SELECT id FROM jsontest2 WHERE data @> '{\"name\": \"Alice\"}'"))
+    check r.success
+    check r.rows.len == 1
+    check r.rows[0]["id"] == "1"
+
+  test "JSON contained by <@":
+    let r = qexec.executeQuery(ctx, parse("SELECT id FROM jsontest2 WHERE '{\"name\": \"Alice\"}' <@ data"))
+    check r.success
+    check r.rows.len == 1
+
+  test "JSON has key json_has_key":
+    let r = qexec.executeQuery(ctx, parse("SELECT id FROM jsontest2 WHERE json_has_key(data, 'name') = 'true'"))
+    check r.success
+    check r.rows.len == 1
+
+  test "JSON has any key ?|":
+    let r = qexec.executeQuery(ctx, parse("SELECT id FROM jsontest2 WHERE data ?| '[\"name\", \"missing\"]'"))
+    check r.success
+    check r.rows.len == 1
+
+  test "JSON has all keys ?&":
+    let r = qexec.executeQuery(ctx, parse("SELECT id FROM jsontest2 WHERE data ?& '[\"name\", \"age\"]'"))
+    check r.success
+    check r.rows.len == 1
+
   test "FTS match operator @@ parse":
     let ast = parse("SELECT * FROM docs WHERE content @@ 'hello'")
     check ast.stmts[0].kind == nkSelect
@@ -2630,9 +2730,11 @@ suite "Parameterized queries":
 suite "Window Functions":
   var db: LSMTree
   var ctx: qexec.ExecutionContext
+  var tmpDir: string
 
   setup:
-    db = newLSMTree("")
+    tmpDir = getTempDir() / "baradb_window_test_" & $getMonoTime().ticks
+    db = newLSMTree(tmpDir)
     ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE TABLE employees (id INT, name TEXT, department TEXT, salary INT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (1, 'Alice', 'Engineering', 90000)"))
@@ -2640,6 +2742,9 @@ suite "Window Functions":
     discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (3, 'Charlie', 'Sales', 70000)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (4, 'Diana', 'Sales', 75000)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (5, 'Eve', 'Engineering', 95000)"))
+
+  teardown:
+    removeDir(tmpDir)
 
   test "ROW_NUMBER with PARTITION BY and ORDER BY":
     let r = qexec.executeQuery(ctx, parse("SELECT name, department, ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS rn FROM employees"))
@@ -2692,12 +2797,38 @@ suite "Window Functions":
     for row in r.rows:
       check row["bucket"] in @["1", "2"]
 
+  test "FIRST_VALUE with frame":
+    let r = qexec.executeQuery(ctx, parse("SELECT name, salary, FIRST_VALUE(salary) OVER (ORDER BY salary ROWS BETWEEN 1 PRECEDING AND CURRENT ROW) AS first_sal FROM employees"))
+    check r.success
+    check r.rows.len == 5
+    for row in r.rows:
+      if row["name"] == "Charlie":
+        check row["first_sal"] == "70000"
+      if row["name"] == "Diana":
+        check row["first_sal"] == "70000"
+      if row["name"] == "Bob":
+        check row["first_sal"] == "75000"
+
+  test "LAST_VALUE with frame":
+    let r = qexec.executeQuery(ctx, parse("SELECT name, salary, LAST_VALUE(salary) OVER (ORDER BY salary ROWS BETWEEN CURRENT ROW AND 1 FOLLOWING) AS last_sal FROM employees"))
+    check r.success
+    check r.rows.len == 5
+    for row in r.rows:
+      if row["name"] == "Charlie":
+        check row["last_sal"] == "75000"
+      if row["name"] == "Diana":
+        check row["last_sal"] == "80000"
+      if row["name"] == "Bob":
+        check row["last_sal"] == "90000"
+
 suite "GROUP BY Aggregates":
   var db: LSMTree
   var ctx: qexec.ExecutionContext
+  var tmpDir: string
 
   setup:
-    db = newLSMTree("")
+    tmpDir = getTempDir() / "baradb_group_test_" & $getMonoTime().ticks
+    db = newLSMTree(tmpDir)
     ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE TABLE sales (id INT, dept TEXT, amount INT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (1, 'A', 100)"))
@@ -2705,6 +2836,9 @@ suite "GROUP BY Aggregates":
     discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (3, 'B', 150)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (4, 'B', 50)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (5, 'C', 300)"))
+
+  teardown:
+    removeDir(tmpDir)
 
   test "GROUP BY with COUNT(*)":
     let r = qexec.executeQuery(ctx, parse("SELECT dept, COUNT(*) AS cnt FROM sales GROUP BY dept"))
@@ -2807,6 +2941,26 @@ suite "GROUP BY Aggregates":
     let r = qexec.executeQuery(ctx, parse("SELECT * FROM (SELECT name, dept, salary FROM emp) PIVOT (SUM(salary) FOR dept IN ('Eng', 'Sales'))"))
     check r.success
     check r.rows.len == 4  # one row per employee
+
+  test "CUBE execution":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, SUM(amount) AS total FROM sales GROUP BY CUBE (dept)"))
+    check r.success
+    # 3 dept groups + 1 grand total = 4 rows
+    check r.rows.len == 4
+
+  test "GROUPING SETS execution":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, SUM(amount) AS total FROM sales GROUP BY GROUPING SETS ((dept), ())"))
+    check r.success
+    # 3 dept groups + 1 grand total = 4 rows
+    check r.rows.len == 4
+
+  test "UNPIVOT execution":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE pivoted (name TEXT, eng_salary INT, sales_salary INT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO pivoted (name, eng_salary, sales_salary) VALUES ('Alice', 90000, 0)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO pivoted (name, eng_salary, sales_salary) VALUES ('Bob', 0, 70000)"))
+    let r = qexec.executeQuery(ctx, parse("SELECT * FROM pivoted UNPIVOT (salary FOR dept IN (eng_salary, sales_salary))"))
+    check r.success
+    check r.rows.len == 4
 
 # JOIN tests
 include "join_tests"

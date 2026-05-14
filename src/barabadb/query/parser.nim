@@ -41,6 +41,7 @@ proc parseCreateType(p: var Parser): Node
 proc parseOverClause(p: var Parser): Node
 proc parseFrameSpec(p: var Parser): Node
 proc parseFrameBoundary(p: var Parser): string
+proc parseSetVar(p: var Parser): Node
 
 proc parsePrimary(p: var Parser): Node =
   let tok = p.peek()
@@ -60,6 +61,12 @@ proc parsePrimary(p: var Parser): Node =
   of tkNull:
     discard p.advance()
     Node(kind: nkNullLit, line: tok.line, col: tok.col)
+  of tkCurrentUser:
+    discard p.advance()
+    Node(kind: nkCurrentUser, line: tok.line, col: tok.col)
+  of tkCurrentRole:
+    discard p.advance()
+    Node(kind: nkCurrentRole, line: tok.line, col: tok.col)
   of tkIdent, tkRowNumber, tkRank, tkDenseRank, tkLead, tkLag, tkFirstValue, tkLastValue, tkNtile:
     discard p.advance()
     let funcName = tok.value
@@ -231,7 +238,7 @@ proc parseFrameBoundary(p: var Parser): string =
     else:
       raise newException(ValueError, "Expected PRECEDING or FOLLOWING after UNBOUNDED")
   elif p.match(tkCurrent):
-    discard p.expect(tkRows)
+    discard p.expect(tkRow)
     return "CURRENT ROW"
   else:
     # Expect a simple integer literal for offset boundaries
@@ -318,7 +325,7 @@ proc parseComparison(p: var Parser): Node =
     discard p.advance()  # consume NULL token (assumed)
     return Node(kind: nkIsExpr, isExpr: result, isNegated: negated,
                 line: tok.line, col: tok.col)
-  while p.peek().kind in {tkEq, tkNotEq, tkLt, tkLtEq, tkGt, tkGtEq, tkFtsMatch, tkDistanceOp}:
+  while p.peek().kind in {tkEq, tkNotEq, tkLt, tkLtEq, tkGt, tkGtEq, tkFtsMatch, tkDistanceOp, tkJsonContains, tkJsonContainedBy, tkJsonHasAny, tkJsonHasAll}:
     let op = case p.peek().kind
       of tkEq: bkEq
       of tkNotEq: bkNotEq
@@ -328,6 +335,10 @@ proc parseComparison(p: var Parser): Node =
       of tkGtEq: bkGtEq
       of tkFtsMatch: bkFtsMatch
       of tkDistanceOp: bkDistance
+      of tkJsonContains: bkJsonContains
+      of tkJsonContainedBy: bkJsonContainedBy
+      of tkJsonHasAny: bkJsonHasAny
+      of tkJsonHasAll: bkJsonHasAll
       else: bkEq
     let tok = p.advance()
     let right = p.parseAddSub()
@@ -1056,13 +1067,13 @@ proc parseAlterTable(p: var Parser): Node =
   # Check for ENABLE/DISABLE ROW LEVEL SECURITY
   if p.peek().kind == tkEnable:
     discard p.advance()
-    discard p.expect(tkIdent)  # ROW
+    discard p.expect(tkRow)    # ROW
     discard p.expect(tkIdent)  # LEVEL
     discard p.expect(tkIdent)  # SECURITY
     return Node(kind: nkEnableRLS, erlsTable: tableName, line: tok.line, col: tok.col)
   elif p.peek().kind == tkDisable:
     discard p.advance()
-    discard p.expect(tkIdent)  # ROW
+    discard p.expect(tkRow)    # ROW
     discard p.expect(tkIdent)  # LEVEL
     discard p.expect(tkIdent)  # SECURITY
     return Node(kind: nkDisableRLS, drlsTable: tableName, line: tok.line, col: tok.col)
@@ -1422,6 +1433,35 @@ proc parseRevoke(p: var Parser): Node =
   result = Node(kind: nkRevoke, rvPrivilege: priv, rvTable: tableName,
                 rvGrantee: grantee, line: tok.line, col: tok.col)
 
+proc parseSetVar(p: var Parser): Node =
+  let tok = p.expect(tkSet)
+  var varName = p.expect(tkIdent).value
+  while p.peek().kind == tkDot:
+    discard p.advance()
+    varName.add(".")
+    varName.add(p.expect(tkIdent).value)
+  if p.match(tkEq) or p.match(tkTo):
+    discard
+  let valTok = p.peek()
+  var valStr = ""
+  case valTok.kind
+  of tkStringLit:
+    valStr = valTok.value
+    discard p.advance()
+  of tkIntLit:
+    valStr = valTok.value
+    discard p.advance()
+  of tkFloatLit:
+    valStr = valTok.value
+    discard p.advance()
+  of tkIdent:
+    valStr = valTok.value
+    discard p.advance()
+  else:
+    raise newException(ValueError, "Expected value after SET " & varName)
+  result = Node(kind: nkSetVar, svName: varName, svValue: valStr,
+                line: tok.line, col: tok.col)
+
 proc parseStatement*(p: var Parser): Node =
   case p.peek().kind
   of tkWith, tkSelect: p.parseSelect()
@@ -1483,6 +1523,8 @@ proc parseStatement*(p: var Parser): Node =
     p.parseGrant()
   of tkRevoke:
     p.parseRevoke()
+  of tkSet:
+    p.parseSetVar()
   of tkApply:
     if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkMigration:
       p.parseApplyMigration()

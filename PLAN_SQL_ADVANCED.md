@@ -3,6 +3,8 @@
 > **Визия**: BaraDB е самостоятелен, универсален SQL engine с Nim ядро, поддържащ модерни SQL:2023 разширения — Property Graph, Vector Search, JSON документи и прозоречни функции, в една вградена или клиент/сървър конфигурация.
 > 
 > **Принцип**: Само основи. Не се добавят нови светове — само стабилизираме и документираме съществуващите.
+>
+> **Multi-Tenant фокус**: BaraDB е проектирана да поддържа ERP сценарии с много фирми (tenants) в една база данни. Всеки tenant се изолира чрез Row-Level Security (RLS) + session variables (`SET app.tenant_id = 'X'`), а не чрез отделни бази.
 
 ---
 
@@ -10,7 +12,7 @@
 
 - **Фаза 1 (Base SQL + MVCC + Raft)**: BaraDB core engine
 - **Фаза 2 (Advanced SQL)**: Разработена с **Xiaomi Mimo** (`mimo-v2.5-pro`) — Window Functions, MERGE, LATERAL JOIN, Advanced Aggregates, PIVOT/UNPIVOT, SQL/PGQ Property Graph
-- **Фаза 3 (Stabilization)**: Текуща — Vector SQL Integration, тестове, документация
+- **Фаза 3 (Stabilization + Multi-Tenant)**: Текуща — Vector SQL Integration, Session Variables, `current_user`/`current_role`, RLS tenant isolation, тестове, документация
 
 ---
 
@@ -167,6 +169,49 @@ SELECT * FROM GRAPH_TABLE(org_chart
 
 ---
 
+## Част 1.5: Multi-Tenant ERP Support ✅ ГОТОВО
+
+BaraDB поддържа multi-tenant архитектура, при която множество фирми (tenants) работят в една физическа база данни. Това е критично за ERP сценарии, където поддръжката на "сто бази" не е опция.
+
+### Механизъм
+
+| Компонент | Описание |
+|-----------|----------|
+| **Session Variables** | `SET app.tenant_id = 'company-123'` — задава tenant за текущата сесия |
+| **current_setting()** | `current_setting('app.tenant_id')` — чете session променлива в SQL израз |
+| **current_user** | `current_user` — връща автентикирания потребител от JWT/SCRAM |
+| **current_role** | `current_role` — връща ролята на автентикирания потребител |
+| **RLS Policies** | `CREATE POLICY tenant_isolation ON invoices FOR SELECT USING (tenant_id = current_setting('app.tenant_id'))` |
+| **Auth Bridge** | `server.nim` и `httpserver.nim` попълват `ExecutionContext.currentUser`/`currentRole` след верификация |
+
+### Пример
+
+```sql
+-- Една таблица за всички фирми
+CREATE TABLE invoices (
+  id SERIAL PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  data JSONB
+);
+
+-- Изолация чрез RLS
+CREATE POLICY tenant_isolation ON invoices
+  FOR SELECT USING (tenant_id = current_setting('app.tenant_id'));
+
+-- Всяка сесия вижда само своя tenant
+SET app.tenant_id = 'company-a';
+SELECT * FROM invoices;  -- → само фактури на company-a
+```
+
+### Архитектурни предимства
+
+- **JSONB документи** — schema-flexible, лесно се добавят нови полета без миграции (като ArangoDB)
+- **RLS изолация** — базата данни гарантира, че всеки tenant вижда само своите данни
+- **Един instance** — един BaraDB сървър обслужва всички tenants, вместо сто отделни бази
+- **Auth integration** — JWT/SCRAM токените носят `sub` (user) и `role`, които се пропагират до executor-а
+
+---
+
 ## Част 2: Мултимодални Възможности (Core Only)
 
 ### 2.1 JSON / JSONB Документи ✅ ГОТОВО
@@ -290,6 +335,16 @@ LIMIT 10;
 - **MERGE тестове** — поправени чрез изолиране на тестовата директория (unique temp dir per suite)
 - **Row storage escape** — `escapeRowVal()` в `execInsert` за стойности със запетай (vector literals)
 - **ORDER BY + projection** — `irpkSort` сега е преди `irpkProject` в `lowerSelect`, което позволява `ORDER BY` по колони извън `SELECT`
+- **GROUPING SETS execution** — `lowerSelect` сега проверява `selGroupingSetsKind != gskNone` освен `selGroupBy.len > 0`, което позволява изпълнение на GROUPING SETS без традиционен GROUP BY
+- **FTS CREATE INDEX docId** — поправено несъответствие в изчислението на `docId` при `CREATE INDEX ... USING FTS` (сега използва хеш на `tableName.$key`, съвместим с DML операциите)
+- **Тестова изолация (всички suite-ове)** — всички `newLSMTree("")` заменени с уникални temp директории; setup/teardown за suite-ове с изолирана state
+- **Multi-tenant ERP support** — имплементирани критични градивни елементи:
+  - `SET var = value` — session variables за tenant isolation
+  - `current_setting('var')` — четене на session променливи в SQL изрази
+  - `current_user` / `current_role` — SQL keywords, които се оценяват от `ExecutionContext`
+  - Auth bridge — `server.nim` и `httpserver.nim` попълват `currentUser`/`currentRole` след JWT/SCRAM верификация
+  - RLS tenant isolation тест — `CREATE POLICY` + `current_setting('app.tenant_id')` работи за multi-tenant филтрация
+  - `evalExpr` вече предава `ctx` рекурсивно — поправен бъг, при който `current_user`/`current_setting` връщаха празни стойности в под-изрази
 
 ---
 

@@ -40,6 +40,7 @@ type
     nkDisableRLS
     nkGrant
     nkRevoke
+    nkSetVar
 
     # Clauses
     nkFrom
@@ -78,6 +79,8 @@ type
     nkIsExpr
     nkStar
     nkPlaceholder
+    nkCurrentUser
+    nkCurrentRole
 
     # Graph-specific
     nkGraphTraversal
@@ -144,6 +147,10 @@ type
     bkJsonPathText = "->>"
     bkFtsMatch = "@@"
     bkDistance = "<->"
+    bkJsonContains = "@>"
+    bkJsonContainedBy = "<@"
+    bkJsonHasAny = "?|"
+    bkJsonHasAll = "?&"
 
   UnaryOpKind* = enum
     ukNeg = "-"
@@ -317,6 +324,9 @@ type
       rvPrivilege*: string
       rvTable*: string
       rvGrantee*: string
+    of nkSetVar:
+      svName*: string
+      svValue*: string
     of nkApplyMigration:
       amName*: string
     of nkMigrationStatus:
@@ -483,6 +493,10 @@ type
     of nkStar:
       discard
     of nkPlaceholder:
+      discard
+    of nkCurrentUser:
+      discard
+    of nkCurrentRole:
       discard
     of nkPropertyDef:
       pdName*: string

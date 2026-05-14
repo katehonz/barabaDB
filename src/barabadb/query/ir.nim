@@ -29,6 +29,10 @@ type
     irIsNull, irIsNotNull
     irFtsMatch
     irDistance
+    irJsonContains
+    irJsonContainedBy
+    irJsonHasAny
+    irJsonHasAll
 
   IRAggregate* = enum
     irCount, irSum, irAvg, irMin, irMax

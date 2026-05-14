@@ -2,6 +2,26 @@
 
 All notable changes to BaraDB are documented in this file.
 
+## [Unreleased] — SQL:2023 Stabilization
+
+### Fixed
+
+- **GROUPING SETS execution** — `lowerSelect` now creates `irpkGroupBy` when `selGroupingSetsKind != gskNone`, even if `selGroupBy` is empty. Previously, queries like `GROUP BY GROUPING SETS ((dept), ())` bypassed the grouping executor entirely.
+- **FTS CREATE INDEX docId mismatch** — `CREATE INDEX ... USING FTS` now computes `docId` as a hash of `tableName.$key`, consistent with DML operations (`INSERT`/`UPDATE`/`DELETE`). Previously, index creation used sequential IDs (0, 1, 2...), causing `@@` queries to never match indexed documents.
+- **Test isolation (all suites)** — All `newLSMTree("")` calls replaced with unique temporary directories per suite. Eliminates WAL accumulation issues and flaky tests caused by shared database state between test runs.
+- **Window frame parser** — `parseFrameBoundary` no longer consumes `tkRow` after `tkCurrent` incorrectly (was using `tkRows`). Also fixed `tkRow` keyword conflict with `ENABLE ROW LEVEL SECURITY` parsing.
+- **ORDER BY + SELECT projection** — `lowerSelect` now places `irpkSort` before `irpkProject`, enabling `ORDER BY` on columns not present in the `SELECT` list.
+- **UNPIVOT execution** — Verified and fixed missing test coverage for UNPIVOT transformation.
+
+### Added
+
+- **JSON operators** — `@>` (contains), `<@` (contained by), `?` (has key), `?|` (has any), `?&` (has all) now supported in lexer, parser, and executor.
+- **Window frame execution** — `ROWS BETWEEN X PRECEDING AND Y FOLLOWING` / `CURRENT ROW` frame boundaries now respected by `FIRST_VALUE` and `LAST_VALUE`.
+- **Session variables** — `SET var_name = value` and `current_setting('var_name')` for connection-scoped key/value storage.
+- **Current user/role** — `current_user` and `current_role` SQL keywords evaluate to the authenticated session's user and role.
+- **Auth-executor bridge** — Wire server and HTTP server now populate `ExecutionContext.currentUser` and `ExecutionContext.currentRole` after JWT/SCRAM authentication.
+- **Multi-tenant RLS** — Row-Level Security policies can now reference `current_user`, `current_role`, and `current_setting('app.tenant_id')` for per-tenant data isolation.
+
 ## [1.1.0] — 2026-05-13
 
 ### Added

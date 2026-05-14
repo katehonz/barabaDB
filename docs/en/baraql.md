@@ -602,6 +602,44 @@ SUM(salary) OVER (
 )
 ```
 
+## Multi-Tenant ERP
+
+BaraDB supports running multiple companies (tenants) in a single database instance, using **Row-Level Security (RLS)** combined with **session variables**.
+
+### Session Variables
+
+```sql
+SET app.tenant_id = 'company-123';
+SELECT current_setting('app.tenant_id') AS tenant;
+```
+
+### Current User / Role
+
+```sql
+SELECT current_user AS me, current_role AS my_role;
+```
+
+### RLS Tenant Isolation
+
+```sql
+-- Enable RLS on a table
+ALTER TABLE invoices ENABLE ROW LEVEL SECURITY;
+
+-- Create a policy that filters by tenant
+CREATE POLICY tenant_isolation ON invoices
+  FOR SELECT USING (tenant_id = current_setting('app.tenant_id'));
+
+-- Each session only sees its own data
+SET app.tenant_id = 'company-a';
+SELECT * FROM invoices;  -- only company-a rows
+```
+
+### Why Multi-Tenant?
+
+- **One instance, many tenants** — no need to run 100 separate databases
+- **JSONB documents** — schema-flexible storage, easy to add fields per tenant
+- **RLS guarantees isolation** — the database enforces tenant boundaries, not just the application
+
 ## Supported Keywords
 
 | Category | Keywords |
@@ -620,6 +658,7 @@ SUM(salary) OVER (
 | JSON | ->, ->> |
 | FTS | @@ (BM25 match) |
 | Recovery | RECOVER TO TIMESTAMP |
-| Functions | count, sum, avg, min, max, stddev, variance, abs, sqrt, lower, upper, len, trim, substr, now, last_insert_id |
+| Functions | count, sum, avg, min, max, stddev, variance, abs, sqrt, lower, upper, len, trim, substr, now, last_insert_id, current_setting |
+| Session | SET, current_setting, current_user, current_role |
 | Window | OVER, PARTITION BY, ROWS, RANGE, UNBOUNDED PRECEDING, CURRENT ROW, FOLLOWING |
 | Window Functions | ROW_NUMBER, RANK, DENSE_RANK, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTILE |
