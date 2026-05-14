@@ -90,6 +90,10 @@ type
     nkVectorSimilar
     nkVectorNearest
 
+    # Pivot
+    nkPivot
+    nkUnpivot
+
     # Set operations
     nkSetOp
 
@@ -158,6 +162,12 @@ type
     sdkIntersect
     sdkExcept
 
+  GroupingSetsKind* = enum
+    gskNone
+    gskGroupingSets
+    gskRollup
+    gskCube
+
   SortDir* = enum
     sdAsc
     sdDesc
@@ -175,6 +185,8 @@ type
       selJoins*: seq[Node]
       selWhere*: Node
       selGroupBy*: seq[Node]
+      selGroupingSetsKind*: GroupingSetsKind
+      selGroupingSets*: seq[seq[Node]]
       selHaving*: Node
       selOrderBy*: seq[Node]
       selLimit*: Node
@@ -325,6 +337,7 @@ type
     of nkFrom:
       fromTable*: string
       fromAlias*: string
+      fromSubquery*: Node
     of nkWhere:
       whereExpr*: Node
     of nkOrderBy:
@@ -356,6 +369,7 @@ type
     of nkFuncCall:
       funcName*: string
       funcArgs*: seq[Node]
+      funcFilter*: Node
     of nkTypeCast:
       castType*: string
       castExpr*: Node
@@ -407,11 +421,13 @@ type
       isType*: string
       isNegated*: bool
     of nkGraphTraversal:
+      gtGraphName*: string
       gtStart*: Node
       gtEdge*: string
       gtDirection*: string
       gtEnd*: Node
       gtMaxDepth*: int
+      gtReturnCols*: seq[string]
     of nkBfsQuery:
       bfsStart*: Node
       bfsTarget*: Node
@@ -442,11 +458,22 @@ type
       vnVector*: Node
       vnLimit*: int
       vnMetric*: string
+    of nkPivot:
+      pivotSource*: Node
+      pivotAgg*: Node
+      pivotForCol*: string
+      pivotInValues*: seq[string]
+    of nkUnpivot:
+      unpivotSource*: Node
+      unpivotValueCol*: string
+      unpivotForCol*: string
+      unpivotInCols*: seq[string]
     of nkJoin:
       joinKind*: JoinKind
       joinTarget*: Node
       joinOn*: Node
       joinAlias*: string
+      joinLateral*: bool
     of nkSetOp:
       setOpKind*: SetOpKind
       setOpAll*: bool

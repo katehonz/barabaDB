@@ -204,6 +204,18 @@ proc codegenPlan*(plan: IRPlan): StorageOp =
     return op
   of irpkMerge:
     return newStorageOp(sokScan)
+  of irpkPivot:
+    let sourceOp = codegenPlan(plan.pivotSource)
+    let op = newStorageOp(sokScan)
+    if sourceOp != nil: op.children.add(sourceOp)
+    return op
+  of irpkUnpivot:
+    let sourceOp = codegenPlan(plan.unpivotSource)
+    let op = newStorageOp(sokScan)
+    if sourceOp != nil: op.children.add(sourceOp)
+    return op
+  of irpkGraphTraversal:
+    return newStorageOp(sokScan)
 
 proc estimateCost*(op: StorageOp): float64 =
   if op == nil:

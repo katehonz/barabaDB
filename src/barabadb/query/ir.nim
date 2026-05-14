@@ -31,6 +31,7 @@ type
 
   IRAggregate* = enum
     irCount, irSum, irAvg, irMin, irMax
+    irArrayAgg, irStringAgg
 
   IRLiteral* = object
     case kind*: ValueKind
@@ -80,6 +81,15 @@ type
     irpkValues
     irpkExplain
     irpkWindow
+    irpkPivot
+    irpkUnpivot
+    irpkGraphTraversal
+
+  IRGroupingSetsKind* = enum
+    irgskNone
+    irgskGroupingSets
+    irgskRollup
+    irgskCube
 
   IRPlan* = ref object
     case kind*: IRPlanKind
@@ -98,12 +108,15 @@ type
       groupKeys*: seq[IRExpr]
       groupAggs*: seq[IRExpr]
       groupHaving*: IRExpr
+      groupingSetsKind*: IRGroupingSetsKind
+      groupingSets*: seq[seq[IRExpr]]
     of irpkJoin:
       joinKind*: IRJoinKind
       joinLeft*: IRPlan
       joinRight*: IRPlan
       joinCond*: IRExpr
       joinAlias*: string
+      joinLateral*: bool
     of irpkSort:
       sortSource*: IRPlan
       sortExprs*: seq[IRExpr]
@@ -157,6 +170,25 @@ type
       winFrameMode*: string
       winFrameStart*: string
       winFrameEnd*: string
+    of irpkPivot:
+      pivotSource*: IRPlan
+      pivotAgg*: IRExpr
+      pivotForCol*: string
+      pivotInValues*: seq[string]
+    of irpkUnpivot:
+      unpivotSource*: IRPlan
+      unpivotValueCol*: string
+      unpivotForCol*: string
+      unpivotInCols*: seq[string]
+    of irpkGraphTraversal:
+      graphName*: string
+      graphAlgo*: string       # "bfs", "dfs", "shortest", "pagerank"
+      graphStartNode*: string
+      graphEndNode*: string
+      graphEdgeLabel*: string
+      graphMaxDepth*: int
+      graphFilter*: IRExpr
+      graphReturnCols*: seq[string]
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -175,6 +207,7 @@ type
       aggOp*: IRAggregate
       aggArgs*: seq[IRExpr]
       aggDistinct*: bool
+      aggFilter*: IRExpr
     of irekFuncCall:
       irFunc*: string
       irFuncArgs*: seq[IRExpr]
@@ -271,6 +304,10 @@ proc inferExpr*(tc: TypeChecker, expr: IRExpr, context: Table[string, IRType]): 
       if expr.aggArgs.len > 0:
         return tc.inferExpr(expr.aggArgs[0], context)
       return nil
+    of irArrayAgg:
+      return IRType(name: "array", kind: itkArray)
+    of irStringAgg:
+      return IRType(name: "text", kind: itkScalar)
   of irekFuncCall:
     return IRType(name: "unknown", kind: itkScalar)
   of irekCast:

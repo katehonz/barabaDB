@@ -35,6 +35,7 @@ type
     tkOuter
     tkFull
     tkCross
+    tkLateral
     tkOrder
     tkBy
     tkAsc
@@ -77,6 +78,7 @@ type
     tkBetween
     tkLike
     tkILike
+    tkFilter
     tkReturning
     tkPrimary
     tkKey
@@ -120,6 +122,22 @@ type
     tkAvg
     tkMin
     tkMax
+    tkArrayAgg
+    tkStringAgg
+    tkGrouping
+    tkSets
+    tkRollup
+    tkCube
+    tkPivot
+    tkUnpivot
+    tkVertex
+    tkEdge
+    tkLabels
+    tkGraphTable
+    tkMatch
+    tkColumns
+    tkSrc
+    tkDst
     tkMerge
     tkMatched
     tkArray
@@ -226,6 +244,7 @@ const keywords*: Table[string, TokenKind] = {
   "outer": tkOuter,
   "full": tkFull,
   "cross": tkCross,
+  "lateral": tkLateral,
   "order": tkOrder,
   "by": tkBy,
   "asc": tkAsc,
@@ -268,6 +287,7 @@ const keywords*: Table[string, TokenKind] = {
   "between": tkBetween,
   "like": tkLike,
   "ilike": tkILike,
+  "filter": tkFilter,
   "returning": tkReturning,
   "primary": tkPrimary,
   "key": tkKey,
@@ -311,6 +331,25 @@ const keywords*: Table[string, TokenKind] = {
   "avg": tkAvg,
   "min": tkMin,
   "max": tkMax,
+  "array_agg": tkArrayAgg,
+  "string_agg": tkStringAgg,
+  "grouping": tkGrouping,
+  "sets": tkSets,
+  "rollup": tkRollup,
+  "cube": tkCube,
+  "pivot": tkPivot,
+  "unpivot": tkUnpivot,
+  "vertex": tkVertex,
+  "vertices": tkVertex,
+  "edge": tkEdge,
+  "edges": tkEdge,
+  "label": tkLabels,
+  "labels": tkLabels,
+  "graph_table": tkGraphTable,
+  "match": tkMatch,
+  "columns": tkColumns,
+  "src": tkSrc,
+  "dst": tkDst,
   "merge": tkMerge,
   "matched": tkMatched,
   "array": tkArray,

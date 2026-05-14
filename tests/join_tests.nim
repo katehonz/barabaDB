@@ -79,3 +79,32 @@ suite "JOIN execution":
   test "count after CROSS JOIN":
     let r = execSql(ctx, "SELECT COUNT(*) AS cnt FROM users u CROSS JOIN orders o")
     check r.rows[0]["cnt"] == "6"
+
+  test "LATERAL JOIN with correlated subquery":
+    let r = execSql(ctx,
+      "SELECT u.name, recent.total FROM users u JOIN LATERAL (SELECT o.total FROM orders o WHERE o.user_id = u.id ORDER BY o.total DESC LIMIT 1) AS recent ON 1=1")
+    check r.rows.len == 1
+    check r.rows[0]["name"] == "Alice"
+    check r.rows[0]["total"] == "99.5"
+
+  test "LATERAL JOIN returns no rows when subquery empty":
+    let r = execSql(ctx,
+      "SELECT u.name, x.total FROM users u JOIN LATERAL (SELECT o.total FROM orders o WHERE o.user_id = u.id AND o.total > 1000) AS x ON 1=1")
+    check r.rows.len == 0
+
+  test "LEFT LATERAL JOIN keeps unmatched rows":
+    let r = execSql(ctx,
+      "SELECT u.name, x.total FROM users u LEFT JOIN LATERAL (SELECT o.total FROM orders o WHERE o.user_id = u.id ORDER BY o.total DESC LIMIT 1) AS x ON 1=1")
+    check r.rows.len == 2
+    # Alice has match (99.5), Bob has no orders -> NULL
+    var foundBob = false
+    for row in r.rows:
+      if row["name"] == "Bob":
+        check row["total"] == ""
+        foundBob = true
+    check foundBob
+
+  test "CROSS JOIN LATERAL":
+    let r = execSql(ctx,
+      "SELECT u.name, x.total FROM users u CROSS JOIN LATERAL (SELECT o.total FROM orders o WHERE o.user_id = u.id) AS x")
+    check r.rows.len == 2  # Alice has 2 orders, Bob has 0

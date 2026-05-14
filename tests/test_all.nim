@@ -969,7 +969,39 @@ suite "BaraQL Parser — Extended":
 
   test "Parse GROUP BY with HAVING":
     let ast = parse("SELECT dept, count(*) FROM employees GROUP BY dept HAVING count(*) > 5")
+    check ast.stmts[0].selGroupBy.len == 1
     check ast.stmts[0].selHaving != nil
+
+  test "Parse FILTER clause":
+    let ast = parse("SELECT COUNT(*) FILTER (WHERE active = true) FROM users")
+    check ast.stmts[0].selResult.len == 1
+    check ast.stmts[0].selResult[0].funcFilter != nil
+
+  test "Parse ROLLUP":
+    let ast = parse("SELECT dept, SUM(amount) FROM sales GROUP BY ROLLUP (dept)")
+    check ast.stmts[0].selGroupingSetsKind == gskRollup
+    check ast.stmts[0].selGroupBy.len == 1
+
+  test "Parse CUBE":
+    let ast = parse("SELECT dept, job, SUM(amount) FROM sales GROUP BY CUBE (dept, job)")
+    check ast.stmts[0].selGroupingSetsKind == gskCube
+    check ast.stmts[0].selGroupBy.len == 2
+
+  test "Parse GROUPING SETS":
+    let ast = parse("SELECT dept, job, SUM(amount) FROM sales GROUP BY GROUPING SETS ((dept), (job), ())")
+    check ast.stmts[0].selGroupingSetsKind == gskGroupingSets
+    check ast.stmts[0].selGroupingSets.len == 3
+
+  test "Parse PIVOT":
+    let ast = parse("SELECT * FROM (SELECT dept, salary FROM emp) PIVOT (SUM(salary) FOR dept IN ('Eng', 'Sales'))")
+    check ast.stmts[0].selFrom.kind == nkPivot
+    check ast.stmts[0].selFrom.pivotForCol == "dept"
+    check ast.stmts[0].selFrom.pivotInValues.len == 2
+
+  test "Parse GRAPH_TABLE":
+    let ast = parse("SELECT * FROM GRAPH_TABLE(org_chart MATCH (e)-[r]->(d) COLUMNS (e.name, d.name))")
+    check ast.stmts[0].selFrom.kind == nkGraphTraversal
+    check ast.stmts[0].selFrom.gtGraphName == "org_chart"
 
   test "Parse ORDER BY with direction":
     let ast = parse("SELECT name FROM users ORDER BY age DESC")
@@ -993,6 +1025,25 @@ suite "BaraQL Parser — Extended":
   test "Parse multiple JOINs":
     let ast = parse("SELECT * FROM a JOIN b ON a.id = b.aid JOIN c ON b.id = c.bid")
     check ast.stmts[0].selJoins.len == 2
+
+  test "Parse LATERAL JOIN":
+    let ast = parse("SELECT u.name, x.total FROM users u JOIN LATERAL (SELECT o.total FROM orders o WHERE o.user_id = u.id) AS x ON 1=1")
+    check ast.stmts[0].selJoins.len == 1
+    check ast.stmts[0].selJoins[0].joinLateral == true
+    check ast.stmts[0].selJoins[0].joinTarget.kind == nkSubquery
+    check ast.stmts[0].selJoins[0].joinAlias == "x"
+
+  test "Parse LEFT LATERAL JOIN":
+    let ast = parse("SELECT u.name FROM users u LEFT JOIN LATERAL (SELECT 1) AS x ON 1=1")
+    check ast.stmts[0].selJoins.len == 1
+    check ast.stmts[0].selJoins[0].joinKind == jkLeft
+    check ast.stmts[0].selJoins[0].joinLateral == true
+
+  test "Parse CROSS JOIN LATERAL":
+    let ast = parse("SELECT * FROM users u CROSS JOIN LATERAL (SELECT 1) AS x")
+    check ast.stmts[0].selJoins.len == 1
+    check ast.stmts[0].selJoins[0].joinKind == jkCross
+    check ast.stmts[0].selJoins[0].joinLateral == true
 
   test "Parse CTE (WITH)":
     let ast = parse("WITH active AS (SELECT * FROM users WHERE active = true) SELECT * FROM active")
@@ -2640,6 +2691,122 @@ suite "Window Functions":
     check r.rows.len == 5
     for row in r.rows:
       check row["bucket"] in @["1", "2"]
+
+suite "GROUP BY Aggregates":
+  var db: LSMTree
+  var ctx: qexec.ExecutionContext
+
+  setup:
+    db = newLSMTree("")
+    ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE sales (id INT, dept TEXT, amount INT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (1, 'A', 100)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (2, 'A', 200)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (3, 'B', 150)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (4, 'B', 50)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO sales (id, dept, amount) VALUES (5, 'C', 300)"))
+
+  test "GROUP BY with COUNT(*)":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, COUNT(*) AS cnt FROM sales GROUP BY dept"))
+    check r.success
+    check r.rows.len == 3
+
+  test "GROUP BY with SUM":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, SUM(amount) AS total FROM sales GROUP BY dept"))
+    check r.success
+    check r.rows.len == 3
+    var foundA = false
+    for row in r.rows:
+      if row["dept"] == "A":
+        check row["total"] == "300.0"
+        foundA = true
+    check foundA
+
+  test "GROUP BY with AVG":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, AVG(amount) AS avg_amt FROM sales GROUP BY dept"))
+    check r.success
+    check r.rows.len == 3
+    var foundB = false
+    for row in r.rows:
+      if row["dept"] == "B":
+        check row["avg_amt"] == "100.0"
+        foundB = true
+    check foundB
+
+  test "GROUP BY with MIN and MAX":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, MIN(amount) AS lo, MAX(amount) AS hi FROM sales GROUP BY dept"))
+    check r.success
+    check r.rows.len == 3
+    var foundA = false
+    for row in r.rows:
+      if row["dept"] == "A":
+        check row["lo"] == "100"
+        check row["hi"] == "200"
+        foundA = true
+    check foundA
+
+  test "GROUP BY with HAVING":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, SUM(amount) AS total FROM sales GROUP BY dept HAVING SUM(amount) > 200"))
+    check r.success
+    check r.rows.len == 2  # A (300) and C (300)
+    for row in r.rows:
+      check row["dept"] in @["A", "C"]
+
+  test "GROUP BY with multiple aggregates":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, COUNT(*) AS cnt, SUM(amount) AS total, AVG(amount) AS avg_amt FROM sales GROUP BY dept"))
+    check r.success
+    check r.rows.len == 3
+
+  test "COUNT with FILTER (WHERE ...)":
+    let r = qexec.executeQuery(ctx, parse("SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE amount > 100) AS big FROM sales"))
+    check r.success
+    check r.rows.len == 1
+    check r.rows[0]["total"] == "5"
+    check r.rows[0]["big"] == "3"
+
+  test "SUM with FILTER (WHERE ...)":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, SUM(amount) FILTER (WHERE amount > 100) AS big_total FROM sales GROUP BY dept"))
+    check r.success
+    check r.rows.len == 3
+    var foundA = false
+    for row in r.rows:
+      if row["dept"] == "A":
+        check row["big_total"] == "200.0"
+        foundA = true
+    check foundA
+
+  test "ARRAY_AGG":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, ARRAY_AGG(amount) AS amounts FROM sales GROUP BY dept"))
+    check r.success
+    check r.rows.len == 3
+    var foundA = false
+    for row in r.rows:
+      if row["dept"] == "A":
+        check "100" in row["amounts"]
+        check "200" in row["amounts"]
+        foundA = true
+    check foundA
+
+  test "STRING_AGG":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, STRING_AGG(amount, ',') AS vals FROM sales GROUP BY dept"))
+    check r.success
+    check r.rows.len == 3
+
+  test "ROLLUP":
+    let r = qexec.executeQuery(ctx, parse("SELECT dept, SUM(amount) AS total FROM sales GROUP BY ROLLUP (dept)"))
+    check r.success
+    # 3 dept groups + 1 grand total = 4 rows
+    check r.rows.len == 4
+
+  test "PIVOT":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE emp (name TEXT, dept TEXT, salary INT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO emp (name, dept, salary) VALUES ('Alice', 'Eng', 90000)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO emp (name, dept, salary) VALUES ('Bob', 'Eng', 80000)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO emp (name, dept, salary) VALUES ('Charlie', 'Sales', 70000)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO emp (name, dept, salary) VALUES ('Diana', 'Sales', 75000)"))
+    let r = qexec.executeQuery(ctx, parse("SELECT * FROM (SELECT name, dept, salary FROM emp) PIVOT (SUM(salary) FOR dept IN ('Eng', 'Sales'))"))
+    check r.success
+    check r.rows.len == 4  # one row per employee
 
 # JOIN tests
 include "join_tests"

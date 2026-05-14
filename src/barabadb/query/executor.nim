@@ -208,7 +208,7 @@ proc selectToSql(node: Node): string =
     if e.exprAlias.len > 0:
       result.add(" AS " & e.exprAlias)
   # FROM
-  if node.selFrom != nil and node.selFrom.fromTable.len > 0:
+  if node.selFrom != nil and node.selFrom.kind == nkFrom and node.selFrom.fromTable.len > 0:
     result.add(" FROM " & node.selFrom.fromTable)
     if node.selFrom.fromAlias.len > 0:
       result.add(" AS " & node.selFrom.fromAlias)
@@ -221,7 +221,10 @@ proc selectToSql(node: Node): string =
         of jkRight: "RIGHT JOIN"
         of jkFull: "FULL JOIN"
         of jkCross: "CROSS JOIN"
-      result.add(" " & jkStr & " " & j.joinTarget.fromTable)
+      if j.joinLateral:
+        result.add(" " & jkStr & " LATERAL (subquery)")
+      else:
+        result.add(" " & jkStr & " " & j.joinTarget.fromTable)
       if j.joinAlias.len > 0:
         result.add(" AS " & j.joinAlias)
       if j.joinOn != nil:
@@ -666,6 +669,13 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       let rows = executePlan(ctx, expr.existsSubquery)
       return if rows.len > 0: "true" else: "false"
     return "false"
+  of irekAggregate:
+    # Look up pre-computed aggregate from group row
+    let prefix = "$agg_" & $expr.aggOp & "_"
+    for k, v in row:
+      if k.startsWith(prefix):
+        return v
+    return ""
   else: return ""
 
 proc lowerExpr*(node: Node): IRExpr
@@ -1123,7 +1133,7 @@ proc lowerExpr*(node: Node): IRExpr =
     result.unExpr = lowerExpr(node.unOperand)
   of nkFuncCall:
     case node.funcName.toLower()
-    of "count", "sum", "avg", "min", "max":
+    of "count", "sum", "avg", "min", "max", "array_agg", "string_agg":
       result = IRExpr(kind: irekAggregate)
       case node.funcName.toLower()
       of "count": result.aggOp = irCount
@@ -1131,9 +1141,13 @@ proc lowerExpr*(node: Node): IRExpr =
       of "avg": result.aggOp = irAvg
       of "min": result.aggOp = irMin
       of "max": result.aggOp = irMax
+      of "array_agg": result.aggOp = irArrayAgg
+      of "string_agg": result.aggOp = irStringAgg
       else: discard
       result.aggArgs = @[]
       for arg in node.funcArgs: result.aggArgs.add(lowerExpr(arg))
+      if node.funcFilter != nil:
+        result.aggFilter = lowerExpr(node.funcFilter)
     else:
       result = IRExpr(kind: irekFuncCall)
       result.irFunc = node.funcName
@@ -1210,9 +1224,50 @@ proc lowerExpr*(node: Node): IRExpr =
 
 proc lowerSelect*(node: Node): IRPlan =
   result = IRPlan(kind: irpkScan)
-  if node.selFrom != nil and node.selFrom.fromTable.len > 0:
-    result.scanTable = node.selFrom.fromTable
-    result.scanAlias = node.selFrom.fromAlias
+  if node.selFrom != nil:
+    if node.selFrom.kind == nkPivot:
+      # PIVOT: source PIVOT (agg(val) FOR col IN ('v1', 'v2'))
+      let pivotSrc = node.selFrom.pivotSource
+      var pivotSource: IRPlan
+      if pivotSrc.kind == nkFrom and pivotSrc.fromSubquery != nil:
+        pivotSource = lowerSelect(pivotSrc.fromSubquery)
+      elif pivotSrc.kind == nkFrom:
+        pivotSource = IRPlan(kind: irpkScan)
+        pivotSource.scanTable = pivotSrc.fromTable
+        pivotSource.scanAlias = pivotSrc.fromAlias
+      else:
+        pivotSource = lowerSelect(Node(kind: nkSelect, selFrom: pivotSrc,
+                                        selResult: @[Node(kind: nkStar)],
+                                        selJoins: @[], selGroupBy: @[],
+                                        line: node.line, col: node.col))
+      let pivotPlan = IRPlan(kind: irpkPivot)
+      pivotPlan.pivotSource = pivotSource
+      pivotPlan.pivotAgg = lowerExpr(node.selFrom.pivotAgg)
+      pivotPlan.pivotForCol = node.selFrom.pivotForCol
+      pivotPlan.pivotInValues = node.selFrom.pivotInValues
+      result = pivotPlan
+    elif node.selFrom.kind == nkUnpivot:
+      let unpivotSource = lowerSelect(Node(kind: nkSelect, selFrom: node.selFrom.unpivotSource,
+                                            selResult: @[Node(kind: nkStar)],
+                                            selJoins: @[], selGroupBy: @[],
+                                            line: node.line, col: node.col))
+      let unpivotPlan = IRPlan(kind: irpkUnpivot)
+      unpivotPlan.unpivotSource = unpivotSource
+      unpivotPlan.unpivotValueCol = node.selFrom.unpivotValueCol
+      unpivotPlan.unpivotForCol = node.selFrom.unpivotForCol
+      unpivotPlan.unpivotInCols = node.selFrom.unpivotInCols
+      result = unpivotPlan
+    elif node.selFrom.kind == nkGraphTraversal:
+      let graphPlan = IRPlan(kind: irpkGraphTraversal)
+      graphPlan.graphName = node.selFrom.gtGraphName
+      graphPlan.graphAlgo = "bfs"
+      graphPlan.graphEdgeLabel = node.selFrom.gtEdge
+      graphPlan.graphMaxDepth = node.selFrom.gtMaxDepth
+      graphPlan.graphReturnCols = node.selFrom.gtReturnCols
+      result = graphPlan
+    elif node.selFrom.fromTable.len > 0:
+      result.scanTable = node.selFrom.fromTable
+      result.scanAlias = node.selFrom.fromAlias
 
   # Build JOIN chain
   for joinNode in node.selJoins:
@@ -1224,13 +1279,18 @@ proc lowerSelect*(node: Node): IRPlan =
       of jkRight: joinPlan.joinKind = irjkRight
       of jkFull: joinPlan.joinKind = irjkFull
       of jkCross: joinPlan.joinKind = irjkCross
+      joinPlan.joinLateral = joinNode.joinLateral
       joinPlan.joinLeft = result
-      joinPlan.joinRight = IRPlan(kind: irpkScan)
-      if joinNode.joinTarget != nil and joinNode.joinTarget.kind == nkFrom:
-        joinPlan.joinRight.scanTable = joinNode.joinTarget.fromTable
-        joinPlan.joinRight.scanAlias = joinNode.joinTarget.fromAlias
+      if joinNode.joinLateral and joinNode.joinTarget != nil and joinNode.joinTarget.kind == nkSubquery:
+        # LATERAL: right side is a full subquery plan
+        joinPlan.joinRight = lowerSelect(joinNode.joinTarget.subQuery)
       else:
-        joinPlan.joinRight.scanTable = ""
+        joinPlan.joinRight = IRPlan(kind: irpkScan)
+        if joinNode.joinTarget != nil and joinNode.joinTarget.kind == nkFrom:
+          joinPlan.joinRight.scanTable = joinNode.joinTarget.fromTable
+          joinPlan.joinRight.scanAlias = joinNode.joinTarget.fromAlias
+        else:
+          joinPlan.joinRight.scanTable = ""
       joinPlan.joinAlias = joinNode.joinAlias
       if joinNode.joinOn != nil:
         joinPlan.joinCond = lowerExpr(joinNode.joinOn)
@@ -1247,9 +1307,29 @@ proc lowerSelect*(node: Node): IRPlan =
     groupPlan.groupSource = result
     groupPlan.groupKeys = @[]
     for g in node.selGroupBy: groupPlan.groupKeys.add(lowerExpr(g))
+    # Collect aggregate expressions from SELECT list
     groupPlan.groupAggs = @[]
+    for e in node.selResult:
+      let lowered = lowerExpr(e)
+      if lowered.kind == irekAggregate:
+        groupPlan.groupAggs.add(lowered)
     if node.selHaving != nil:
       groupPlan.groupHaving = lowerExpr(node.selHaving.havingExpr)
+    # Handle grouping sets
+    case node.selGroupingSetsKind
+    of gskNone:
+      groupPlan.groupingSetsKind = irgskNone
+    of gskGroupingSets:
+      groupPlan.groupingSetsKind = irgskGroupingSets
+      groupPlan.groupingSets = @[]
+      for s in node.selGroupingSets:
+        var setExprs: seq[IRExpr] = @[]
+        for e in s: setExprs.add(lowerExpr(e))
+        groupPlan.groupingSets.add(setExprs)
+    of gskRollup:
+      groupPlan.groupingSetsKind = irgskRollup
+    of gskCube:
+      groupPlan.groupingSetsKind = irgskCube
     result = groupPlan
 
   let projectPlan = IRPlan(kind: irpkProject)
@@ -1440,9 +1520,12 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
 
     # Check if this projection contains aggregates without GROUP BY
     var hasAggs = false
+    let sourceIsGroupBy = plan.projectSource != nil and plan.projectSource.kind == irpkGroupBy
     for expr in plan.projectExprs:
       if expr != nil and expr.kind == irekAggregate:
-        hasAggs = true
+        # If source is GroupBy, aggregates are pre-computed in group rows
+        if not sourceIsGroupBy:
+          hasAggs = true
         break
 
     # Check if projection contains window functions
@@ -1492,41 +1575,61 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
                 if not k.startsWith("$") and not k.contains("."):
                   newRow[k] = v
           elif expr.kind == irekAggregate:
+            # Apply FILTER (WHERE ...) if present
+            var filteredRows = sourceRows
+            if expr.aggFilter != nil:
+              filteredRows = @[]
+              for row in sourceRows:
+                if evalExpr(expr.aggFilter, row) == "true":
+                  filteredRows.add(row)
             case expr.aggOp
             of irCount:
               if expr.aggArgs.len == 0:
-                newRow[alias] = $sourceRows.len
+                newRow[alias] = $filteredRows.len
               else:
                 var count = 0
-                for row in sourceRows:
+                for row in filteredRows:
                   let v = evalExpr(expr.aggArgs[0], row)
                   if v.len > 0: count += 1
                 newRow[alias] = $count
             of irSum:
               var sum = 0.0
-              for row in sourceRows:
+              for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row)
                 try: sum += parseFloat(v) except: discard
               newRow[alias] = $sum
             of irAvg:
               var sum = 0.0
               var count = 0
-              for row in sourceRows:
+              for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row)
                 try: sum += parseFloat(v); count += 1 except: discard
               newRow[alias] = if count > 0: $(sum / float(count)) else: "0"
             of irMin:
               var minVal = ""
-              for row in sourceRows:
+              for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row)
                 if minVal == "" or v < minVal: minVal = v
               newRow[alias] = minVal
             of irMax:
               var maxVal = ""
-              for row in sourceRows:
+              for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row)
                 if maxVal == "" or v > maxVal: maxVal = v
               newRow[alias] = maxVal
+            of irArrayAgg:
+              var arr: seq[string]
+              for row in filteredRows:
+                if expr.aggArgs.len > 0:
+                  arr.add(evalExpr(expr.aggArgs[0], row))
+              newRow[alias] = "[" & arr.join(", ") & "]"
+            of irStringAgg:
+              var parts: seq[string]
+              let delim = if expr.aggArgs.len > 1: evalExpr(expr.aggArgs[1], initTable[string, string]()) else: ","
+              for row in filteredRows:
+                if expr.aggArgs.len > 0:
+                  parts.add(evalExpr(expr.aggArgs[0], row))
+              newRow[alias] = parts.join(delim)
           else:
             let val = evalExpr(expr, if sourceRows.len > 0: sourceRows[0] else: initTable[string, string]())
             if alias.len > 0: newRow[alias] = val
@@ -1545,6 +1648,19 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             for k, v in row:
               if not k.startsWith("$") and not k.contains("."):
                 newRow[k] = v
+          elif expr.kind == irekAggregate and sourceIsGroupBy:
+            # Look up pre-computed aggregate from GroupBy row
+            let aggKey = "$agg_" & $expr.aggOp
+            var found = false
+            for k, v in row:
+              if k.startsWith(aggKey):
+                if alias.len > 0: newRow[alias] = v
+                else: newRow["col" & $i] = v
+                found = true
+                break
+            if not found:
+              if alias.len > 0: newRow[alias] = "0"
+              else: newRow["col" & $i] = "0"
           else:
             let val = evalExpr(expr, row)
             if alias.len > 0: newRow[alias] = val
@@ -1584,32 +1700,235 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
 
   of irpkGroupBy:
     let sourceRows = executePlan(ctx, plan.groupSource)
-    if plan.groupKeys.len == 0: return sourceRows
-    # Group rows by the group key values
-    var groups = initTable[string, seq[Row]]()
-    for row in sourceRows:
-      var groupKey = ""
-      for gk in plan.groupKeys:
-        groupKey &= evalExpr(gk, row) & "|"
-      if groupKey notin groups:
-        groups[groupKey] = @[]
-      groups[groupKey].add(row)
+    if plan.groupKeys.len == 0 and plan.groupingSetsKind == irgskNone: return sourceRows
+
+    # Generate grouping sets
+    var groupingSets: seq[seq[IRExpr]]
+    case plan.groupingSetsKind
+    of irgskNone:
+      groupingSets = @[plan.groupKeys]
+    of irgskGroupingSets:
+      groupingSets = plan.groupingSets
+    of irgskRollup:
+      # ROLLUP(a, b) => GROUPING SETS ((a, b), (a), ())
+      groupingSets = @[]
+      for i in countdown(plan.groupKeys.len, 0):
+        groupingSets.add(plan.groupKeys[0..<i])
+    of irgskCube:
+      # CUBE(a, b) => GROUPING SETS ((a, b), (a), (b), ())
+      groupingSets = @[@[]]  # start with empty set
+      for key in plan.groupKeys:
+        var newSets: seq[seq[IRExpr]]
+        for s in groupingSets:
+          newSets.add(s)
+          var s2 = s
+          s2.add(key)
+          newSets.add(s2)
+        groupingSets = newSets
+
     result = @[]
-    for gk, groupRows in groups:
-      # For each group, produce one row with the group key and aggregates
-      var aggRow: Table[string, string]
-      for gkExpr in plan.groupKeys:
-        if gkExpr.kind == irekField and gkExpr.fieldPath.len > 0:
-          aggRow[gkExpr.fieldPath[^1]] = evalExpr(gkExpr, groupRows[0])
-      # COUNT(*) = group size
-      aggRow["count(*)"] = $groupRows.len
-      result.add(aggRow)
+    for gkeys in groupingSets:
+      # Group rows by this set's key values
+      var groups = initTable[string, seq[Row]]()
+      for row in sourceRows:
+        var groupKey = ""
+        for gk in gkeys:
+          groupKey &= evalExpr(gk, row) & "|"
+        if groupKey notin groups:
+          groups[groupKey] = @[]
+        groups[groupKey].add(row)
+      for gk, groupRows in groups:
+        var aggRow: Table[string, string]
+        for gkExpr in gkeys:
+          if gkExpr.kind == irekField and gkExpr.fieldPath.len > 0:
+            aggRow[gkExpr.fieldPath[^1]] = evalExpr(gkExpr, groupRows[0])
+        # Compute each aggregate expression
+        for aggExpr in plan.groupAggs:
+          let aggKey = "$agg_" & $aggExpr.aggOp & "_" & $plan.groupAggs.find(aggExpr)
+          var filteredRows = groupRows
+          if aggExpr.aggFilter != nil:
+            filteredRows = @[]
+            for row in groupRows:
+              if evalExpr(aggExpr.aggFilter, row) == "true":
+                filteredRows.add(row)
+          case aggExpr.aggOp
+          of irCount:
+            if aggExpr.aggArgs.len == 0:
+              aggRow[aggKey] = $filteredRows.len
+            else:
+              var count = 0
+              for row in filteredRows:
+                let v = evalExpr(aggExpr.aggArgs[0], row)
+                if v.len > 0: count += 1
+              aggRow[aggKey] = $count
+          of irSum:
+            var sum = 0.0
+            for row in filteredRows:
+              let v = evalExpr(aggExpr.aggArgs[0], row)
+              try: sum += parseFloat(v) except: discard
+            aggRow[aggKey] = $sum
+          of irAvg:
+            var sum = 0.0
+            var count = 0
+            for row in filteredRows:
+              let v = evalExpr(aggExpr.aggArgs[0], row)
+              try: sum += parseFloat(v); count += 1 except: discard
+            aggRow[aggKey] = if count > 0: $(sum / float(count)) else: "0"
+          of irMin:
+            var minVal = ""
+            for row in filteredRows:
+              let v = evalExpr(aggExpr.aggArgs[0], row)
+              if minVal == "" or v < minVal: minVal = v
+            aggRow[aggKey] = minVal
+          of irMax:
+            var maxVal = ""
+            for row in filteredRows:
+              let v = evalExpr(aggExpr.aggArgs[0], row)
+              if maxVal == "" or v > maxVal: maxVal = v
+            aggRow[aggKey] = maxVal
+          of irArrayAgg:
+            var arr: seq[string]
+            for row in filteredRows:
+              if aggExpr.aggArgs.len > 0:
+                arr.add(evalExpr(aggExpr.aggArgs[0], row))
+            aggRow[aggKey] = "[" & arr.join(", ") & "]"
+          of irStringAgg:
+            var parts: seq[string]
+            let delim = if aggExpr.aggArgs.len > 1: evalExpr(aggExpr.aggArgs[1], initTable[string, string]()) else: ","
+            for row in filteredRows:
+              if aggExpr.aggArgs.len > 0:
+                parts.add(evalExpr(aggExpr.aggArgs[0], row))
+            aggRow[aggKey] = parts.join(delim)
+        # Apply HAVING filter
+        if plan.groupHaving != nil:
+          if evalExpr(plan.groupHaving, aggRow) != "true":
+            continue
+        result.add(aggRow)
     return result
 
   of irpkJoin:
     let leftRows = executePlan(ctx, plan.joinLeft)
-    let rightRows = executePlan(ctx, plan.joinRight)
     result = @[]
+
+    proc mergeRow(left, right: Row, leftAlias, rightAlias: string): Row =
+      result = initTable[string, string]()
+      for k, v in left:
+        if not k.startsWith("$"):
+          result[k] = v
+      for k, v in right:
+        if not k.startsWith("$") and k notin result:
+          result[k] = v
+      if leftAlias.len > 0:
+        for k, v in left:
+          if not k.startsWith("$"):
+            result[leftAlias & "." & k] = v
+      if rightAlias.len > 0:
+        for k, v in right:
+          if not k.startsWith("$"):
+            result[rightAlias & "." & k] = v
+
+    let leftAlias = if plan.joinLeft != nil and plan.joinLeft.kind == irpkScan:
+                      plan.joinLeft.scanAlias else: ""
+
+    # LATERAL JOIN: for each left row, scan right, merge, then filter/sort/limit
+    if plan.joinLateral:
+      let rightAlias = plan.joinAlias
+      # Walk down right plan to extract filter, sort, limit
+      var rightFilter: IRExpr = nil
+      var rightSortExprs: seq[IRExpr]
+      var rightSortDirs: seq[bool]
+      var rightLimit: int = -1
+      var rightScanPlan: IRPlan = plan.joinRight
+      while rightScanPlan != nil:
+        case rightScanPlan.kind
+        of irpkScan: break
+        of irpkFilter:
+          if rightFilter == nil:
+            rightFilter = rightScanPlan.filterCond
+          else:
+            rightFilter = IRExpr(kind: irekBinary, binOp: irAnd,
+                                 binLeft: rightFilter, binRight: rightScanPlan.filterCond)
+          rightScanPlan = rightScanPlan.filterSource
+        of irpkSort:
+          rightSortExprs = rightScanPlan.sortExprs
+          rightSortDirs = rightScanPlan.sortDirs
+          rightScanPlan = rightScanPlan.sortSource
+        of irpkLimit:
+          rightLimit = rightScanPlan.limitCount
+          rightScanPlan = rightScanPlan.limitSource
+        of irpkProject:
+          rightScanPlan = rightScanPlan.projectSource
+        of irpkGroupBy:
+          rightScanPlan = rightScanPlan.groupSource
+        else: break
+
+      for l in leftRows:
+        var rawRightRows: seq[Row]
+        if rightScanPlan != nil and rightScanPlan.kind == irpkScan:
+          rawRightRows = execScan(ctx, rightScanPlan.scanTable)
+        else:
+          rawRightRows = @[]
+
+        # Merge, filter
+        var mergedRows: seq[Row]
+        for r in rawRightRows:
+          let merged = mergeRow(l, r, leftAlias, rightAlias)
+          if rightFilter != nil and evalExpr(rightFilter, merged) != "true":
+            continue
+          if plan.joinCond != nil and evalExpr(plan.joinCond, merged) != "true":
+            continue
+          mergedRows.add(merged)
+
+        # Apply sort from subquery
+        if rightSortExprs.len > 0 and mergedRows.len > 1:
+          mergedRows.sort(proc(a, b: Row): int =
+            for i, sExpr in rightSortExprs:
+              let aVal = evalExpr(sExpr, a)
+              let bVal = evalExpr(sExpr, b)
+              let asc = if i < rightSortDirs.len: rightSortDirs[i] else: true
+              var cmp = 0
+              let aNum = parseFloat(aVal)
+              let bNum = parseFloat(bVal)
+              if aNum < bNum: cmp = -1
+              elif aNum > bNum: cmp = 1
+              if cmp != 0:
+                return if asc: cmp else: -cmp
+            return 0
+          )
+
+        # Apply limit from subquery
+        let limitRows = if rightLimit >= 0 and rightLimit < mergedRows.len:
+                          mergedRows[0 ..< rightLimit]
+                        else:
+                          mergedRows
+
+        if limitRows.len > 0:
+          for row in limitRows:
+            result.add(row)
+        elif plan.joinKind == irjkLeft or plan.joinKind == irjkFull:
+          var rightCols: seq[string]
+          for r in rawRightRows:
+            for k, _ in r:
+              if not k.startsWith("$") and k notin rightCols:
+                rightCols.add(k)
+          var padded = initTable[string, string]()
+          for k, v in l:
+            if not k.startsWith("$"):
+              padded[k] = v
+          for col in rightCols:
+            if col notin padded: padded[col] = ""
+          if leftAlias.len > 0:
+            for k, v in l:
+              if not k.startsWith("$"):
+                padded[leftAlias & "." & k] = v
+          if rightAlias.len > 0:
+            for col in rightCols:
+              padded[rightAlias & "." & col] = ""
+          result.add(padded)
+      return result
+
+    # Non-LATERAL: standard join execution
+    let rightRows = executePlan(ctx, plan.joinRight)
 
     # Collect all unique column names from each side (excluding internal $ keys)
     var leftCols, rightCols: seq[string]
@@ -1622,28 +1941,6 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         if not k.startsWith("$") and k notin rightCols:
           rightCols.add(k)
 
-    proc mergeRow(left, right: Row, leftAlias, rightAlias: string): Row =
-      result = initTable[string, string]()
-      # Copy left keys first (left wins on collision for bare keys)
-      for k, v in left:
-        if not k.startsWith("$"):
-          result[k] = v
-      # Copy right keys that don't collide; colliding keys only get prefixed
-      for k, v in right:
-        if not k.startsWith("$") and k notin result:
-          result[k] = v
-      # Always add prefixed versions for disambiguation
-      if leftAlias.len > 0:
-        for k, v in left:
-          if not k.startsWith("$"):
-            result[leftAlias & "." & k] = v
-      if rightAlias.len > 0:
-        for k, v in right:
-          if not k.startsWith("$"):
-            result[rightAlias & "." & k] = v
-
-    let leftAlias = if plan.joinLeft != nil and plan.joinLeft.kind == irpkScan:
-                      plan.joinLeft.scanAlias else: ""
     let rightAlias = if plan.joinRight != nil and plan.joinRight.kind == irpkScan:
                        plan.joinRight.scanAlias else: ""
 
@@ -1700,6 +1997,126 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               padded[leftAlias & "." & col] = ""
           result.add(padded)
 
+    return result
+
+  of irpkPivot:
+    let sourceRows = executePlan(ctx, plan.pivotSource)
+    result = @[]
+    # Determine which columns are "group by" (all except pivot column and aggregate target)
+    var groupCols: seq[string]
+    if sourceRows.len > 0:
+      for k, _ in sourceRows[0]:
+        if not k.startsWith("$") and k != plan.pivotForCol:
+          # Check if this column is the aggregate value column
+          let isAggTarget = plan.pivotAgg.kind == irekAggregate and
+                           plan.pivotAgg.aggArgs.len > 0 and
+                           plan.pivotAgg.aggArgs[0].kind == irekField and
+                           plan.pivotAgg.aggArgs[0].fieldPath.len > 0 and
+                           plan.pivotAgg.aggArgs[0].fieldPath[^1] == k
+          if not isAggTarget:
+            groupCols.add(k)
+    # Group rows by group columns
+    var groups = initTable[string, seq[Row]]()
+    for row in sourceRows:
+      var groupKey = ""
+      for col in groupCols:
+        groupKey &= (if col in row: row[col] else: "") & "|"
+      if groupKey notin groups:
+        groups[groupKey] = @[]
+      groups[groupKey].add(row)
+    # For each group, create a pivoted row
+    for gk, groupRows in groups:
+      var newRow: Table[string, string]
+      for col in groupCols:
+        if col in groupRows[0]:
+          newRow[col] = groupRows[0][col]
+      # For each pivot value, compute the aggregate
+      for pivotVal in plan.pivotInValues:
+        var matchingRows: seq[Row]
+        for row in groupRows:
+          if plan.pivotForCol in row and row[plan.pivotForCol] == pivotVal:
+            matchingRows.add(row)
+        # Compute aggregate
+        var aggResult = ""
+        if plan.pivotAgg.kind == irekAggregate:
+          case plan.pivotAgg.aggOp
+          of irCount:
+            if plan.pivotAgg.aggArgs.len == 0:
+              aggResult = $matchingRows.len
+            else:
+              var count = 0
+              for row in matchingRows:
+                let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+                if v.len > 0: count += 1
+              aggResult = $count
+          of irSum:
+            var sum = 0.0
+            for row in matchingRows:
+              let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+              try: sum += parseFloat(v) except: discard
+            aggResult = $sum
+          of irAvg:
+            var sum = 0.0
+            var count = 0
+            for row in matchingRows:
+              let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+              try: sum += parseFloat(v); count += 1 except: discard
+            aggResult = if count > 0: $(sum / float(count)) else: "0"
+          of irMin:
+            var minVal = ""
+            for row in matchingRows:
+              let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+              if minVal == "" or v < minVal: minVal = v
+            aggResult = minVal
+          of irMax:
+            var maxVal = ""
+            for row in matchingRows:
+              let v = evalExpr(plan.pivotAgg.aggArgs[0], row)
+              if maxVal == "" or v > maxVal: maxVal = v
+            aggResult = maxVal
+          else: discard
+        # Clean pivot value (remove quotes)
+        let cleanVal = pivotVal.strip(chars = {'\''})
+        newRow[cleanVal] = aggResult
+      result.add(newRow)
+    return result
+
+  of irpkUnpivot:
+    let sourceRows = executePlan(ctx, plan.unpivotSource)
+    result = @[]
+    # Determine which columns are "identity" (all except the IN columns)
+    var identityCols: seq[string]
+    if sourceRows.len > 0:
+      for k, _ in sourceRows[0]:
+        if not k.startsWith("$") and k notin plan.unpivotInCols:
+          identityCols.add(k)
+    # For each source row, create one row per IN column
+    for row in sourceRows:
+      for inCol in plan.unpivotInCols:
+        var newRow: Table[string, string]
+        for col in identityCols:
+          if col in row:
+            newRow[col] = row[col]
+        newRow[plan.unpivotForCol] = inCol
+        newRow[plan.unpivotValueCol] = (if inCol in row: row[inCol] else: "")
+        result.add(newRow)
+    return result
+
+  of irpkGraphTraversal:
+    # Execute graph traversal using the graph engine
+    # For now, return graph metadata as rows
+    result = @[]
+    # Check if we have a cross-modal engine with graph
+    # The graph is stored by name; for simplicity, we'll use a table-based approach
+    # Graph nodes are stored as rows with their properties
+    let graphTable = plan.graphName & "_nodes"
+    let edgeTable = plan.graphName & "_edges"
+    # Try to scan the nodes table
+    let nodeRows = execScan(ctx, graphTable)
+    if nodeRows.len > 0:
+      for row in nodeRows:
+        var resultRow = row
+        result.add(resultRow)
     return result
 
   else:
@@ -1932,7 +2349,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
           ctx.cteTables[cteName] = cteRows
 
     # Expand view if FROM table is a view
-    if stmt.selFrom != nil and stmt.selFrom.fromTable in ctx.views:
+    if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom and stmt.selFrom.fromTable in ctx.views:
       let viewQuery = ctx.views[stmt.selFrom.fromTable]
       if viewQuery != nil and viewQuery.kind == nkSelect:
         # Execute the view's underlying query
@@ -1974,7 +2391,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         return errResult("Invalid view definition")
 
     # Try B-Tree index point read first
-    if stmt.selFrom != nil and stmt.selFrom.fromTable.len > 0:
+    if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom and stmt.selFrom.fromTable.len > 0:
       if stmt.selWhere != nil and stmt.selWhere.whereExpr != nil:
         let w = stmt.selWhere.whereExpr
         # Multi-column exact match: AND chain of =
@@ -2140,7 +2557,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     # Full pipeline execution
     let plan = lowerSelect(stmt)
     let rows = executePlan(ctx, plan)
-    let tbl = ctx.getTableDef(if stmt.selFrom != nil: stmt.selFrom.fromTable else: "")
+    let tbl = ctx.getTableDef(if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromTable else: "")
     var cols: seq[string] = @[]
     for c in tbl.columns: cols.add(c.name)
     if cols.len == 0 and rows.len > 0:
@@ -2511,10 +2928,10 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
   of nkExplainStmt:
     if stmt.expStmt != nil and stmt.expStmt.kind == nkSelect:
       var planStr = "EXPLAIN "
-      if stmt.expStmt.selFrom != nil:
+      if stmt.expStmt.selFrom != nil and stmt.expStmt.selFrom.kind == nkFrom:
         planStr &= "SELECT on " & stmt.expStmt.selFrom.fromTable
       var indexUsed = false
-      if stmt.expStmt.selFrom != nil and stmt.expStmt.selFrom.fromTable.len > 0:
+      if stmt.expStmt.selFrom != nil and stmt.expStmt.selFrom.kind == nkFrom and stmt.expStmt.selFrom.fromTable.len > 0:
         if stmt.expStmt.selWhere != nil and stmt.expStmt.selWhere.whereExpr != nil:
           let w = stmt.expStmt.selWhere.whereExpr
           if w.kind == nkBinOp and w.binOp == bkEq:

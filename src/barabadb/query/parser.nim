@@ -129,7 +129,7 @@ proc parsePrimary(p: var Parser): Node =
     discard p.advance()
     let operand = p.parsePrimary()
     Node(kind: nkUnaryOp, unOp: ukNeg, unOperand: operand, line: tok.line, col: tok.col)
-  of tkCount, tkSum, tkAvg, tkMin, tkMax:
+  of tkCount, tkSum, tkAvg, tkMin, tkMax, tkArrayAgg, tkStringAgg:
     let funcName = tok.value
     discard p.advance()
     discard p.expect(tkLParen)
@@ -141,9 +141,17 @@ proc parsePrimary(p: var Parser): Node =
       hasDistinct = true
     if p.peek().kind != tkRParen:
       args.add(p.parseExpr())
+      while p.match(tkComma):
+        args.add(p.parseExpr())
     discard p.expect(tkRParen)
     var node = Node(kind: nkFuncCall, funcName: funcName.toLower(), funcArgs: args,
                     line: tok.line, col: tok.col)
+    # Handle FILTER (WHERE ...)
+    if p.match(tkFilter):
+      discard p.expect(tkLParen)
+      discard p.expect(tkWhere)
+      node.funcFilter = p.parseExpr()
+      discard p.expect(tkRParen)
     return node
   of tkCase:
     discard p.advance()
@@ -438,7 +446,66 @@ proc parseSelect(p: var Parser): Node =
       elif p.peek().kind == tkIdent:
         alias = p.advance().value
       result.selFrom = Node(kind: nkFrom, fromTable: "(subquery)",
-                            fromAlias: alias, line: tok.line, col: tok.col)
+                            fromAlias: alias, fromSubquery: subquery, line: tok.line, col: tok.col)
+    elif p.peek().kind == tkGraphTable:
+      # GRAPH_TABLE(name MATCH (pattern) COLUMNS (cols))
+      discard p.advance()
+      discard p.expect(tkLParen)
+      let graphName = p.expect(tkIdent).value
+      discard p.expect(tkMatch)
+      # Parse pattern: (node)-[edge]->(node)
+      var patternNodes: seq[string]
+      var patternEdges: seq[string]
+      # First node
+      discard p.expect(tkLParen)
+      if p.peek().kind == tkIdent:
+        patternNodes.add(p.advance().value)
+      discard p.expect(tkRParen)
+      # Edge and next node(s)
+      while p.peek().kind == tkMinus or p.peek().kind == tkArrowR:
+        if p.match(tkArrowR):
+          discard
+        elif p.match(tkMinus):
+          if p.peek().kind == tkLBracket:
+            discard p.advance()
+            if p.peek().kind == tkIdent:
+              patternEdges.add(p.advance().value)
+            discard p.expect(tkRBracket)
+            discard p.expect(tkArrowR)
+          else:
+            discard
+        if p.peek().kind == tkLParen:
+          discard p.advance()
+          if p.peek().kind == tkIdent:
+            patternNodes.add(p.advance().value)
+          discard p.expect(tkRParen)
+      # COLUMNS (col1, col2, ...)
+      var returnCols: seq[string]
+      if p.match(tkColumns):
+        discard p.expect(tkLParen)
+        if p.peek().kind == tkIdent:
+          var colName = p.advance().value
+          # Handle dotted names: e.name
+          while p.peek().kind == tkDot:
+            discard p.advance()  # skip dot
+            colName &= "." & p.expect(tkIdent).value
+          returnCols.add(colName)
+          while p.match(tkComma):
+            if p.peek().kind == tkIdent:
+              colName = p.advance().value
+              while p.peek().kind == tkDot:
+                discard p.advance()
+                colName &= "." & p.expect(tkIdent).value
+              returnCols.add(colName)
+            if p.match(tkAs):
+              discard p.advance()  # skip alias
+        discard p.expect(tkRParen)
+      discard p.expect(tkRParen)
+      # Create a graph traversal node
+      result.selFrom = Node(kind: nkGraphTraversal, gtGraphName: graphName,
+                            gtStart: nil, gtEdge: if patternEdges.len > 0: patternEdges[0] else: "",
+                            gtDirection: "out", gtEnd: nil, gtMaxDepth: -1,
+                            gtReturnCols: returnCols, line: tok.line, col: tok.col)
     else:
       let tableTok = p.expect(tkIdent)
       var alias = ""
@@ -449,26 +516,89 @@ proc parseSelect(p: var Parser): Node =
       result.selFrom = Node(kind: nkFrom, fromTable: tableTok.value,
                             fromAlias: alias, line: tableTok.line, col: tableTok.col)
 
+    # Parse PIVOT / UNPIVOT after FROM source
+    if p.peek().kind == tkPivot:
+      discard p.advance()
+      discard p.expect(tkLParen)
+      let aggFunc = p.parseExpr()  # e.g. SUM(salary)
+      discard p.expect(tkFor)
+      let forCol = p.expect(tkIdent).value
+      discard p.expect(tkIn)
+      discard p.expect(tkLParen)
+      var inValues: seq[string] = @[]
+      inValues.add(p.expect(tkStringLit).value)
+      while p.match(tkComma):
+        inValues.add(p.expect(tkStringLit).value)
+      discard p.expect(tkRParen)
+      discard p.expect(tkRParen)
+      result.selFrom = Node(kind: nkPivot, pivotSource: result.selFrom,
+                            pivotAgg: aggFunc, pivotForCol: forCol,
+                            pivotInValues: inValues, line: tok.line, col: tok.col)
+    elif p.peek().kind == tkUnpivot:
+      discard p.advance()
+      discard p.expect(tkLParen)
+      let valCol = p.expect(tkIdent).value
+      discard p.expect(tkFor)
+      let forCol = p.expect(tkIdent).value
+      discard p.expect(tkIn)
+      discard p.expect(tkLParen)
+      var inCols: seq[string] = @[]
+      inCols.add(p.expect(tkIdent).value)
+      while p.match(tkComma):
+        inCols.add(p.expect(tkIdent).value)
+      discard p.expect(tkRParen)
+      discard p.expect(tkRParen)
+      result.selFrom = Node(kind: nkUnpivot, unpivotSource: result.selFrom,
+                            unpivotValueCol: valCol, unpivotForCol: forCol,
+                            unpivotInCols: inCols, line: tok.line, col: tok.col)
+
     # Parse JOINs
     while p.peek().kind == tkJoin or
+          p.peek().kind == tkLateral or
           (p.peek().kind in {tkInner, tkLeft, tkRight, tkFull, tkCross} and
-           p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkJoin):
-      let jk = p.parseJoinType()
-      discard p.expect(tkJoin)
-      let joinTable = p.expect(tkIdent)
+           p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind in {tkJoin, tkLateral}):
+      var isLateral = false
+      var jk = jkInner
+      # Check for LATERAL before join type
+      if p.match(tkLateral):
+        isLateral = true
+        # Could be standalone LATERAL or LATERAL JOIN
+        if p.peek().kind == tkJoin:
+          discard p.advance()
+      else:
+        jk = p.parseJoinType()
+        discard p.expect(tkJoin)
+        # Check for LATERAL after JOIN keyword
+        if p.match(tkLateral):
+          isLateral = true
+
+      var joinTarget: Node
       var joinAlias = ""
-      if p.match(tkAs):
-        joinAlias = p.expect(tkIdent).value
-      elif p.peek().kind == tkIdent:
-        joinAlias = p.advance().value
+      if isLateral:
+        # LATERAL (subquery) AS alias
+        discard p.expect(tkLParen)
+        let subquery = p.parseSelect()
+        discard p.expect(tkRParen)
+        if p.match(tkAs):
+          joinAlias = p.expect(tkIdent).value
+        elif p.peek().kind == tkIdent:
+          joinAlias = p.advance().value
+        joinTarget = Node(kind: nkSubquery, subQuery: subquery,
+                          line: tok.line, col: tok.col)
+      else:
+        let joinTable = p.expect(tkIdent)
+        if p.match(tkAs):
+          joinAlias = p.expect(tkIdent).value
+        elif p.peek().kind == tkIdent:
+          joinAlias = p.advance().value
+        joinTarget = Node(kind: nkFrom, fromTable: joinTable.value,
+                          fromAlias: joinAlias, line: joinTable.line, col: joinTable.col)
       var joinCond: Node = nil
       if p.match(tkOn):
         joinCond = p.parseExpr()
-      let joinTarget = Node(kind: nkFrom, fromTable: joinTable.value,
-                            fromAlias: joinAlias, line: joinTable.line, col: joinTable.col)
       result.selJoins.add(Node(kind: nkJoin, joinKind: jk, joinTarget: joinTarget,
-                               joinOn: joinCond, joinAlias: joinAlias,
-                               line: joinTable.line, col: joinTable.col))
+                               joinOn: joinCond, joinAlias: joinAlias, joinLateral: isLateral,
+                               line: tok.line, col: tok.col))
 
   # Parse WHERE
   if p.match(tkWhere):
@@ -478,9 +608,47 @@ proc parseSelect(p: var Parser): Node =
   if p.match(tkGroup):
     discard p.expect(tkBy)
     result.selGroupBy = @[]
-    result.selGroupBy.add(p.parseExpr())
-    while p.match(tkComma):
+    result.selGroupingSetsKind = gskNone
+    result.selGroupingSets = @[]
+    # Check for GROUPING SETS, ROLLUP, CUBE
+    if p.peek().kind == tkGrouping:
+      discard p.advance()
+      discard p.expect(tkSets)
+      result.selGroupingSetsKind = gskGroupingSets
+      discard p.expect(tkLParen)
+      # Parse each set: (col1, col2) or ()
+      while true:
+        discard p.expect(tkLParen)
+        var setExprs: seq[Node] = @[]
+        if p.peek().kind != tkRParen:
+          setExprs.add(p.parseExpr())
+          while p.match(tkComma):
+            setExprs.add(p.parseExpr())
+        discard p.expect(tkRParen)
+        result.selGroupingSets.add(setExprs)
+        if not p.match(tkComma): break
+      discard p.expect(tkRParen)
+    elif p.peek().kind == tkRollup:
+      discard p.advance()
+      result.selGroupingSetsKind = gskRollup
+      discard p.expect(tkLParen)
       result.selGroupBy.add(p.parseExpr())
+      while p.match(tkComma):
+        result.selGroupBy.add(p.parseExpr())
+      discard p.expect(tkRParen)
+    elif p.peek().kind == tkCube:
+      discard p.advance()
+      result.selGroupingSetsKind = gskCube
+      discard p.expect(tkLParen)
+      result.selGroupBy.add(p.parseExpr())
+      while p.match(tkComma):
+        result.selGroupBy.add(p.parseExpr())
+      discard p.expect(tkRParen)
+    else:
+      # Regular GROUP BY
+      result.selGroupBy.add(p.parseExpr())
+      while p.match(tkComma):
+        result.selGroupBy.add(p.parseExpr())
 
   # Parse HAVING
   if p.match(tkHaving):
