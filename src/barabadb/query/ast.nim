@@ -143,6 +143,7 @@ type
     bkJsonPath = "->"
     bkJsonPathText = "->>"
     bkFtsMatch = "@@"
+    bkDistance = "<->"
 
   UnaryOpKind* = enum
     ukNeg = "-"

@@ -318,7 +318,7 @@ proc parseComparison(p: var Parser): Node =
     discard p.advance()  # consume NULL token (assumed)
     return Node(kind: nkIsExpr, isExpr: result, isNegated: negated,
                 line: tok.line, col: tok.col)
-  while p.peek().kind in {tkEq, tkNotEq, tkLt, tkLtEq, tkGt, tkGtEq, tkFtsMatch}:
+  while p.peek().kind in {tkEq, tkNotEq, tkLt, tkLtEq, tkGt, tkGtEq, tkFtsMatch, tkDistanceOp}:
     let op = case p.peek().kind
       of tkEq: bkEq
       of tkNotEq: bkNotEq
@@ -327,6 +327,7 @@ proc parseComparison(p: var Parser): Node =
       of tkGt: bkGt
       of tkGtEq: bkGtEq
       of tkFtsMatch: bkFtsMatch
+      of tkDistanceOp: bkDistance
       else: bkEq
     let tok = p.advance()
     let right = p.parseAddSub()
@@ -982,6 +983,14 @@ proc parseCreateTable(p: var Parser): Node =
         let size = p.expect(tkIntLit).value
         colType &= "(" & size & ")"
         discard p.expect(tkRParen)
+    elif p.peek().kind == tkVector:
+      discard p.advance()
+      colType = "VECTOR"
+      if p.peek().kind == tkLParen:
+        discard p.advance()
+        let size = p.expect(tkIntLit).value
+        colType &= "(" & size & ")"
+        discard p.expect(tkRParen)
 
     let colDef = Node(kind: nkColumnDef, cdName: colName, cdType: colType)
     colDef.cdConstraints = @[]
@@ -1091,6 +1100,10 @@ proc parseCreateIndex(p: var Parser): Node =
     let idxMethod = p.expect(tkIdent).value.toLower()
     if idxMethod == "fts" or idxMethod == "fulltext":
       idxKind = ikFullText
+    elif idxMethod == "hnsw":
+      idxKind = ikHNSW
+    elif idxMethod == "ivfpq":
+      idxKind = ikIVFPQ
   result = Node(kind: nkCreateIndex, ciName: idxName, ciTarget: tableName,
                 ciColumns: colNames, ciKind: idxKind, line: tok.line, col: tok.col)
 

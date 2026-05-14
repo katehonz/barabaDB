@@ -2817,9 +2817,11 @@ include "tla_faithfulness"
 suite "MERGE Statement":
   var db: LSMTree
   var ctx: qexec.ExecutionContext
+  var tmpDir: string
 
   setup:
-    db = newLSMTree("")
+    tmpDir = getTempDir() / "baradb_merge_test_" & $getMonoTime().ticks
+    db = newLSMTree(tmpDir)
     ctx = qexec.newExecutionContext(db)
     discard qexec.executeQuery(ctx, parse("CREATE TABLE inventory (id INT PRIMARY KEY, sku TEXT, qty INT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO inventory (id, sku, qty) VALUES (1, 'SKU001', 100)"))
@@ -2827,6 +2829,9 @@ suite "MERGE Statement":
     discard qexec.executeQuery(ctx, parse("CREATE TABLE updates (sku TEXT, delta INT)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO updates (sku, delta) VALUES ('SKU001', 50)"))
     discard qexec.executeQuery(ctx, parse("INSERT INTO updates (sku, delta) VALUES ('SKU003', 300)"))
+
+  teardown:
+    removeDir(tmpDir)
 
   test "MERGE WHEN MATCHED UPDATE":
     let r = qexec.executeQuery(ctx, parse("""
@@ -2852,3 +2857,90 @@ suite "MERGE Statement":
     let verify = qexec.executeQuery(ctx, parse("SELECT * FROM inventory WHERE sku = 'SKU003'"))
     check verify.rows.len == 1
     check verify.rows[0]["qty"] == "300"
+
+
+suite "Vector SQL Integration":
+  var db: LSMTree
+  var ctx: qexec.ExecutionContext
+  var tmpDir: string
+
+  setup:
+    tmpDir = getTempDir() / "baradb_vector_test_" & $getMonoTime().ticks
+    db = newLSMTree(tmpDir)
+    ctx = qexec.newExecutionContext(db)
+
+  teardown:
+    removeDir(tmpDir)
+
+  test "CREATE TABLE with VECTOR column":
+    let r = qexec.executeQuery(ctx, parse("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(3))"))
+    check r.success
+    let tbl = ctx.tables["items"]
+    check tbl.columns.len == 2
+    check tbl.columns[1].colType == "VECTOR(3)"
+
+  test "INSERT vector values":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(3))"))
+    let r = qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')"))
+    check r.success
+    check r.affectedRows == 1
+    let r2 = qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (2, '[0.0, 1.0, 0.0]')"))
+    check r2.success
+    let sel = qexec.executeQuery(ctx, parse("SELECT * FROM items"))
+    check sel.rows.len == 2
+
+  test "SELECT with cosine_distance":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(3))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (2, '[0.0, 1.0, 0.0]')"))
+    let r = qexec.executeQuery(ctx, parse("SELECT id, cosine_distance(embedding, '[1.0, 0.0, 0.0]') AS dist FROM items"))
+    check r.success
+    check r.rows.len == 2
+    check r.rows[0]["dist"] == "0.0"
+    check r.rows[1]["dist"] == "1.0"
+
+  test "SELECT with <-> operator":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(3))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (2, '[0.0, 1.0, 0.0]')"))
+    let r = qexec.executeQuery(ctx, parse("SELECT id, embedding <-> '[1.0, 0.0, 0.0]' AS dist FROM items"))
+    check r.success
+    check r.rows.len == 2
+    check r.rows[0]["dist"] == "0.0"
+    check r.rows[1]["dist"] == "1.4142135623730951"
+
+  test "ORDER BY cosine_distance":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(3))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (2, '[0.0, 1.0, 0.0]')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (3, '[0.5, 0.5, 0.0]')"))
+    let r = qexec.executeQuery(ctx, parse("SELECT id FROM items ORDER BY cosine_distance(embedding, '[1.0, 0.0, 0.0]') ASC"))
+    check r.success
+    check r.rows.len == 3
+    check r.rows[0]["id"] == "1"
+    check r.rows[1]["id"] == "3"
+    check r.rows[2]["id"] == "2"
+
+  test "CREATE VECTOR INDEX":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(3))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (2, '[0.0, 1.0, 0.0]')"))
+    let r = qexec.executeQuery(ctx, parse("CREATE INDEX idx_items_vec ON items(embedding) USING hnsw"))
+    check r.success
+    check r.message.contains("HNSW")
+    check ctx.vectorIndexes.hasKey("items.embedding")
+
+  test "Vector dimension validation":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(3))"))
+    let r = qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (1, '[1.0, 0.0]')"))
+    check not r.success  # Should fail due to dimension mismatch
+
+  test "euclidean_distance function":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(3))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (1, '[0.0, 0.0, 0.0]')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (id, embedding) VALUES (2, '[1.0, 1.0, 1.0]')"))
+    let r = qexec.executeQuery(ctx, parse("SELECT id, euclidean_distance(embedding, '[0.0, 0.0, 0.0]') AS dist FROM items"))
+    check r.success
+    check r.rows.len == 2
+    check r.rows[0]["dist"] == "0.0"
+    check r.rows[1]["dist"] == "1.7320508075688772"

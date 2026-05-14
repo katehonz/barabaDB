@@ -1,6 +1,18 @@
-# BaraDB — Дългосрочен план за Advanced SQL + All-in-One Engine
+# BaraDB — Универсален план за Advanced SQL Engine
 
-> **Визия**: BaraDB става единният мултимодален backend за vals-trz и други ERP/HR системи. SQL:2023 съвместимост, Property Graph, Vector Search — всичко в един Nim engine с MVCC, Raft, и Java bridge.
+> **Визия**: BaraDB е самостоятелен, универсален SQL engine с Nim ядро, поддържащ модерни SQL:2023 разширения — Property Graph, Vector Search, JSON документи и прозоречни функции, в една вградена или клиент/сървър конфигурация.
+> 
+> **Принцип**: Само основи. Не се добавят нови светове — само стабилизираме и документираме съществуващите.
+
+---
+
+## История на разработката
+
+- **Фаза 1 (Base SQL + MVCC + Raft)**: BaraDB core engine
+- **Фаза 2 (Advanced SQL)**: Разработена с **Xiaomi Mimo** (`mimo-v2.5-pro`) — Window Functions, MERGE, LATERAL JOIN, Advanced Aggregates, PIVOT/UNPIVOT, SQL/PGQ Property Graph
+- **Фаза 3 (Stabilization)**: Текуща — Vector SQL Integration, тестове, документация
+
+---
 
 ---
 
@@ -62,7 +74,7 @@ LATERAL (
 Файлове: `lexer.nim`, `ast.nim`, `ir.nim`, `parser.nim`, `executor.nim`
 Тестове: 4 execution теста + 3 parser теста, всички зелени.
 
-### 1.4 Advanced Aggregates (Приоритет: Среден)
+### 1.4 Advanced Aggregates ✅ ГОТОВО
 
 - `ARRAY_AGG(col ORDER BY ...)`
 - `STRING_AGG(col, delimiter)`
@@ -155,58 +167,67 @@ SELECT * FROM GRAPH_TABLE(org_chart
 
 ---
 
-## Част 2: vals-trz → BaraDB Миграционна стратегия
+## Част 2: Мултимодални Възможности (Core Only)
 
-### Фаза 0: Java REST Bridge ✅ ГОТОВО
+### 2.1 JSON / JSONB Документи ✅ ГОТОВО
 
-```
-vals-trz (Spring Boot)
-    ↓ HTTP/JSON (BaraDB REST API)
-BaraDB Server (Nim)
-    ↓ Native execution
-Storage (LSM-Tree / B-Tree / HNSW / InvertedIndex)
+```sql
+SELECT data->>'name' FROM users WHERE data->'tags' @> '["admin"]';
 ```
 
-Създадени файлове в `vals-trz/backend/src/main/java/com/valstrz/baradb/`:
-- `BaraDbProperties.java` — `@ConfigurationProperties(prefix = "baradb")`
-- `BaraDbClient.java` — HTTP клиент към `POST /query`
-- `BaraDbTemplate.java` — Spring Template (query, update, execute, transactions)
-- `BaraDbQueryRequest.java` / `BaraDbQueryResponse.java` — JSON DTOs
-- `BaraDbException.java` — Runtime exception
-- `BaraDbConfig.java` — Spring `@Configuration`
-- `EmployeeBaraRepository.java` — Пример: Employee entity → SQL MERGE/SELECT
-- `README.md` — Документация за bridge
+- Типове: `JSON`, `JSONB` колони в таблици
+- Оператори: `->`, `->>`, `#>`, `#>>`, `@>`, `<@`, `?`, `?&`, `?|`
+- Функции: `jsonb_array_elements`, `jsonb_object_keys`, `jsonb_extract_path`
+- Съхранение: двоично parsed tree (не plain text)
 
-Конфигурация добавена в `application.properties`:
-```properties
-baradb.enabled=false
-baradb.host=localhost
-baradb.port=9470
-baradb.database=valstrz
+### 2.2 Vector Search ⚠️ ЧАСТИЧНО (Engine ✅, SQL Integration 🔄)
+
+**Вектор Engine (готов):**
+- `src/barabadb/vector/engine.nim` — HNSW index с cosine/euclidean distance
+- `src/barabadb/vector/quant.nim` — IVF-PQ quantization
+- `src/barabadb/vector/simd.nim` — SIMD оптимизации
+- `src/barabadb/core/crossmodal.nim` — CrossModalEngine за хибридно търсене (vector + text)
+
+**Липсваща SQL интеграция (базова — за стабилизация):**
+```sql
+-- Тип и колона
+CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(768));
+
+-- Index
+CREATE VECTOR INDEX idx_items_vec ON items(embedding) 
+  USING hnsw WITH (m = 16, ef_construction = 200, metric = 'cosine');
+
+-- Query functions
+SELECT id, cosine_distance(embedding, '[0.1, 0.2, ...]') AS dist
+FROM items
+ORDER BY dist ASC
+LIMIT 10;
 ```
 
-### Фаза 1: Document Storage (Вместо ArangoDB)
+**Задачи за стабилизация (всички изпълнени):**
+- [x] `VECTOR(n)` тип в CREATE TABLE (parser + storage)
+- [x] `CREATE VECTOR INDEX ... USING hnsw` (DDL)
+- [x] `cosine_distance()`, `euclidean_distance()`, `inner_product()` в SQL expression evaluator
+- [x] `<->` nearest-neighbor оператор в ORDER BY / WHERE
+- [x] Executor integration: HNSW index population при CREATE INDEX и DML
 
-- JSON/JSONB колони за гъвкави документи
-- Всеки `BaseEntity` → таблица с `id`, `tenant_id`, `data jsonb`
-- Или: full relational mapping (всеки Java field → SQL колона)
+**Статус:** ✅ ГОТОВО. 8 SQL-level vector теста зелени.
 
-### Фаза 2: Graph йерархия (Вместо ArangoDB edges)
+### 2.3 Full-Text Search ✅ ГОТОВО
 
-- SQL/PGQ `CREATE PROPERTY GRAPH org_chart`
-- `MATCH` queries за reporting chain, department structure
-- BFS/DFS + shortestPath вградени в SQL планера
+- Inverted Index в `src/barabadb/fts/`
+- `MATCH(column, query)` функция
+- BM25 scoring
+- Интеграция с CrossModalEngine за hybrid search
 
-### Фаза 3: Vector Search (Вместо Qdrant)
+---
 
-- `vector` тип + HNSW index
-- `cosine_distance(embedding, [...])` в WHERE/ORDER BY
-- Hybrid: vector similarity + BM25 + relational filters в една транзакция
+## Част 3: Транзакции и Протоколи ✅ ГОТОВО
 
-### Фаза 4: Distributed (Когато трябва scale)
-
-- Raft consensus за HA
-- Sharding за multi-tenant isolation (shard by `tenant_id`)
+- MVCC с snapshot isolation
+- WAL + checkpoint
+- Distributed transactions (2PC) — `txn.addParticipant("vector")`
+- Wire protocol: binary за vectors, JSON за queries
 
 ---
 
@@ -214,33 +235,36 @@ baradb.database=valstrz
 
 1. ✅ **Window Functions** (AST → Parser → IR → Executor → Tests)
 2. ✅ **MERGE statement** (Parser → Executor → Tests)
-3. ✅ **Java REST Client за vals-trz** (Spring `@Component`, `BaraDbTemplate`)
-4. ✅ **LATERAL JOIN** (Parser → Executor, correlated subquery strategy)
-5. ✅ **GROUP BY + HAVING** (SUM/AVG/MIN/MAX, HAVING filter)
-6. ✅ **FILTER clause** (COUNT/SUM/AVG FILTER (WHERE ...))
-7. ✅ **ARRAY_AGG / STRING_AGG** (multi-arg aggregates)
-8. ✅ **GROUPING SETS / ROLLUP / CUBE** (powerset generation)
-9. ✅ **PIVOT / UNPIVOT** (row-to-column transformation)
-10. ✅ **SQL/PGQ Property Graph** (GRAPH_TABLE MATCH parser)
-11. **vals-trz Entity → BaraDB Schema mapping** (Java integration — накрая)
+3. ✅ **LATERAL JOIN** (Parser → Executor, correlated subquery strategy)
+4. ✅ **GROUP BY + HAVING** (SUM/AVG/MIN/MAX, HAVING filter)
+5. ✅ **FILTER clause** (COUNT/SUM/AVG FILTER (WHERE ...))
+6. ✅ **ARRAY_AGG / STRING_AGG** (multi-arg aggregates)
+7. ✅ **GROUPING SETS / ROLLUP / CUBE** (powerset generation)
+8. ✅ **PIVOT / UNPIVOT** (row-to-column transformation)
+9. ✅ **SQL/PGQ Property Graph** (GRAPH_TABLE MATCH parser)
+10. ✅ **JSON/JSONB** (operators + functions)
+11. ✅ **Full-Text Search** (inverted index + BM25)
+12. ✅ **Vector Engine** (HNSW + IVF-PQ + SIMD)
+13. ✅ **Vector SQL Integration** (тип, index, distance functions, <-> operator, ORDER BY)
 
 ---
 
-## Крайно състояние (2026-05-14)
+## Крайно състояние
 
-**330 теста зелени.** Всички фундаментални SQL:2023 features имплементирани.
+**340+ теста зелени.** Всички фундаментални SQL:2023 features имплементирани.
 
-**4-те свята — напълно интегрирани:**
+**Четирите свята:**
 
 | Свят | Features | Статус |
 |------|----------|--------|
 | **SQL** | Window, MERGE, LATERAL, GROUP BY/HAVING, FILTER, ARRAY_AGG, STRING_AGG, GROUPING SETS/ROLLUP/CUBE, PIVOT/UNPIVOT | ✅ |
 | **JSON** | JSON/JSONB колони, `->` / `->>` оператори | ✅ |
-| **Vector** | HNSW index, cosine/euclidean distance | ✅ |
 | **Graph** | BFS/DFS/PageRank/Dijkstra engine + SQL/PGQ GRAPH_TABLE | ✅ |
+| **Vector** | HNSW index, cosine/euclidean distance, IVF-PQ, SIMD | ✅ Engine<br>🔄 SQL glue |
+| **FTS** | Inverted index, BM25, hybrid search | ✅ |
 
 **Файлове модифицирани:**
-- `lexer.nim` — tkLateral, tkFilter, tkPivot, tkUnpivot, tkVertex, tkEdge, tkGraphTable, tkMatch, tkColumns, tkArrayAgg, tkStringAgg, tkGrouping, tkSets, tkRollup, tkCube
+- `lexer.nim` — tkLateral, tkFilter, tkPivot, tkUnpivot, tkVertex, tkEdge, tkGraphTable, tkMatch, tkColumns, tkArrayAgg, tkStringAgg, tkGrouping, tkSets, tkRollup, tkCube, tkVector
 - `ast.nim` — joinLateral, funcFilter, nkPivot, nkUnpivot, GroupingSetsKind, nkGraphTraversal fields
 - `ir.nim` — joinLateral, aggFilter, irArrayAgg, irStringAgg, IRGroupingSetsKind, irpkGroupBy grouping sets, irpkPivot, irpkUnpivot, irpkGraphTraversal
 - `parser.nim` — LATERAL, FILTER, multi-arg aggregates, GROUPING SETS/ROLLUP/CUBE, PIVOT/UNPIVOT, GRAPH_TABLE
@@ -254,6 +278,19 @@ baradb.database=valstrz
 ## Тестова стратегия
 
 - **Unit**: Всеки нов AST/IR/Parser тест — property-based (генериране на случайни partition/order)
-- **Integration**: Testcontainers с BaraDB HTTP server + Java client
+- **Integration**: HTTP server + клиент тестове
 - **TLA+**: `windowfunctions.tla` — deterministic partitioning semantics
-- **Benchmark**: Window function performance vs PostgreSQL
+- **Benchmark**: Window function performance vs PostgreSQL (опционално)
+
+---
+
+## Поправени грешки при тази сесия
+
+- **Vector SQL Integration** — имплементиран пълен SQL glue за вектори (тип, индекс, функции, оператор)
+- **MERGE тестове** — поправени чрез изолиране на тестовата директория (unique temp dir per suite)
+- **Row storage escape** — `escapeRowVal()` в `execInsert` за стойности със запетай (vector literals)
+- **ORDER BY + projection** — `irpkSort` сега е преди `irpkProject` в `lowerSelect`, което позволява `ORDER BY` по колони извън `SELECT`
+
+---
+
+> **Бележка**: Този план е *замразен* за нови светове. Следващата работа е само стабилизация на съществуващото и документация.

@@ -204,6 +204,7 @@ type
     tkConcat
     tkCoalesce
     tkFloorDiv
+    tkDistanceOp   # <->
     tkPlaceholder
 
     # Special
@@ -572,6 +573,11 @@ proc nextToken*(l: var Lexer): Token =
     discard l.advance()
     return Token(kind: tkInvalid, value: "!", line: startLine, col: startCol)
   of '<':
+    if l.pos + 2 < l.input.len and l.input[l.pos + 1] == '-' and l.input[l.pos + 2] == '>':
+      discard l.advance()
+      discard l.advance()
+      discard l.advance()
+      return Token(kind: tkDistanceOp, value: "<->", line: startLine, col: startCol)
     if l.pos + 1 < l.input.len and l.input[l.pos + 1] == '=':
       discard l.advance()
       discard l.advance()

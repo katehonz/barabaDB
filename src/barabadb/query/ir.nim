@@ -28,6 +28,7 @@ type
     irBetween
     irIsNull, irIsNotNull
     irFtsMatch
+    irDistance
 
   IRAggregate* = enum
     irCount, irSum, irAvg, irMin, irMax

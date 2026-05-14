@@ -21,6 +21,7 @@ import ../storage/wal
 import ../core/mvcc
 import ../core/tracing
 import ../fts/engine as fts
+import ../vector/engine as vengine
 
 type
   IndexEntry* = ref object
@@ -60,6 +61,7 @@ type
     views*: Table[string, Node]  # view name -> SELECT AST
     cteTables*: Table[string, seq[Row]]  # CTE name -> rows
     ftsIndexes*: Table[string, fts.InvertedIndex]  # table.col -> FTS index
+    vectorIndexes*: Table[string, vengine.HNSWIndex]  # table.col -> HNSW index
     txnManager*: TxnManager
     pendingTxn*: Transaction
     onChange*: proc(ev: ChangeEvent) {.closure.}
@@ -143,6 +145,7 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
                    views: initTable[string, Node](),
                    cteTables: initTable[string, seq[Row]](),
                    ftsIndexes: initTable[string, fts.InvertedIndex](),
+                   vectorIndexes: initTable[string, vengine.HNSWIndex](),
                    users: initTable[string, UserDef](),
                    policies: initTable[string, seq[PolicyDef]](),
                    currentUser: "", currentRole: "",
@@ -316,6 +319,7 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
                    btrees: ctx.btrees, views: ctx.views,
                    cteTables: initTable[string, seq[Row]](),
                    ftsIndexes: ctx.ftsIndexes,
+                   vectorIndexes: ctx.vectorIndexes,
                    users: ctx.users, policies: ctx.policies,
                    txnManager: ctx.txnManager,
                    currentUser: ctx.currentUser, currentRole: ctx.currentRole,
@@ -455,6 +459,23 @@ proc parseRowData(valStr: string): Table[string, string] =
       result[k] = v
 
 proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row]
+
+proc parseVectorString*(value: string): seq[float32] =
+  ## Parse a vector string like "[1.0, 2.0, 3.0]" into seq[float32]
+  result = @[]
+  var cleaned = value.strip()
+  if cleaned.len == 0: return result
+  if cleaned.startsWith("[") and cleaned.endsWith("]"):
+    cleaned = cleaned[1..^2]
+  elif cleaned.startsWith("(") and cleaned.endsWith(")"):
+    cleaned = cleaned[1..^2]
+  for part in cleaned.split(","):
+    let p = part.strip()
+    if p.len > 0:
+      try:
+        result.add(parseFloat(p).float32)
+      except:
+        discard
 
 proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string =
   if expr == nil: return ""
@@ -642,6 +663,12 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         if term.len > 0 and term notin colVal:
           return "false"
       return "true"
+    of irDistance:
+      let vecA = parseVectorString(left)
+      let vecB = parseVectorString(right)
+      if vecA.len == 0 or vecB.len == 0:
+        return "0"
+      return $vengine.euclideanDistance(vecA, vecB)
     else: return "false"
   of irekUnary:
     case expr.unOp
@@ -664,6 +691,43 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         return s
       except: return "0"
     else: return "false"
+  of irekFuncCall:
+    let fn = expr.irFunc.toLower()
+    case fn
+    of "cosine_distance", "euclidean_distance", "inner_product", "l2_distance", "l1_distance":
+      if expr.irFuncArgs.len < 2:
+        return "0"
+      let left = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let right = evalExpr(expr.irFuncArgs[1], row, ctx)
+      let vecA = parseVectorString(left)
+      let vecB = parseVectorString(right)
+      if vecA.len == 0 or vecB.len == 0:
+        return "0"
+      var dist: float64 = 0.0
+      case fn
+      of "cosine_distance": dist = vengine.cosineDistance(vecA, vecB)
+      of "euclidean_distance", "l2_distance": dist = vengine.euclideanDistance(vecA, vecB)
+      of "inner_product": dist = -vengine.dotProduct(vecA, vecB)
+      of "l1_distance": dist = vengine.manhattanDistance(vecA, vecB)
+      else: dist = 0.0
+      return $dist
+    of "vector_dims", "vector_dimension":
+      if expr.irFuncArgs.len < 1:
+        return "0"
+      let arg = evalExpr(expr.irFuncArgs[0], row, ctx)
+      return $parseVectorString(arg).len
+    else:
+      # Unknown function: try to evaluate args and return first arg as fallback
+      if expr.irFuncArgs.len > 0:
+        return evalExpr(expr.irFuncArgs[0], row, ctx)
+      return ""
+  of irekCast:
+    let val = evalExpr(expr.irCastExpr, row, ctx)
+    let castType = expr.irCastType.name.toLower()
+    if castType.startsWith("vector"):
+      let vec = parseVectorString(val)
+      return "[" & vec.mapIt($it).join(", ") & "]"
+    return val
   of irekExists:
     if ctx != nil:
       let rows = executePlan(ctx, expr.existsSubquery)
@@ -785,10 +849,10 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
     for i, f in fields:
       if i < rowVals.len:
         if not keyFound:
-          key = f & "=" & rowVals[i]
+          key = f & "=" & escapeRowVal(rowVals[i])
           keyFound = true
         else:
-          valParts.add(f & "=" & rowVals[i])
+          valParts.add(f & "=" & escapeRowVal(rowVals[i]))
       elif f.len > 0:
         valParts.add(f & "=")
     let valStr = valParts.join(",")
@@ -829,6 +893,20 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
           for ch in fullKey:
             docId = docId * 31 + uint64(ord(ch))
           ftsIdx.addDocument(docId, text)
+
+    # Update Vector indexes
+    for vecKey, vecIdx in ctx.vectorIndexes:
+      if vecKey.startsWith(table & "."):
+        let colName = vecKey[table.len + 1..^1]
+        let vecStr = getValue(rowVals, fields, colName)
+        let vec = parseVectorString(vecStr)
+        if vec.len > 0:
+          var docId: uint64 = 0
+          for ch in fullKey:
+            docId = docId * 31 + uint64(ord(ch))
+          var meta = initTable[string, string]()
+          meta["key"] = fullKey
+          vengine.insert(vecIdx, docId, vec, meta)
 
     inc count
   return count
@@ -938,6 +1016,19 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
       let newText = if colName in parsed: parsed[colName] else: ""
       if newText.len > 0:
         ftsIdx.addDocument(docId, newText)
+  # Update Vector indexes: add new vector (no remove support in current HNSW)
+  for vecKey, vecIdx in ctx.vectorIndexes:
+    if vecKey.startsWith(table & "."):
+      let colName = vecKey[table.len + 1..^1]
+      let vecStr = if colName in parsed: parsed[colName] else: ""
+      let vec = parseVectorString(vecStr)
+      if vec.len > 0:
+        var docId: uint64 = 0
+        for ch in fullKey:
+          docId = docId * 31 + uint64(ord(ch))
+        var meta = initTable[string, string]()
+        meta["key"] = fullKey
+        vengine.insert(vecIdx, docId, vec, meta)
   return 1
 
 # ----------------------------------------------------------------------
@@ -965,6 +1056,20 @@ proc validateType*(colType: string, value: string): (bool, string) =
       discard parseJson(value)
     except:
       return (false, "Type mismatch: expected JSON but got '" & value & "'")
+  elif t.startsWith("VECTOR"):
+    let vec = parseVectorString(value)
+    if vec.len == 0 and value.strip().len > 0:
+      return (false, "Type mismatch: expected VECTOR but got '" & value & "'")
+    var expectedDim = 0
+    let dimStart = t.find('(')
+    let dimEnd = t.find(')')
+    if dimStart >= 0 and dimEnd > dimStart:
+      try:
+        expectedDim = parseInt(t[dimStart+1..<dimEnd])
+      except:
+        expectedDim = 0
+    if expectedDim > 0 and vec.len != expectedDim:
+      return (false, "Vector dimension mismatch: expected " & $expectedDim & " but got " & $vec.len)
   return (true, "")
 
 proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
@@ -1123,6 +1228,7 @@ proc lowerExpr*(node: Node): IRExpr =
     of bkAnd: irOp = irAnd
     of bkOr: irOp = irOr
     of bkFtsMatch: irOp = irFtsMatch
+    of bkDistance: irOp = irDistance
     else: irOp = irEq
     result.binOp = irOp
     result.binLeft = lowerExpr(node.binLeft)
@@ -1332,6 +1438,16 @@ proc lowerSelect*(node: Node): IRPlan =
       groupPlan.groupingSetsKind = irgskCube
     result = groupPlan
 
+  if node.selOrderBy.len > 0:
+    let sortPlan = IRPlan(kind: irpkSort)
+    sortPlan.sortSource = result
+    sortPlan.sortExprs = @[]
+    sortPlan.sortDirs = @[]
+    for o in node.selOrderBy:
+      sortPlan.sortExprs.add(lowerExpr(o.orderByExpr))
+      sortPlan.sortDirs.add(o.orderByDir == sdAsc)
+    result = sortPlan
+
   let projectPlan = IRPlan(kind: irpkProject)
   projectPlan.projectSource = result
   projectPlan.projectExprs = @[]
@@ -1347,16 +1463,6 @@ proc lowerSelect*(node: Node): IRPlan =
     else:
       projectPlan.projectAliases.add("")
   result = projectPlan
-
-  if node.selOrderBy.len > 0:
-    let sortPlan = IRPlan(kind: irpkSort)
-    sortPlan.sortSource = result
-    sortPlan.sortExprs = @[]
-    sortPlan.sortDirs = @[]
-    for o in node.selOrderBy:
-      sortPlan.sortExprs.add(lowerExpr(o.orderByExpr))
-      sortPlan.sortDirs.add(o.orderByDir == sdAsc)
-    result = sortPlan
 
   if node.selLimit != nil or node.selOffset != nil:
     let limitPlan = IRPlan(kind: irpkLimit)
@@ -3188,6 +3294,35 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         docId += 1
       ctx.ftsIndexes[colKey] = ftsIdx
       return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING FTS")
+
+    if stmt.ciKind == ikHNSW:
+      # Vector HNSW index
+      let rows = execScan(ctx, stmt.ciTarget)
+      var dimensions = 0
+      for row in rows:
+        for col in stmt.ciColumns:
+          if col in row:
+            let vec = parseVectorString(row[col])
+            if vec.len > 0:
+              dimensions = vec.len
+              break
+        if dimensions > 0: break
+      if dimensions == 0:
+        dimensions = 128  # Default dimension
+      var hnswIdx = vengine.newHNSWIndex(dimensions, m = 16, efConstruction = 200, metric = vengine.dmCosine)
+      var docId: uint64 = 0
+      for row in rows:
+        for col in stmt.ciColumns:
+          if col in row:
+            let vec = parseVectorString(row[col])
+            if vec.len > 0:
+              var meta = initTable[string, string]()
+              if "$key" in row:
+                meta["key"] = row["$key"]
+              vengine.insert(hnswIdx, docId, vec, meta)
+        docId += 1
+      ctx.vectorIndexes[colKey] = hnswIdx
+      return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING HNSW")
 
     ctx.btrees[colKey] = newBTreeIndex[string, IndexEntry]()
     # Populate index from existing data
