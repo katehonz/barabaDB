@@ -8,6 +8,7 @@ type
     nkInsert
     nkUpdate
     nkDelete
+    nkMerge
     nkCreateType
     nkDropType
     nkAlterType
@@ -102,6 +103,12 @@ type
     nkColumnDef
     nkConstraintDef
 
+    # Window functions
+    nkWindowExpr
+    nkOverClause
+    nkFrameSpec
+    nkFrameBoundary
+
     # Top-level
     nkStatementList
 
@@ -189,6 +196,15 @@ type
       delAlias*: string
       delWhere*: Node
       delReturning*: seq[Node]
+    of nkMerge:
+      mergeTarget*: string
+      mergeTargetAlias*: string
+      mergeSource*: Node
+      mergeSourceAlias*: string
+      mergeOn*: Node
+      mergeMatchedUpdate*: seq[Node]  # SET assignments, empty if no UPDATE
+      mergeNotMatchedInsert*: seq[Node]  # column list for INSERT
+      mergeNotMatchedValues*: seq[Node]  # value expressions for INSERT
     of nkCreateType:
       ctName*: string
       ctBases*: seq[string]
@@ -456,6 +472,24 @@ type
       idName*: string
       idExpr*: Node
       idKind*: IndexKind
+    of nkWindowExpr:
+      winFunc*: string
+      winArgs*: seq[Node]
+      winOver*: Node
+    of nkOverClause:
+      overPartition*: seq[Node]
+      overOrderBy*: seq[Node]
+      overFrame*: Node
+    of nkFrameSpec:
+      frameMode*: string        # "ROWS" or "RANGE"
+      frameStartType*: string   # "UNBOUNDED PRECEDING", "CURRENT ROW", "EXPR PRECEDING", "EXPR FOLLOWING"
+      frameStartExpr*: Node
+      frameEndType*: string
+      frameEndExpr*: Node
+      frameExclude*: string     # "NO OTHERS", "CURRENT ROW", "GROUP", "TIES"
+    of nkFrameBoundary:
+      fbType*: string           # "UNBOUNDED PRECEDING", "CURRENT ROW", "EXPR PRECEDING", "EXPR FOLLOWING", "UNBOUNDED FOLLOWING"
+      fbExpr*: Node
     of nkStatementList:
       stmts*: seq[Node]
 
@@ -470,5 +504,11 @@ proc newNode*(kind: NodeKind, line: int = 0, col: int = 0): Node =
   of nkAlterTable: result.altOps = @[]
   of nkColumnDef: result.cdConstraints = @[]
   of nkConstraintDef: result.cstColumns = @[]; result.cstRefColumns = @[]
+  of nkWindowExpr: result.winArgs = @[]
+  of nkOverClause: result.overPartition = @[]; result.overOrderBy = @[]
+  of nkMerge:
+    result.mergeMatchedUpdate = @[]
+    result.mergeNotMatchedInsert = @[]
+    result.mergeNotMatchedValues = @[]
   of nkStatementList: result.stmts = @[]
   else: discard

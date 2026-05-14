@@ -98,13 +98,13 @@ Every message starts with a 8-byte header:
 | INT16 | 0x03 | 2 | Signed 16-bit integer |
 | INT32 | 0x04 | 4 | Signed 32-bit integer |
 | INT64 | 0x05 | 8 | Signed 64-bit integer |
-| FLOAT32 | 0x06 | 4 | IEEE 754 single precision |
-| FLOAT64 | 0x07 | 8 | IEEE 754 double precision |
+| FLOAT32 | 0x06 | 4 | IEEE 754 single precision (big-endian) |
+| FLOAT64 | 0x07 | 8 | IEEE 754 double precision (big-endian) |
 | STRING | 0x08 | variable | UTF-8 string (4-byte length prefix) |
 | BYTES | 0x09 | variable | Raw bytes (4-byte length prefix) |
 | ARRAY | 0x0A | variable | Array of values |
 | OBJECT | 0x0B | variable | Key-value object |
-| VECTOR | 0x0C | variable | Float32 array (4-byte length prefix) |
+| VECTOR | 0x0C | variable | Float32 array (4-byte length prefix, big-endian floats) |
 
 ### Error Message Payload
 

@@ -1183,6 +1183,28 @@ proc lowerExpr*(node: Node): IRExpr =
     result = IRExpr(kind: irekExists)
   of nkStar:
     result = IRExpr(kind: irekStar)
+  of nkWindowExpr:
+    result = IRExpr(kind: irekWindowFunc)
+    result.wfName = node.winFunc
+    result.wfArgs = @[]
+    for arg in node.winArgs: result.wfArgs.add(lowerExpr(arg))
+    result.wfPartition = @[]
+    if node.winOver != nil:
+      for part in node.winOver.overPartition:
+        result.wfPartition.add(lowerExpr(part))
+      result.wfOrderBy = @[]
+      result.wfOrderDirs = @[]
+      for ob in node.winOver.overOrderBy:
+        result.wfOrderBy.add(lowerExpr(ob.orderByExpr))
+        result.wfOrderDirs.add(ob.orderByDir == sdDesc)
+      if node.winOver.overFrame != nil:
+        result.wfFrameMode = node.winOver.overFrame.frameMode
+        result.wfFrameStart = node.winOver.overFrame.frameStartType
+        result.wfFrameEnd = node.winOver.overFrame.frameEndType
+      else:
+        result.wfFrameMode = "ROWS"
+        result.wfFrameStart = "UNBOUNDED PRECEDING"
+        result.wfFrameEnd = "CURRENT ROW"
   else:
     result = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkNull))
 
@@ -1266,6 +1288,133 @@ proc lowerSelect*(node: Node): IRPlan =
     result = limitPlan
 
 # ----------------------------------------------------------------------
+# Window Function Computation
+# ----------------------------------------------------------------------
+
+proc partitionKey(row: Row, partExprs: seq[IRExpr]): string =
+  ## Compute a string partition key for a row
+  result = ""
+  for expr in partExprs:
+    result &= evalExpr(expr, row) & "|"
+
+proc compareRowsByOrder(a, b: Row, orderExprs: seq[IRExpr], orderDirs: seq[bool]): int =
+  ## Compare two rows by their ORDER BY expressions
+  for i, expr in orderExprs:
+    let va = evalExpr(expr, a)
+    let vb = evalExpr(expr, b)
+    var cmpRes = 0
+    try:
+      let fa = parseFloat(va)
+      let fb = parseFloat(vb)
+      if fa < fb: cmpRes = -1
+      elif fa > fb: cmpRes = 1
+    except:
+      cmpRes = cmp(va, vb)
+    if cmpRes != 0:
+      return if orderDirs.len > i and orderDirs[i]: -cmpRes else: cmpRes
+  return 0
+
+proc computeWindowValues*(rows: seq[Row], expr: IRExpr): seq[string] =
+  ## Compute a window function for all rows, returning a value per row.
+  ## The expr must be of kind irekWindowFunc.
+  result = newSeq[string](rows.len)
+  if rows.len == 0: return
+
+  let wfName = expr.wfName.toLower()
+
+  # Partition rows
+  var groups = initTable[string, seq[int]]()
+  for i, row in rows:
+    let pk = partitionKey(row, expr.wfPartition)
+    if pk notin groups:
+      groups[pk] = @[]
+    groups[pk].add(i)
+
+  # For each partition, sort by ORDER BY
+  for pk, idxs in groups:
+    var sortedIdxs = idxs
+    sortedIdxs.sort(proc(a, b: int): int =
+      compareRowsByOrder(rows[a], rows[b], expr.wfOrderBy, expr.wfOrderDirs)
+    )
+
+    case wfName
+    of "row_number":
+      for pos, rowIdx in sortedIdxs:
+        result[rowIdx] = $(pos + 1)
+    of "rank":
+      var currentRank = 1
+      for pos, rowIdx in sortedIdxs:
+        if pos > 0:
+          let cmpRes = compareRowsByOrder(rows[sortedIdxs[pos - 1]], rows[rowIdx], expr.wfOrderBy, expr.wfOrderDirs)
+          if cmpRes != 0:
+            currentRank = pos + 1
+        result[rowIdx] = $currentRank
+    of "dense_rank":
+      var currentRank = 1
+      for pos, rowIdx in sortedIdxs:
+        if pos > 0:
+          let cmpRes = compareRowsByOrder(rows[sortedIdxs[pos - 1]], rows[rowIdx], expr.wfOrderBy, expr.wfOrderDirs)
+          if cmpRes != 0:
+            currentRank += 1
+        result[rowIdx] = $currentRank
+    of "ntile":
+      var n = 1
+      if expr.wfArgs.len > 0:
+        try: n = parseInt(evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]])) except: n = 1
+      if n < 1: n = 1
+      let groupSize = sortedIdxs.len div n
+      let remainder = sortedIdxs.len mod n
+      for pos, rowIdx in sortedIdxs:
+        var bucket = 1
+        var threshold = groupSize
+        if 0 < remainder: threshold += 1
+        var cumulative = threshold
+        while pos >= cumulative and bucket < n:
+          bucket += 1
+          threshold = groupSize
+          if (bucket - 1) < remainder: threshold += 1
+          cumulative += threshold
+        result[rowIdx] = $bucket
+    of "lead":
+      var offset = 1
+      var defaultVal = ""
+      if expr.wfArgs.len > 1:
+        try: offset = parseInt(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]])) except: offset = 1
+      if expr.wfArgs.len > 2:
+        defaultVal = evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]])
+      for pos, rowIdx in sortedIdxs:
+        let targetPos = pos + offset
+        if targetPos < sortedIdxs.len:
+          result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]])
+        else:
+          result[rowIdx] = defaultVal
+    of "lag":
+      var offset = 1
+      var defaultVal = ""
+      if expr.wfArgs.len > 1:
+        try: offset = parseInt(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]])) except: offset = 1
+      if expr.wfArgs.len > 2:
+        defaultVal = evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]])
+      for pos, rowIdx in sortedIdxs:
+        let targetPos = pos - offset
+        if targetPos >= 0:
+          result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]])
+        else:
+          result[rowIdx] = defaultVal
+    of "first_value":
+      let firstVal = evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]])
+      for rowIdx in sortedIdxs:
+        result[rowIdx] = firstVal
+    of "last_value":
+      let lastVal = evalExpr(expr.wfArgs[0], rows[sortedIdxs[^1]])
+      for rowIdx in sortedIdxs:
+        result[rowIdx] = lastVal
+    else:
+      # Unknown window function — fill with empty
+      for rowIdx in sortedIdxs:
+        result[rowIdx] = ""
+
+# ----------------------------------------------------------------------
 # IR Plan Execution (with actual filter/sort/projection)
 # ----------------------------------------------------------------------
 
@@ -1295,6 +1444,41 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       if expr != nil and expr.kind == irekAggregate:
         hasAggs = true
         break
+
+    # Check if projection contains window functions
+    var hasWindowFuncs = false
+    for expr in plan.projectExprs:
+      if expr != nil and expr.kind == irekWindowFunc:
+        hasWindowFuncs = true
+        break
+
+    if hasWindowFuncs:
+      # Pre-compute window function values for all source rows
+      var winValues = newSeq[seq[string]](plan.projectExprs.len)
+      for i, expr in plan.projectExprs:
+        if expr != nil and expr.kind == irekWindowFunc:
+          winValues[i] = computeWindowValues(sourceRows, expr)
+      result = @[]
+      for rowIdx, row in sourceRows:
+        var newRow: Table[string, string]
+        for i, alias in plan.projectAliases:
+          if i < plan.projectExprs.len:
+            let expr = plan.projectExprs[i]
+            if expr.kind == irekWindowFunc:
+              newRow[alias] = winValues[i][rowIdx]
+            elif expr.kind == irekStar:
+              for k, v in row:
+                if not k.startsWith("$") and not k.contains("."):
+                  newRow[k] = v
+            else:
+              let val = evalExpr(expr, row)
+              if alias.len > 0: newRow[alias] = val
+              else: newRow["col" & $i] = val
+        if newRow.len > 0:
+          result.add(newRow)
+        else:
+          result.add(row)
+      return result
 
     if hasAggs:
       # Produce exactly one row with aggregate values
@@ -1663,6 +1847,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     of nkInsert: "INSERT"
     of nkUpdate: "UPDATE"
     of nkDelete: "DELETE"
+    of nkMerge: "MERGE"
     else: $stmt.kind
   let span = defaultTracer.beginSpan(spanName)
   defer: defaultTracer.endSpan(span)
@@ -2144,6 +2329,76 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
 
         if ctx.onChange != nil:
           ctx.onChange(ChangeEvent(table: stmt.delTarget, kind: ckDelete, key: old, data: ""))
+    return okResult(affected=count, kvPairs=kvPairs)
+
+  of nkMerge:
+    # Execute source: subquery or table scan
+    var sourceRows: seq[Row] = @[]
+    if stmt.mergeSource != nil:
+      if stmt.mergeSource.kind == nkSelect:
+        let srcRes = executeQuery(ctx, Node(kind: nkStatementList, stmts: @[stmt.mergeSource]))
+        sourceRows = srcRes.rows
+      elif stmt.mergeSource.kind == nkIdent:
+        sourceRows = execScan(ctx, stmt.mergeSource.identName)
+
+    let targetRows = execScan(ctx, stmt.mergeTarget)
+    var count = 0
+    var kvPairs: seq[(string, seq[byte])]
+
+    for srcRow in sourceRows:
+      var matched = false
+      var combinedRow = srcRow
+      for k, v in srcRow:
+        combinedRow[stmt.mergeSourceAlias & "." & k] = v
+      for tgtRow in targetRows:
+        # Evaluate ON condition with both source and target rows visible
+        var rowWithTarget = combinedRow
+        for k, v in tgtRow:
+          rowWithTarget[stmt.mergeTargetAlias & "." & k] = v
+        let onExpr = lowerExpr(stmt.mergeOn)
+        if evalExpr(onExpr, rowWithTarget) == "true":
+          matched = true
+          if stmt.mergeMatchedUpdate.len > 0 and "$key" in tgtRow:
+            var updateSets = initTable[string, string]()
+            for s in stmt.mergeMatchedUpdate:
+              if s.kind == nkBinOp and s.binOp == bkAssign:
+                if s.binLeft.kind == nkIdent:
+                  let valExpr = lowerExpr(s.binRight)
+                  updateSets[s.binLeft.identName] = evalExpr(valExpr, rowWithTarget)
+            var newRow = tgtRow
+            for col, val in updateSets:
+              newRow[col] = val
+            fireTriggers(ctx, stmt.mergeTarget, "before", "update", tgtRow)
+            count += execUpdateRow(ctx, stmt.mergeTarget, tgtRow["$key"], updateSets, kvPairs)
+            fireTriggers(ctx, stmt.mergeTarget, "after", "update", newRow)
+            if ctx.onChange != nil:
+              ctx.onChange(ChangeEvent(table: stmt.mergeTarget, kind: ckUpdate, key: tgtRow["$key"], data: ""))
+          break
+
+      if not matched and stmt.mergeNotMatchedInsert.len > 0:
+        var fields: seq[string] = @[]
+        var values: seq[string] = @[]
+        for i, colNode in stmt.mergeNotMatchedInsert:
+          if colNode.kind == nkIdent:
+            fields.add(colNode.identName)
+            if i < stmt.mergeNotMatchedValues.len:
+              let v = stmt.mergeNotMatchedValues[i]
+              let valExpr = lowerExpr(v)
+              values.add(evalExpr(valExpr, combinedRow))
+            else:
+              values.add("")
+        if fields.len > 0:
+          var row = initTable[string, string]()
+          for i, f in fields:
+            if i < values.len: row[f] = values[i]
+          fireTriggers(ctx, stmt.mergeTarget, "before", "insert", row)
+          var insKvPairs: seq[(string, seq[byte])]
+          count += execInsert(ctx, stmt.mergeTarget, fields, @[values], insKvPairs)
+          for kv in insKvPairs: kvPairs.add(kv)
+          fireTriggers(ctx, stmt.mergeTarget, "after", "insert", row)
+          if ctx.onChange != nil:
+            ctx.onChange(ChangeEvent(table: stmt.mergeTarget, kind: ckInsert, key: "", data: ""))
+
     return okResult(affected=count, kvPairs=kvPairs)
 
   of nkCreateTable:

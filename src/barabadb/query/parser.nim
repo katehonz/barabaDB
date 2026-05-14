@@ -38,6 +38,9 @@ proc parseExpr(p: var Parser): Node
 proc parseSelect(p: var Parser): Node
 proc parseStatement*(p: var Parser): Node
 proc parseCreateType(p: var Parser): Node
+proc parseOverClause(p: var Parser): Node
+proc parseFrameSpec(p: var Parser): Node
+proc parseFrameBoundary(p: var Parser): string
 
 proc parsePrimary(p: var Parser): Node =
   let tok = p.peek()
@@ -57,8 +60,9 @@ proc parsePrimary(p: var Parser): Node =
   of tkNull:
     discard p.advance()
     Node(kind: nkNullLit, line: tok.line, col: tok.col)
-  of tkIdent:
+  of tkIdent, tkRowNumber, tkRank, tkDenseRank, tkLead, tkLag, tkFirstValue, tkLastValue, tkNtile:
     discard p.advance()
+    let funcName = tok.value
     # Check for function call: ident(...)
     if p.peek().kind == tkLParen:
       discard p.advance()  # consume (
@@ -68,15 +72,21 @@ proc parsePrimary(p: var Parser): Node =
         while p.match(tkComma):
           args.add(p.parseExpr())
       discard p.expect(tkRParen)
-      return Node(kind: nkFuncCall, funcName: tok.value, funcArgs: args,
-                  line: tok.line, col: tok.col)
+      var funcNode = Node(kind: nkFuncCall, funcName: funcName, funcArgs: args,
+                          line: tok.line, col: tok.col)
+      # Check for window function: func(...) OVER (...)
+      if p.peek().kind == tkOver:
+        let overClause = p.parseOverClause()
+        return Node(kind: nkWindowExpr, winFunc: funcName, winArgs: args,
+                    winOver: overClause, line: tok.line, col: tok.col)
+      return funcNode
     # Check for dotted path: ident.ident.ident
-    var parts = @[tok.value]
+    var parts = @[funcName]
     while p.peek().kind == tkDot:
       discard p.advance()  # consume .
       parts.add(p.expect(tkIdent).value)
     if parts.len == 1:
-      return Node(kind: nkIdent, identName: tok.value, line: tok.line, col: tok.col)
+      return Node(kind: nkIdent, identName: funcName, line: tok.line, col: tok.col)
     return Node(kind: nkPath, pathParts: parts, line: tok.line, col: tok.col)
   of tkLParen:
     discard p.advance()
@@ -156,6 +166,80 @@ proc parsePrimary(p: var Parser): Node =
   else:
     discard p.advance()
     Node(kind: nkNullLit, line: tok.line, col: tok.col)
+
+proc parseOverClause(p: var Parser): Node =
+  ## Parse OVER ( [PARTITION BY expr, ...] [ORDER BY expr [ASC|DESC], ...] [frame] )
+  discard p.expect(tkOver)
+  discard p.expect(tkLParen)
+  result = Node(kind: nkOverClause)
+  # PARTITION BY
+  if p.match(tkPartition):
+    discard p.expect(tkBy)
+    result.overPartition.add(p.parseExpr())
+    while p.match(tkComma):
+      result.overPartition.add(p.parseExpr())
+  # ORDER BY
+  if p.match(tkOrder):
+    discard p.expect(tkBy)
+    var expr = p.parseExpr()
+    var dir = sdAsc
+    if p.match(tkDesc):
+      dir = sdDesc
+    elif p.match(tkAsc):
+      dir = sdAsc
+    result.overOrderBy.add(Node(kind: nkOrderBy, orderByExpr: expr, orderByDir: dir))
+    while p.match(tkComma):
+      expr = p.parseExpr()
+      dir = sdAsc
+      if p.match(tkDesc):
+        dir = sdDesc
+      elif p.match(tkAsc):
+        dir = sdAsc
+      result.overOrderBy.add(Node(kind: nkOrderBy, orderByExpr: expr, orderByDir: dir))
+  # Frame specification
+  if p.peek().kind in {tkRows, tkRange}:
+    result.overFrame = p.parseFrameSpec()
+  discard p.expect(tkRParen)
+
+proc parseFrameSpec(p: var Parser): Node =
+  ## Parse ROWS|RANGE frame
+  let modeTok = p.advance()  # tkRows or tkRange
+  result = Node(kind: nkFrameSpec, frameMode: modeTok.value)
+  if p.match(tkBetween):
+    result.frameStartType = p.parseFrameBoundary()
+    discard p.expect(tkAnd)
+    result.frameEndType = p.parseFrameBoundary()
+  else:
+    result.frameStartType = p.parseFrameBoundary()
+    result.frameEndType = "CURRENT ROW"
+
+proc parseFrameBoundary(p: var Parser): string =
+  ## Returns boundary type string like "UNBOUNDED PRECEDING", "CURRENT ROW", "1 PRECEDING"
+  if p.match(tkUnbounded):
+    if p.match(tkPreceding):
+      return "UNBOUNDED PRECEDING"
+    elif p.match(tkFollowing):
+      return "UNBOUNDED FOLLOWING"
+    else:
+      raise newException(ValueError, "Expected PRECEDING or FOLLOWING after UNBOUNDED")
+  elif p.match(tkCurrent):
+    discard p.expect(tkRows)
+    return "CURRENT ROW"
+  else:
+    # Expect a simple integer literal for offset boundaries
+    let offsetExpr = p.parsePrimary()
+    var offsetStr = ""
+    case offsetExpr.kind:
+    of nkIntLit: offsetStr = $offsetExpr.intVal
+    of nkIdent: offsetStr = offsetExpr.identName
+    else:
+      raise newException(ValueError, "Expected integer literal or identifier in frame boundary, got " & $offsetExpr.kind)
+    if p.match(tkPreceding):
+      return offsetStr & " PRECEDING"
+    elif p.match(tkFollowing):
+      return offsetStr & " FOLLOWING"
+    else:
+      raise newException(ValueError, "Expected PRECEDING or FOLLOWING after frame offset")
 
 proc parsePostfix(p: var Parser): Node =
   result = p.parsePrimary()
@@ -539,6 +623,64 @@ proc parseDelete(p: var Parser): Node =
     result.delReturning.add(p.parseExpr())
     while p.match(tkComma):
       result.delReturning.add(p.parseExpr())
+
+proc parseMerge(p: var Parser): Node =
+  let tok = p.expect(tkMerge)
+  discard p.match(tkInto)  # optional INTO
+  result = Node(kind: nkMerge, line: tok.line, col: tok.col)
+  result.mergeTarget = p.expect(tkIdent).value
+  if p.match(tkAs):
+    result.mergeTargetAlias = p.expect(tkIdent).value
+  elif p.peek().kind == tkIdent:
+    result.mergeTargetAlias = p.advance().value
+  discard p.expect(tkUsing)
+  # Source can be a table name or a subquery
+  if p.peek().kind == tkLParen:
+    discard p.advance()  # consume (
+    result.mergeSource = p.parseSelect()
+    discard p.expect(tkRParen)
+  else:
+    let srcTable = p.expect(tkIdent).value
+    result.mergeSource = Node(kind: nkIdent, identName: srcTable, line: tok.line, col: tok.col)
+  if p.match(tkAs):
+    result.mergeSourceAlias = p.expect(tkIdent).value
+  elif p.peek().kind == tkIdent:
+    result.mergeSourceAlias = p.advance().value
+  discard p.expect(tkOn)
+  result.mergeOn = p.parseExpr()
+  # WHEN MATCHED THEN UPDATE SET ...
+  if p.match(tkWhen):
+    if p.match(tkNot):
+      discard p.expect(tkMatched)
+      discard p.expect(tkThen)
+      discard p.expect(tkInsert)
+      discard p.expect(tkLParen)
+      result.mergeNotMatchedInsert.add(Node(kind: nkIdent, identName: p.expect(tkIdent).value))
+      while p.match(tkComma):
+        result.mergeNotMatchedInsert.add(Node(kind: nkIdent, identName: p.expect(tkIdent).value))
+      discard p.expect(tkRParen)
+      discard p.expect(tkValues)
+      discard p.expect(tkLParen)
+      result.mergeNotMatchedValues.add(p.parseExpr())
+      while p.match(tkComma):
+        result.mergeNotMatchedValues.add(p.parseExpr())
+      discard p.expect(tkRParen)
+    else:
+      discard p.expect(tkMatched)
+      discard p.expect(tkThen)
+      discard p.expect(tkUpdate)
+      discard p.expect(tkSet)
+      let col = p.expect(tkIdent).value
+      discard p.expect(tkEq)
+      result.mergeMatchedUpdate.add(Node(kind: nkBinOp, binOp: bkAssign,
+        binLeft: Node(kind: nkIdent, identName: col),
+        binRight: p.parseExpr()))
+      while p.match(tkComma):
+        let col2 = p.expect(tkIdent).value
+        discard p.expect(tkEq)
+        result.mergeMatchedUpdate.add(Node(kind: nkBinOp, binOp: bkAssign,
+          binLeft: Node(kind: nkIdent, identName: col2),
+          binRight: p.parseExpr()))
 
 proc parseCreateType(p: var Parser): Node =
   let tok = p.expect(tkCreate)
@@ -1105,6 +1247,7 @@ proc parseStatement*(p: var Parser): Node =
   of tkInsert: p.parseInsert()
   of tkUpdate: p.parseUpdate()
   of tkDelete: p.parseDelete()
+  of tkMerge: p.parseMerge()
   of tkCreate:
     if p.pos + 1 < p.tokens.len:
       let next = p.tokens[p.pos + 1]

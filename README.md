@@ -606,6 +606,23 @@ See [docs/en/docker.md](docs/en/docker.md) for full Docker documentation.
 | `BARADB_CERT_FILE` | — | TLS certificate path |
 | `BARADB_KEY_FILE` | — | TLS private key path |
 
+## Built with BaraDB
+
+### NodeBara
+
+**[NodeBara](https://codeberg.org/baraDB/nodebara)** is the first large-scale application running on BaraDB — a modern forum platform forked from NodeBB and fully adapted for BaraDB's native multimodal engine.
+
+- **Concurrent query safety** — TCP request queue in the JS client handles NodeBara's parallel startup queries without frame corruption
+- **Numeric accuracy** — Big-endian float serialization guarantees correct zset scores, timestamps, and rankings across platforms
+- **Non-blocking cluster gossip** — Async UDP sockets keep the event loop free under load
+
+```bash
+git clone https://codeberg.org/baraDB/nodebara
+cd nodebara
+npm install
+npm run setup   # uses BaraDB as the default database
+```
+
 ## Client SDKs
 
 BaraDB provides official clients for multiple languages:

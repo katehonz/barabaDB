@@ -194,6 +194,16 @@ proc codegenPlan*(plan: IRPlan): StorageOp =
 
   of irpkExplain:
     return codegenPlan(plan.explainPlan)
+  of irpkWindow:
+    let sourceOp = codegenPlan(plan.winSource)
+    let op = newStorageOp(sokProject)
+    for wf in plan.winFuncs:
+      op.columns.add(wf.wfName)
+    if sourceOp != nil:
+      op.children.add(sourceOp)
+    return op
+  of irpkMerge:
+    return newStorageOp(sokScan)
 
 proc estimateCost*(op: StorageOp): float64 =
   if op == nil:

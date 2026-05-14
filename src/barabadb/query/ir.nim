@@ -1,5 +1,6 @@
 ## BaraQL IR — Intermediate Representation for compilation
 import std/tables
+import std/strutils
 import ../core/types
 
 type
@@ -52,6 +53,7 @@ type
     irekExists
     irekStar
     irekJsonPath
+    irekWindowFunc
 
   IRJoinKind* = enum
     irjkInner
@@ -71,11 +73,13 @@ type
     irpkInsert
     irpkUpdate
     irpkDelete
+    irpkMerge
     irpkCreateType
     irpkUnion
     irpkCTE
     irpkValues
     irpkExplain
+    irpkWindow
 
   IRPlan* = ref object
     case kind*: IRPlanKind
@@ -121,6 +125,14 @@ type
       deleteTable*: string
       deleteAlias*: string
       deleteSource*: IRPlan
+    of irpkMerge:
+      mergeTarget*: string
+      mergeTargetAlias*: string
+      mergeSourcePlan*: IRPlan
+      mergeOnCond*: IRExpr
+      mergeUpdateSets*: seq[(string, IRExpr)]
+      mergeInsertFields*: seq[string]
+      mergeInsertValues*: seq[seq[IRExpr]]
     of irpkCreateType:
       createTypeName*: string
       createTypeDef*: IRType
@@ -136,6 +148,15 @@ type
       valuesRows*: seq[seq[IRExpr]]
     of irpkExplain:
       explainPlan*: IRPlan
+    of irpkWindow:
+      winSource*: IRPlan
+      winFuncs*: seq[IRExpr]
+      winPartition*: seq[IRExpr]
+      winOrderBy*: seq[IRExpr]
+      winOrderDirs*: seq[bool]
+      winFrameMode*: string
+      winFrameStart*: string
+      winFrameEnd*: string
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -172,6 +193,15 @@ type
       jpExpr*: IRExpr
       jpKey*: string
       jpAsText*: bool
+    of irekWindowFunc:
+      wfName*: string
+      wfArgs*: seq[IRExpr]
+      wfPartition*: seq[IRExpr]
+      wfOrderBy*: seq[IRExpr]
+      wfOrderDirs*: seq[bool]
+      wfFrameMode*: string
+      wfFrameStart*: string
+      wfFrameEnd*: string
 
 type
   TypeChecker* = ref object
@@ -255,3 +285,14 @@ proc inferExpr*(tc: TypeChecker, expr: IRExpr, context: Table[string, IRType]): 
   of irekJsonPath:
     if expr.jpAsText: return IRType(name: "str", kind: itkScalar)
     return IRType(name: "json", kind: itkScalar)
+  of irekWindowFunc:
+    # Window functions return int64 for ranking, or the type of the argument for value functions
+    case expr.wfName.toLower()
+    of "row_number", "rank", "dense_rank", "ntile":
+      return IRType(name: "int64", kind: itkScalar)
+    of "lead", "lag", "first_value", "last_value":
+      if expr.wfArgs.len > 0:
+        return tc.inferExpr(expr.wfArgs[0], context)
+      return nil
+    else:
+      return IRType(name: "unknown", kind: itkScalar)

@@ -174,6 +174,15 @@ All notable changes to BaraDB are documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- **JavaScript Client — TCP Request Queue** — Internal `_requestQueue` + `_requestLock` for safe concurrent queries. Multiple parallel `query()` / `execute()` / `ping()` calls no longer interleave binary frames on the wire.
+
+### Fixed
+
+- **Wire Protocol — Big-Endian Float Serialization** — `FLOAT32`/`FLOAT64` and vector float values are now serialized in big-endian byte order, matching the client's `readFloatBE()` / `readDoubleBE()` and ensuring cross-platform numeric accuracy.
+- **Gossip Protocol — Async UDP Socket** — Replaced synchronous `newSocket` + blocking `recvFrom` with `newAsyncSocket` + `await recvFrom`, preventing the async event loop from freezing until a UDP packet arrives.
+
 ### Planned
 
 - Query plan caching

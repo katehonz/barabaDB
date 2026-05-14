@@ -120,6 +120,8 @@ type
     tkAvg
     tkMin
     tkMax
+    tkMerge
+    tkMatched
     tkArray
     tkVector
     tkGraph
@@ -133,6 +135,24 @@ type
     tkBfs
     tkDfs
     tkPath
+
+    # Window functions
+    tkOver
+    tkPartition
+    tkRows
+    tkRange
+    tkUnbounded
+    tkPreceding
+    tkFollowing
+    tkCurrent
+    tkRowNumber
+    tkRank
+    tkDenseRank
+    tkLead
+    tkLag
+    tkFirstValue
+    tkLastValue
+    tkNtile
 
     # Operators
     tkPlus
@@ -291,6 +311,8 @@ const keywords*: Table[string, TokenKind] = {
   "avg": tkAvg,
   "min": tkMin,
   "max": tkMax,
+  "merge": tkMerge,
+  "matched": tkMatched,
   "array": tkArray,
   "vector": tkVector,
   "graph": tkGraph,
@@ -301,6 +323,22 @@ const keywords*: Table[string, TokenKind] = {
   "bfs": tkBfs,
   "dfs": tkDfs,
   "path": tkPath,
+  "over": tkOver,
+  "partition": tkPartition,
+  "rows": tkRows,
+  "range": tkRange,
+  "unbounded": tkUnbounded,
+  "preceding": tkPreceding,
+  "following": tkFollowing,
+  "current": tkCurrent,
+  "row_number": tkRowNumber,
+  "rank": tkRank,
+  "dense_rank": tkDenseRank,
+  "lead": tkLead,
+  "lag": tkLag,
+  "first_value": tkFirstValue,
+  "last_value": tkLastValue,
+  "ntile": tkNtile,
 }.toTable
 
 proc newLexer*(input: string): Lexer =

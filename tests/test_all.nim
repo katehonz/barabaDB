@@ -2576,8 +2576,112 @@ suite "Parameterized queries":
     check r.rows.len == 1
     check r.rows[0]["name"] == "Bob"
 
+suite "Window Functions":
+  var db: LSMTree
+  var ctx: qexec.ExecutionContext
+
+  setup:
+    db = newLSMTree("")
+    ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE employees (id INT, name TEXT, department TEXT, salary INT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (1, 'Alice', 'Engineering', 90000)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (2, 'Bob', 'Engineering', 80000)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (3, 'Charlie', 'Sales', 70000)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (4, 'Diana', 'Sales', 75000)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO employees (id, name, department, salary) VALUES (5, 'Eve', 'Engineering', 95000)"))
+
+  test "ROW_NUMBER with PARTITION BY and ORDER BY":
+    let r = qexec.executeQuery(ctx, parse("SELECT name, department, ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS rn FROM employees"))
+    check r.success
+    check r.rows.len == 5
+    # Engineering: Eve(95000)=1, Alice(90000)=2, Bob(80000)=3
+    # Sales: Diana(75000)=1, Charlie(70000)=2
+    var found = initTable[string, string]()
+    for row in r.rows:
+      found[row["name"]] = row["rn"]
+    check found["Eve"] == "1"
+    check found["Alice"] == "2"
+    check found["Bob"] == "3"
+    check found["Diana"] == "1"
+    check found["Charlie"] == "2"
+
+  test "RANK and DENSE_RANK":
+    let r = qexec.executeQuery(ctx, parse("SELECT name, salary, RANK() OVER (ORDER BY salary DESC) AS r, DENSE_RANK() OVER (ORDER BY salary DESC) AS dr FROM employees"))
+    check r.success
+    check r.rows.len == 5
+    for row in r.rows:
+      if row["name"] == "Eve":
+        check row["r"] == "1"
+        check row["dr"] == "1"
+      if row["name"] == "Alice":
+        check row["r"] == "2"
+        check row["dr"] == "2"
+
+  test "LEAD and LAG":
+    let r = qexec.executeQuery(ctx, parse("SELECT name, salary, LAG(salary, 1, 0) OVER (ORDER BY salary) AS prev, LEAD(salary, 1, 0) OVER (ORDER BY salary) AS next FROM employees"))
+    check r.success
+    check r.rows.len == 5
+    for row in r.rows:
+      if row["name"] == "Charlie":
+        check row["prev"] == "0"
+        check row["next"] == "75000"
+      if row["name"] == "Diana":
+        check row["prev"] == "70000"
+        check row["next"] == "80000"
+
+  test "FIRST_VALUE and LAST_VALUE":
+    let r = qexec.executeQuery(ctx, parse("SELECT department, FIRST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS first, LAST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS last FROM employees"))
+    check r.success
+    check r.rows.len == 5
+
+  test "NTILE":
+    let r = qexec.executeQuery(ctx, parse("SELECT name, NTILE(2) OVER (ORDER BY salary) AS bucket FROM employees"))
+    check r.success
+    check r.rows.len == 5
+    for row in r.rows:
+      check row["bucket"] in @["1", "2"]
+
 # JOIN tests
 include "join_tests"
 
 # TLA+ faithfulness tests
 include "tla_faithfulness"
+
+suite "MERGE Statement":
+  var db: LSMTree
+  var ctx: qexec.ExecutionContext
+
+  setup:
+    db = newLSMTree("")
+    ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE inventory (id INT PRIMARY KEY, sku TEXT, qty INT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO inventory (id, sku, qty) VALUES (1, 'SKU001', 100)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO inventory (id, sku, qty) VALUES (2, 'SKU002', 200)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE updates (sku TEXT, delta INT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO updates (sku, delta) VALUES ('SKU001', 50)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO updates (sku, delta) VALUES ('SKU003', 300)"))
+
+  test "MERGE WHEN MATCHED UPDATE":
+    let r = qexec.executeQuery(ctx, parse("""
+      MERGE INTO inventory AS target
+      USING updates AS source
+      ON target.sku = source.sku
+      WHEN MATCHED THEN UPDATE SET qty = target.qty + source.delta
+    """))
+    check r.success
+    check r.affectedRows == 1
+    let verify = qexec.executeQuery(ctx, parse("SELECT * FROM inventory WHERE sku = 'SKU001'"))
+    check verify.rows[0]["qty"] == "150.0"
+
+  test "MERGE WHEN NOT MATCHED INSERT":
+    let r = qexec.executeQuery(ctx, parse("""
+      MERGE INTO inventory AS target
+      USING updates AS source
+      ON target.sku = source.sku
+      WHEN NOT MATCHED THEN INSERT (id, sku, qty) VALUES (3, source.sku, source.delta)
+    """))
+    check r.success
+    check r.affectedRows == 1
+    let verify = qexec.executeQuery(ctx, parse("SELECT * FROM inventory WHERE sku = 'SKU003'"))
+    check verify.rows.len == 1
+    check verify.rows[0]["qty"] == "300"

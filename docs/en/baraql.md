@@ -517,6 +517,50 @@ LIMIT 10;
 SELECT /*+ PARALLEL(4) */ * FROM large_table;
 ```
 
+## Window Functions
+
+```sql
+-- Ranking functions
+SELECT
+  name,
+  department,
+  ROW_NUMBER() OVER (PARTITION BY department ORDER BY salary DESC) AS rn,
+  RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS r,
+  DENSE_RANK() OVER (PARTITION BY department ORDER BY salary DESC) AS dr
+FROM employees;
+
+-- Value functions
+SELECT
+  name,
+  salary,
+  LAG(salary, 1, 0) OVER (ORDER BY salary) AS prev_salary,
+  LEAD(salary, 1, 0) OVER (ORDER BY salary) AS next_salary,
+  FIRST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS cheapest,
+  LAST_VALUE(name) OVER (PARTITION BY department ORDER BY salary) AS most_expensive
+FROM employees;
+
+-- Distribution functions
+SELECT name, NTILE(4) OVER (ORDER BY salary) AS quartile FROM employees;
+```
+
+### Frame Specifications
+
+```sql
+-- ROWS frame
+SUM(salary) OVER (
+  PARTITION BY department
+  ORDER BY hire_date
+  ROWS BETWEEN 1 PRECEDING AND CURRENT ROW
+)
+
+-- RANGE frame
+SUM(salary) OVER (
+  PARTITION BY department
+  ORDER BY hire_date
+  RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+)
+```
+
 ## Supported Keywords
 
 | Category | Keywords |
@@ -536,3 +580,5 @@ SELECT /*+ PARALLEL(4) */ * FROM large_table;
 | FTS | @@ (BM25 match) |
 | Recovery | RECOVER TO TIMESTAMP |
 | Functions | count, sum, avg, min, max, stddev, variance, abs, sqrt, lower, upper, len, trim, substr, now, last_insert_id |
+| Window | OVER, PARTITION BY, ROWS, RANGE, UNBOUNDED PRECEDING, CURRENT ROW, FOLLOWING |
+| Window Functions | ROW_NUMBER, RANK, DENSE_RANK, LEAD, LAG, FIRST_VALUE, LAST_VALUE, NTILE |

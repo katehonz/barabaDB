@@ -45,6 +45,18 @@ await client.commit();
 await client.close();
 ```
 
+### Concurrent Queries
+
+The JavaScript client automatically serializes concurrent requests over a single TCP connection via an internal request queue. You can safely fire multiple parallel operations — their binary frames will not interleave on the wire:
+
+```typescript
+const [users, orders, stats] = await Promise.all([
+  client.query('SELECT * FROM users'),
+  client.query('SELECT * FROM orders'),
+  client.query('SELECT count(*) FROM visits')
+]);
+```
+
 ### WebSocket Streaming
 
 ```typescript
