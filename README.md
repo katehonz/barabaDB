@@ -285,8 +285,23 @@ let range = btree.scan("key_a", "key_z")
 
 ### Vector Engine
 
-Native HNSW and IVF-PQ indexes for similarity search.
+Native HNSW and IVF-PQ indexes for similarity search with full SQL integration.
 
+```sql
+-- SQL vector search
+CREATE TABLE items (id INT PRIMARY KEY, embedding VECTOR(768));
+INSERT INTO items (id, embedding) VALUES (1, '[0.1, 0.2, 0.3, ...]');
+
+-- Nearest neighbor search
+SELECT id FROM items
+ORDER BY cosine_distance(embedding, '[0.1, 0.2, 0.3, ...]') ASC
+LIMIT 10;
+
+-- With HNSW index
+CREATE INDEX idx_vec ON items(embedding) USING hnsw;
+```
+
+Native Nim API:
 ```nim
 import barabadb/vector/engine
 
@@ -301,7 +316,10 @@ let filtered = idx.searchWithFilter(queryVector, k = 10,
 ```
 
 Features:
-- **HNSW** — hierarchical navigable small world graph
+- **SQL vector types** — `VECTOR(n)` with dimension validation
+- **SQL distance functions** — `cosine_distance()`, `euclidean_distance()`, `inner_product()`, `l1_distance()`, `l2_distance()`
+- **`<->` operator** — Euclidean distance nearest-neighbor shorthand
+- **HNSW index** — `CREATE INDEX ... USING hnsw` with automatic maintenance
 - **IVF-PQ** — inverted file index with product quantization
 - **Distance metrics** — cosine, euclidean, dot product, Manhattan
 - **Quantization** — scalar 8-bit/4-bit, product, binary
@@ -1231,7 +1249,7 @@ src/barabadb/
 ## Tests
 
 ```bash
-# Run all tests (262 tests, 56 suites)
+# Run all tests (340+ tests, 60+ suites)
 nim c --path:src -r tests/test_all.nim
 
 # Run benchmarks
@@ -1249,6 +1267,7 @@ nim c -d:release -r benchmarks/bench_all.nim
 | Protocol (binary + HTTP + WS + pool + auth + ratelimit) | ✅ | 100% | v1.0.0 |
 | Schema (inheritance + computed + migrations) | ✅ | 100% | v1.0.0 |
 | Vector engine (HNSW + IVF-PQ + quant + SIMD + metadata) | ✅ | 100% | v1.0.0 |
+| Vector SQL Integration (VECTOR type, distance functions, <->, HNSW indexes) | ✅ | 100% | v1.1.0 |
 | Graph engine (all algorithms + pattern matching) | ✅ | 100% | v1.0.0 |
 | FTS (BM25 + TF-IDF + fuzzy + regex + multi-language) | ✅ | 100% | v1.0.0 |
 | CLI shell | ✅ | 100% | v1.0.0 |

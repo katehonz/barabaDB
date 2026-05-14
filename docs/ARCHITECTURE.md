@@ -90,6 +90,12 @@ The query layer processes BaraQL — a SQL-compatible query language with extens
 - **Quantization** (`quant.nim`): Scalar 8-bit/4-bit, product, and binary quantization for compression.
 - **SIMD Operations** (`simd.nim`): Unrolled loop distance computations (cosine, Euclidean, dot product, Manhattan).
 - **Batch Operations**: batchInsert, batchSearch, batchDistance for high-throughput.
+- **SQL Integration** (`query/executor.nim`):
+  - `VECTOR(n)` column type with dimension validation
+  - `CREATE INDEX ... USING hnsw` / `USING ivfpq`
+  - Distance functions: `cosine_distance()`, `euclidean_distance()`, `inner_product()`, `l1_distance()`, `l2_distance()`
+  - `<->` nearest-neighbor operator
+  - Automatic index maintenance on INSERT/UPDATE
 
 ### Graph Engine (`graph/`)
 - **Adjacency List** (`engine.nim`): Edge-weighted directed graph storage with forward/reverse adjacency.

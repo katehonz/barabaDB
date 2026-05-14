@@ -18,6 +18,7 @@ BaraQL is a SQL-compatible query language with extensions for graph, vector, and
 | `bytes` | Raw bytes | `0xDEADBEEF` |
 | `array<T>` | Homogeneous array | `[1, 2, 3]` |
 | `vector` | Float32 vector | `[0.1, 0.2, 0.3]` |
+| `vector(n)` | Fixed-dimension float32 vector (SQL) | `VECTOR(768)` |
 | `object` | Key-value object | `{"a": 1}` |
 | `datetime` | ISO 8601 timestamp | `'2025-01-15T10:30:00Z'` |
 | `uuid` | UUID v4 | `'550e8400-e29b-41d4-a716-446655440000'` |
@@ -352,6 +353,7 @@ CREATE TYPE Cat EXTENDING Animal {
 CREATE INDEX idx_users_name ON users(name);
 CREATE UNIQUE INDEX idx_users_email ON users(email);
 CREATE INDEX idx_users_age ON users(age) USING btree;
+CREATE INDEX idx_vectors ON items(embedding) USING hnsw;
 ```
 
 ### DROP
@@ -387,35 +389,74 @@ SELECT * FROM articles WHERE body @@ 'machine learning';
 RECOVER TO TIMESTAMP '2026-05-07T12:00:00';
 ```
 
-## Vector Search
+## Vector Search (SQL)
+
+### Creating Vector Columns
 
 ```sql
--- Insert with vector
-INSERT articles {
-  title := 'Nim Programming',
-  embedding := [0.1, 0.2, 0.3, 0.4]
-};
+CREATE TABLE items (
+  id INT PRIMARY KEY,
+  embedding VECTOR(768)
+);
+```
 
--- Similarity search (cosine distance)
-SELECT title FROM articles
-ORDER BY cosine_distance(embedding, [0.1, 0.2, 0.3, 0.4])
-LIMIT 5;
+### Inserting Vectors
 
--- Euclidean distance
-SELECT title FROM articles
-ORDER BY l2_distance(embedding, [0.1, 0.2, 0.3, 0.4])
-LIMIT 5;
+```sql
+INSERT INTO items (id, embedding) VALUES (1, '[0.1, 0.2, 0.3, 0.4]');
+```
 
--- Dot product
-SELECT title FROM articles
-ORDER BY dot_product(embedding, [0.1, 0.2, 0.3, 0.4]) DESC
+### Distance Functions
+
+```sql
+-- Cosine distance (0 = identical, 2 = opposite)
+SELECT id, cosine_distance(embedding, '[0.1, 0.2, 0.3, 0.4]') AS dist
+FROM items;
+
+-- Euclidean / L2 distance
+SELECT id, euclidean_distance(embedding, '[0.1, 0.2, 0.3, 0.4]') AS dist
+FROM items;
+
+-- L2 distance with <-> operator
+SELECT id, embedding <-> '[0.1, 0.2, 0.3, 0.4]' AS dist
+FROM items;
+
+-- Inner product (negative dot product)
+SELECT id, inner_product(embedding, '[0.1, 0.2, 0.3, 0.4]') AS dist
+FROM items;
+
+-- Manhattan / L1 distance
+SELECT id, l1_distance(embedding, '[0.1, 0.2, 0.3, 0.4]') AS dist
+FROM items;
+```
+
+### Nearest Neighbor Search
+
+```sql
+-- Top-10 nearest neighbors by cosine distance
+SELECT id FROM items
+ORDER BY cosine_distance(embedding, '[0.1, 0.2, 0.3, 0.4]') ASC
+LIMIT 10;
+
+-- Top-5 nearest neighbors by Euclidean distance
+SELECT id FROM items
+ORDER BY embedding <-> '[0.1, 0.2, 0.3, 0.4]'
 LIMIT 5;
 
 -- With metadata filter
-SELECT title FROM articles
+SELECT id FROM items
 WHERE category = 'tech'
-ORDER BY cosine_distance(embedding, [0.1, 0.2, 0.3, 0.4])
+ORDER BY cosine_distance(embedding, '[0.1, 0.2, 0.3, 0.4]')
 LIMIT 5;
+```
+
+### Vector Indexes
+
+```sql
+-- Create HNSW index for approximate nearest neighbor search
+CREATE INDEX idx_items_vec ON items(embedding) USING hnsw;
+
+-- Supported index methods: hnsw, ivfpq
 ```
 
 ## Graph Patterns
@@ -575,7 +616,7 @@ SUM(salary) OVER (
 | Transaction | BEGIN, COMMIT, ROLLBACK, SAVEPOINT |
 | Graph | MATCH, RETURN, WHERE, shortestPath, type |
 | FTS | MATCH, AGAINST, relevance, IN BOOLEAN MODE, WITH FUZZINESS |
-| Vector | cosine_distance, l2_distance, dot_product, manhattan_distance |
+| Vector | cosine_distance, euclidean_distance, inner_product, l1_distance, l2_distance, <-> |
 | JSON | ->, ->> |
 | FTS | @@ (BM25 match) |
 | Recovery | RECOVER TO TIMESTAMP |

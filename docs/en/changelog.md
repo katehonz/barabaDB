@@ -176,10 +176,20 @@ All notable changes to BaraDB are documented in this file.
 
 ### Added
 
+- **Vector SQL Integration** — Full SQL-level vector search support:
+  - `VECTOR(n)` column type in `CREATE TABLE` with dimension validation
+  - `CREATE INDEX ... USING hnsw` / `USING ivfpq` for approximate nearest neighbor indexes
+  - SQL distance functions: `cosine_distance()`, `euclidean_distance()`, `inner_product()`, `l1_distance()`, `l2_distance()`
+  - `<->` nearest-neighbor operator (Euclidean distance)
+  - `ORDER BY` support for vector distance expressions, including columns not in `SELECT`
+  - Automatic HNSW index maintenance on `INSERT` and `UPDATE`
+- **Advanced SQL Engine** — Window functions, MERGE/UPSERT, LATERAL JOIN, PIVOT/UNPIVOT, SQL/PGQ Property Graph, Advanced Aggregates (ARRAY_AGG, STRING_AGG, FILTER, GROUPING SETS/ROLLUP/CUBE)
 - **JavaScript Client — TCP Request Queue** — Internal `_requestQueue` + `_requestLock` for safe concurrent queries. Multiple parallel `query()` / `execute()` / `ping()` calls no longer interleave binary frames on the wire.
 
 ### Fixed
 
+- **Query Executor — Row Value Escaping** — `execInsert` now properly escapes commas and equals signs in column values, fixing storage corruption for vector literals like `[1.0, 2.0, 3.0]`
+- **Query Planner — ORDER BY Projection** — `irpkSort` is now placed before `irpkProject` in the IR plan, allowing `ORDER BY` to reference columns that are not selected
 - **Wire Protocol — Big-Endian Float Serialization** — `FLOAT32`/`FLOAT64` and vector float values are now serialized in big-endian byte order, matching the client's `readFloatBE()` / `readDoubleBE()` and ensuring cross-platform numeric accuracy.
 - **Gossip Protocol — Async UDP Socket** — Replaced synchronous `newSocket` + blocking `recvFrom` with `newAsyncSocket` + `await recvFrom`, preventing the async event loop from freezing until a UDP packet arrives.
 
