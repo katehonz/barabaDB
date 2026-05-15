@@ -20,7 +20,7 @@ npm install baradb
 Or from source:
 
 ```bash
-git clone https://codeberg.org/baraba/bara-lang
+git clone https://github.com/barabadb/baradadb.git
 cd clients/javascript
 npm link
 ```

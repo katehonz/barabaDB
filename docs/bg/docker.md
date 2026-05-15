@@ -6,7 +6,7 @@
 
 ```bash
 # Клониране на репото
-git clone https://codeberg.org/baraba/bara-lang
+git clone https://github.com/katehonz/barabaDB.git
 cd barabaDB
 
 # Build на образа

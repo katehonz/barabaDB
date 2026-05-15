@@ -99,7 +99,7 @@ OpenSSL 已捆绑在 Nim Windows 分发版中。如需手动构建，
 ### 克隆仓库
 
 ```bash
-git clone https://codeberg.org/baraba/bara-lang
+git clone https://github.com/katehonz/barabaDB.git
 cd barabaDB
 ```
 
