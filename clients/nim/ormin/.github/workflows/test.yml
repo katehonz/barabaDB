@@ -1,0 +1,68 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_USER: test
+          POSTGRES_DB: test_ormin
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    strategy:
+      matrix:
+        nim:
+          - stable
+    name: Test on nim ${{ matrix.nim }}
+    steps:
+    - name: Checkout source code
+      uses: actions/checkout@v4
+      
+    - name: Cache choosenim
+      id: cache-choosenim
+      uses: actions/cache@v4
+      with:
+        path: ~/.choosenim
+        key: ${{ runner.os }}-choosenim-stable
+
+    - name: Cache nimble
+      id: cache-nimble
+      uses: actions/cache@v4
+      with:
+        path: ~/.nimble
+        key: ${{ runner.os }}-nimble-stable
+
+    - name: Setup nim
+      uses: jiro4989/setup-nim-action@v2
+      with:
+        nim-version: ${{ matrix.nim }}
+
+    - name: Install dependencies
+      run: |
+        nimble --useSystemNim install -d
+        nimble --useSystemNim install karax -y
+        nimble --useSystemNim install jester -y
+        nimble --useSystemNim install websocket -y
+      
+    - name: Run test sqlite
+      run: nimble --useSystemNim test
+
+    - name: Run test postgres
+      run: nimble --useSystemNim test_postgres
+      env:
+        PGPASSWORD: test
+
+    - name: Build examples
+      run: nimble buildexamples

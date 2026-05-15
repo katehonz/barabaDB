@@ -141,6 +141,23 @@ nim c -r tests/test_integration.nim
 
 Same as async but blocking. Available on `SyncClient`.
 
+## Ormin Integration
+
+The Nim client ships with an [Ormin](https://github.com/Araq/ormin) backend for compile-time checked SQL queries.
+
+```nim
+import ormin
+
+importModel(DbBackend.baradb, "my_model")
+let db {.global.} = open("127.0.0.1:9472", "admin", "", "default")
+
+let rows = query:
+  select users(id, name)
+  where name == ?"alice"
+```
+
+See `examples/ormin_basic.nim` for a full sample.
+
 ## License
 
 Apache-2.0
