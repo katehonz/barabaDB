@@ -1,0 +1,51 @@
+# BaraDB + Ormin Development Stack
+#
+# Usage:
+#   docker compose -f docker-compose.ormin.yml up --build -d
+#   docker compose -f docker-compose.ormin.yml exec ormin-dev bash
+#
+# Inside the container:
+#   nim c -r examples/baradb_basic.nim
+
+services:
+  baradb:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: baradb:latest
+    container_name: baradb-ormin
+    hostname: baradb
+    ports:
+      - "9472:9472"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:9912/health >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    networks:
+      - ormin_net
+
+  ormin-dev:
+    build:
+      context: .
+      dockerfile: clients/nim/ormin/docker/Dockerfile
+    container_name: ormin-dev
+    depends_on:
+      baradb:
+        condition: service_healthy
+    environment:
+      - BARADB_HOST=baradb
+      - BARADB_PORT=9472
+    volumes:
+      - ./clients/nim/ormin:/workspace/ormin
+      - ./clients/nim/src:/workspace/baradb/src
+      - ./clients/nim/baradb.nimble:/workspace/baradb/baradb.nimble
+    working_dir: /workspace/ormin
+    command: tail -f /dev/null
+    networks:
+      - ormin_net
+
+networks:
+  ormin_net:
+    driver: bridge
