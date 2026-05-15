@@ -619,6 +619,13 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       except: discard
       return "false"
     of irIn:
+      if expr.binRight.kind == irekSubquery:
+        let subRows = executePlan(ctx, expr.binRight.subqueryPlan)
+        for row in subRows:
+          for k, v in row:
+            if k.startsWith("$"): continue
+            if v == left: return "true"
+        return "false"
       try:
         let lv = parseFloat(left)
         let rv = parseFloat(right)
@@ -626,6 +633,13 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       except: discard
       return if left == right: "true" else: "false"
     of irNotIn:
+      if expr.binRight.kind == irekSubquery:
+        let subRows = executePlan(ctx, expr.binRight.subqueryPlan)
+        for row in subRows:
+          for k, v in row:
+            if k.startsWith("$"): continue
+            if v == left: return "false"
+        return "true"
       try:
         let lv = parseFloat(left)
         let rv = parseFloat(right)
@@ -823,6 +837,32 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     of "current_role":
       if ctx != nil: return ctx.currentRole
       return ""
+    of "datetime":
+      if expr.irFuncArgs.len > 0:
+        let arg = evalExpr(expr.irFuncArgs[0], row, ctx).toLower()
+        if arg == "now":
+          return $now().format("yyyy-MM-dd HH:mm:ss")
+        return arg
+      return $now().format("yyyy-MM-dd HH:mm:ss")
+    of "now":
+      return $now().format("yyyy-MM-dd HH:mm:ss")
+    of "strftime":
+      if expr.irFuncArgs.len >= 2:
+        let fmt = evalExpr(expr.irFuncArgs[0], row, ctx)
+        let val = evalExpr(expr.irFuncArgs[1], row, ctx)
+        if fmt == "%s":
+          try:
+            let dt = parse(val, "yyyy-MM-dd HH:mm:ss")
+            return $(dt.toTime().toUnix())
+          except:
+            return "0"
+        elif fmt == "%Y-%m-%dT%H:%M:%SZ":
+          try:
+            let dt = parse(val, "yyyy-MM-dd HH:mm:ss")
+            return format(dt, "yyyy-MM-dd'T'HH:mm:ss'Z'")
+          except:
+            return ""
+      return ""
     else:
       # Unknown function: try to evaluate args and return first arg as fallback
       if expr.irFuncArgs.len > 0:
@@ -850,6 +890,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
   else: return ""
 
 proc lowerExpr*(node: Node): IRExpr
+proc lowerSelect*(node: Node): IRPlan
 
 # ----------------------------------------------------------------------
 # Row-Level Security
@@ -909,13 +950,12 @@ proc execScan(ctx: ExecutionContext, table: string): seq[Row] =
   if table in ctx.cteTables:
     return ctx.cteTables[table]
   let prefix = table & "."
-  for entry in ctx.db.scanMemTable():
-    if entry.deleted: continue
-    if not entry.key.startsWith(prefix): continue
-    let rest = entry.key[prefix.len..^1]
+  for (key, value) in ctx.db.scanAll():
+    if not key.startsWith(prefix): continue
+    let rest = key[prefix.len..^1]
     var row: Table[string, string]
     row["$key"] = rest
-    let valStr = cast[string](entry.value)
+    let valStr = cast[string](value)
     row["$value"] = valStr
     # Also parse individual columns
     for k, v in parseRowData(valStr):
@@ -1413,6 +1453,12 @@ proc lowerExpr*(node: Node): IRExpr =
         orNode.binLeft = result
         orNode.binRight = eqCmp
         result = orNode
+    elif node.inRight.kind == nkSubquery:
+      result = IRExpr(kind: irekBinary)
+      result.binOp = irIn
+      result.binLeft = lowerExpr(node.inLeft)
+      result.binRight = IRExpr(kind: irekSubquery)
+      result.binRight.subqueryPlan = lowerSelect(node.inRight.subQuery)
     else:
       result = IRExpr(kind: irekBinary)
       result.binOp = irEq
@@ -1446,6 +1492,11 @@ proc lowerExpr*(node: Node): IRExpr =
         result.wfFrameEnd = "CURRENT ROW"
   else:
     result = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkNull))
+
+proc evalNodeToString(node: Node): string =
+  ## Evaluate a simple AST node to a string value for INSERT/UPDATE.
+  let ir = lowerExpr(node)
+  return evalExpr(ir, initTable[string, string](), nil)
 
 proc lowerSelect*(node: Node): IRPlan =
   result = IRPlan(kind: irpkScan)
@@ -1571,7 +1622,7 @@ proc lowerSelect*(node: Node): IRPlan =
   projectPlan.projectSource = result
   projectPlan.projectExprs = @[]
   projectPlan.projectAliases = @[]
-  for e in node.selResult:
+  for i, e in node.selResult:
     projectPlan.projectExprs.add(lowerExpr(e))
     if e.exprAlias.len > 0:
       projectPlan.projectAliases.add(e.exprAlias)
@@ -1579,8 +1630,12 @@ proc lowerSelect*(node: Node): IRPlan =
       projectPlan.projectAliases.add(e.identName)
     elif e.kind == nkPath and e.pathParts.len > 0:
       projectPlan.projectAliases.add(e.pathParts[^1])
+    elif e.kind == nkFuncCall:
+      projectPlan.projectAliases.add(e.funcName & "()")
+    elif e.kind == nkStar:
+      projectPlan.projectAliases.add("*")
     else:
-      projectPlan.projectAliases.add("")
+      projectPlan.projectAliases.add("col" & $i)
   result = projectPlan
 
   if node.selLimit != nil or node.selOffset != nil:
@@ -2524,6 +2579,23 @@ proc bindParams*(node: Node, params: seq[WireValue]): Node =
 # High-level execute
 # ----------------------------------------------------------------------
 
+proc getSelectColumns(stmt: Node): seq[string] =
+  result = @[]
+  if stmt.kind != nkSelect: return result
+  for i, e in stmt.selResult:
+    if e.exprAlias.len > 0:
+      result.add(e.exprAlias)
+    elif e.kind == nkIdent:
+      result.add(e.identName)
+    elif e.kind == nkPath and e.pathParts.len > 0:
+      result.add(e.pathParts[^1])
+    elif e.kind == nkFuncCall:
+      result.add(e.funcName & "()")
+    elif e.kind == nkStar:
+      result.add("*")
+    else:
+      result.add("col" & $i)
+
 proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult =
   if astNode == nil or astNode.stmts.len == 0:
     return okResult()
@@ -2831,9 +2903,21 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     # Full pipeline execution
     let plan = lowerSelect(stmt)
     let rows = executePlan(ctx, plan)
-    let tbl = ctx.getTableDef(if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromTable else: "")
-    var cols: seq[string] = @[]
-    for c in tbl.columns: cols.add(c.name)
+    var cols = getSelectColumns(stmt)
+    # Expand star to table columns
+    if "*" in cols:
+      var expandedCols: seq[string] = @[]
+      let tbl = ctx.getTableDef(if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromTable else: "")
+      for c in cols:
+        if c == "*":
+          for tc in tbl.columns:
+            expandedCols.add(tc.name)
+        else:
+          expandedCols.add(c)
+      cols = expandedCols
+    if cols.len == 0:
+      let tbl = ctx.getTableDef(if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromTable else: "")
+      for c in tbl.columns: cols.add(c.name)
     if cols.len == 0 and rows.len > 0:
       for k, _ in rows[0]: cols.add(k)
     return okResult(rows, cols)
@@ -2907,11 +2991,14 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
           elif v.kind == nkFloatLit: row.add($v.floatVal)
           elif v.kind == nkBoolLit: row.add($v.boolVal)
           elif v.kind == nkNullLit: row.add("")
-          else: row.add("")
+          else: row.add(evalNodeToString(v))
       else:
         if rowNode.kind == nkStringLit: row.add(rowNode.strVal)
         elif rowNode.kind == nkIntLit: row.add($rowNode.intVal)
-        else: row.add("")
+        elif rowNode.kind == nkFloatLit: row.add($rowNode.floatVal)
+        elif rowNode.kind == nkBoolLit: row.add($rowNode.boolVal)
+        elif rowNode.kind == nkNullLit: row.add("")
+        else: row.add(evalNodeToString(rowNode))
       values.add(row)
 
     if fields.len == 0:
@@ -2955,7 +3042,9 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
           let val = if s.binRight.kind == nkStringLit: s.binRight.strVal
                     elif s.binRight.kind == nkIntLit: $s.binRight.intVal
                     elif s.binRight.kind == nkFloatLit: $s.binRight.floatVal
-                    else: ""
+                    elif s.binRight.kind == nkBoolLit: $s.binRight.boolVal
+                    elif s.binRight.kind == nkNullLit: ""
+                    else: evalNodeToString(s.binRight)
           sets[s.binLeft.identName] = val
 
     # Scan and apply

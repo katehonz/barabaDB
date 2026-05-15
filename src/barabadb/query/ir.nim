@@ -57,6 +57,7 @@ type
     irekCast
     irekConditional
     irekExists
+    irekSubquery
     irekStar
     irekJsonPath
     irekWindowFunc
@@ -225,6 +226,8 @@ type
       elseExpr*: IRExpr
     of irekExists:
       existsSubquery*: IRPlan
+    of irekSubquery:
+      subqueryPlan*: IRPlan
     of irekStar:
       discard
     of irekJsonPath:
@@ -322,6 +325,8 @@ proc inferExpr*(tc: TypeChecker, expr: IRExpr, context: Table[string, IRType]): 
     return thenType
   of irekExists:
     return IRType(name: "bool", kind: itkScalar)
+  of irekSubquery:
+    return IRType(name: "set", kind: itkSet)
   of irekStar:
     return IRType(name: "star", kind: itkScalar)
   of irekJsonPath:
