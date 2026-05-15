@@ -108,6 +108,16 @@ proc readString(buf: openArray[byte], pos: var int): string =
     result[i] = char(buf[pos + i])
   pos += len
 
+proc toBytes(s: string): seq[byte] =
+  result = newSeq[byte](s.len)
+  for i, c in s:
+    result[i] = byte(c)
+
+proc toString(s: seq[byte]): string =
+  result = newString(s.len)
+  for i, b in s:
+    result[i] = char(b)
+
 proc serializeValue*(buf: var seq[byte], val: WireValue) =
   buf.add(byte(val.kind))
   case val.kind
@@ -289,7 +299,7 @@ proc close*(client: BaraClient) =
   if client.connected:
     try:
       let msg = buildMessage(mkClose, client.nextId(), @[])
-      waitFor client.socket.send(cast[string](msg))
+      waitFor client.socket.send(toString(msg))
     except: discard
     client.socket.close()
     client.connected = false
@@ -319,13 +329,13 @@ proc readQueryResponse(client: BaraClient): Future[QueryResult] {.async.} =
     raise newException(IOError, "Connection closed")
 
   var pos = 0
-  let hdrData = cast[seq[byte]](headerData)
+  let hdrData = toBytes(headerData)
   let kind = MsgKind(readUint32(hdrData, pos))
   let payloadLen = int(readUint32(hdrData, pos))
   discard readUint32(hdrData, pos)
 
   let payloadStr = await client.socket.recv(payloadLen)
-  var payload = cast[seq[byte]](payloadStr)
+  var payload = toBytes(payloadStr)
 
   result = QueryResult(columns: @[], rows: @[], rowCount: 0, affectedRows: 0)
 
@@ -360,14 +370,14 @@ proc readQueryResponse(client: BaraClient): Future[QueryResult] {.async.} =
     let compHeader = await client.socket.recv(12)
     if compHeader.len >= 12:
       var chPos = 0
-      let chData = cast[seq[byte]](compHeader)
+      let chData = toBytes(compHeader)
       let compKind = MsgKind(readUint32(chData, chPos))
       let compLen = int(readUint32(chData, chPos))
       discard readUint32(chData, chPos)
       let compPayloadStr = await client.socket.recv(compLen)
       if compKind == mkComplete:
         var cpPos = 0
-        result.affectedRows = int(readUint32(cast[seq[byte]](compPayloadStr), cpPos))
+        result.affectedRows = int(readUint32(toBytes(compPayloadStr), cpPos))
     return
   if kind == mkComplete:
     var rpos = 0
@@ -379,7 +389,8 @@ proc query*(client: BaraClient, sql: string): Future[QueryResult] {.async.} =
     raise newException(IOError, "Not connected")
 
   let msg = makeQueryMessage(client.nextId(), sql)
-  await client.socket.send(cast[string](msg))
+  let msgStr = toString(msg)
+  await client.socket.send(msgStr)
 
   return await client.readQueryResponse()
 
@@ -388,7 +399,8 @@ proc query*(client: BaraClient, sql: string, params: seq[WireValue]): Future[Que
     raise newException(IOError, "Not connected")
 
   let msg = makeQueryParamsMessage(client.nextId(), sql, params)
-  await client.socket.send(cast[string](msg))
+  let msgStr = toString(msg)
+  await client.socket.send(msgStr)
 
   return await client.readQueryResponse()
 
@@ -401,14 +413,15 @@ proc auth*(client: BaraClient, token: string) {.async.} =
     raise newException(IOError, "Not connected")
 
   let msg = makeAuthMessage(client.nextId(), token)
-  await client.socket.send(cast[string](msg))
+  let msgStr = toString(msg)
+  await client.socket.send(msgStr)
 
   let headerData = await client.socket.recv(12)
   if headerData.len < 12:
     raise newException(IOError, "Connection closed")
 
   var pos = 0
-  let hdrData = cast[seq[byte]](headerData)
+  let hdrData = toBytes(headerData)
   let kind = MsgKind(readUint32(hdrData, pos))
   let payloadLen = int(readUint32(hdrData, pos))
   discard readUint32(hdrData, pos)
@@ -418,7 +431,7 @@ proc auth*(client: BaraClient, token: string) {.async.} =
   elif kind == mkError:
     let payloadStr = await client.socket.recv(payloadLen)
     var epos = 0
-    let emsg = readString(cast[seq[byte]](payloadStr), epos)
+    let emsg = readString(toBytes(payloadStr), epos)
     raise newException(IOError, "Auth failed: " & emsg)
   else:
     raise newException(IOError, "Unexpected auth response: 0x" & toHex(uint32(kind), 2))
@@ -427,14 +440,15 @@ proc ping*(client: BaraClient): Future[bool] {.async.} =
   if not client.connected:
     return false
   let msg = buildMessage(mkPing, client.nextId(), @[])
-  await client.socket.send(cast[string](msg))
+  let msgStr = toString(msg)
+  await client.socket.send(msgStr)
 
   let headerData = await client.socket.recv(12)
   if headerData.len < 12:
     return false
 
   var pos = 0
-  let hdrData = cast[seq[byte]](headerData)
+  let hdrData = toBytes(headerData)
   let kind = MsgKind(readUint32(hdrData, pos))
   return kind == mkPong
 
