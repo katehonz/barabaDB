@@ -98,7 +98,7 @@ OpenSSL е включен в Nim Windows дистрибуцията. За ръч
 ### Клониране на Репозиторито
 
 ```bash
-git clone https://github.com/katehonz/barabaDB.git
+git clone https://codeberg.org/baraba/bara-lang
 cd barabaDB
 ```
 

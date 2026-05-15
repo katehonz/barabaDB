@@ -99,7 +99,7 @@ download from [slproweb.com](https://slproweb.com/products/Win32OpenSSL.html).
 ### Clone the Repository
 
 ```bash
-git clone https://github.com/katehonz/barabaDB.git
+git clone https://codeberg.org/baraba/bara-lang
 cd barabaDB
 ```
 
