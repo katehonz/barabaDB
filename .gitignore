@@ -39,3 +39,4 @@ clients/nim/src/baradb/client
 src/barabadb/storage/compaction
 src/barabadb/query/executor
 tests/join_tests
+*.tar.gz
