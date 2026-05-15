@@ -112,14 +112,26 @@ If you omit the port, the default `9472` is used.
 | `query(T)` typed    | ✅     |
 | `createProc`        | ✅     |
 | `createIter`        | ✅     |
-| `transaction`       | ⚠️ (relies on server support) |
-| `returning`         | ⚠️ (single-row limit works) |
+| `transaction`       | ✅ (top-level only) |
+| `returning`         | ❌ (not yet supported by BaraDB server) |
 
 ## Limitations
 
 - **Wire protocol strings**: BaraDB returns all column values as strings over the wire. The backend parses them at runtime. This is slightly less efficient than native SQLite/PostgreSQL bindings but keeps the implementation simple and portable.
-- **`getLastId`**: Currently returns `0`. If BaraDB supports `RETURNING id`, use `limit 1` queries instead.
+- **`getLastId` / `RETURNING`**: BaraDB's SQL parser recognizes `RETURNING`, but the executor ignores it — the result is always just the affected-row count. For now, use a `limit 1` `select` after `insert` to fetch the new row.
+- **Nested transactions (SAVEPOINT)**: Not supported by BaraDB. Top-level `BEGIN` / `COMMIT` / `ROLLBACK` work fine, but nested `transaction:` blocks (which Ormin implements via `SAVEPOINT`) will fail.
 - **Async**: Ormin's DSL is synchronous by design. This backend uses `SyncClient` under the hood. If you need async, use the raw `baradb/client` async API directly.
+
+## Why some features are missing
+
+These are **server-side limitations**, not client bugs:
+
+| Feature | Status in BaraDB server | Needed for |
+|---------|------------------------|------------|
+| `SAVEPOINT` | Not implemented | Nested `transaction:` blocks |
+| `RETURNING` | Parsed but ignored by executor | `insert ... returning id` |
+
+If you need these, open an issue on the [BaraDB server repo](https://git.invoicing.top/baraba/Baradb) — the fixes belong in `src/barabadb/query/executor.nim` and `src/barabadb/query/parser.nim`.
 
 ## Running the example
 
