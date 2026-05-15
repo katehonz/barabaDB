@@ -184,7 +184,7 @@ proc queryHandler(server: HttpServer): RequestHandler =
 proc healthHandler(): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
     let ctx = newContext(request)
-    ctx.json(%*{"status": "ok", "version": "1.1.0"})
+    ctx.json(%*{"status": "ok", "version": "1.1.2"})
 
 proc metricsHandler(server: HttpServer): RequestHandler =
   return proc(request: Request) {.gcsafe.} =

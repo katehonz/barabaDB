@@ -1,6 +1,6 @@
 {
   "name": "baradb",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "description": "Official JavaScript/Node.js client for BaraDB — Multimodal Database Engine",
   "main": "baradb.js",
   "types": "baradb.d.ts",

@@ -4,7 +4,7 @@
 
 **A multimodal database engine written in Nim — 100% native, zero dependencies.**
 
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](baradadb.nimble)
+[![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)](baradadb.nimble)
 [![Documentation](https://img.shields.io/badge/docs-7_languages-blue.svg)](docs/index.md)
 [![Stars](https://img.shields.io/github/stars/katehonz/barabaDB?style=social)](https://github.com/katehonz/barabaDB)
 
