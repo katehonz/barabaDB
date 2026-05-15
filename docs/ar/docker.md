@@ -3,7 +3,7 @@
 ## البداية السريعة
 
 ```bash
-git clone https://github.com/katehonz/barabaDB.git
+git clone https://codeberg.org/baraba/baradb
 cd barabaDB
 
 docker build -t baradb:latest .

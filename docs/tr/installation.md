@@ -98,7 +98,7 @@ OpenSSL, Nim Windows dağıtımıyla birlikte gelir. Manuel derlemeler için [sl
 ### Depoyu Klonlama
 
 ```bash
-git clone https://github.com/katehonz/barabaDB.git
+git clone https://codeberg.org/baraba/baradb
 cd barabaDB
 ```
 

@@ -99,7 +99,7 @@ OpenSSL поставляется вместе с Nim для Windows. Для ру
 ### Клонирование репозитория
 
 ```bash
-git clone https://github.com/katehonz/barabaDB.git
+git clone https://codeberg.org/baraba/baradb
 cd barabaDB
 ```
 

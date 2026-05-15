@@ -23,7 +23,7 @@ tokio = { version = "1.35", features = ["full"] }
 Or from source:
 
 ```bash
-git clone https://github.com/barabadb/baradadb.git
+git clone https://codeberg.org/baraba/baradb
 cd clients/rust
 cargo build
 ```
