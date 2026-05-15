@@ -92,7 +92,7 @@ proc checkAuth(server: HttpServer, request: Request, ctx: Context): bool =
     ctx.json(%*{"error": "Unauthorized"}, 401)
     return false
   let tokenStr = authHeader[7..^1]
-  let (valid, userId, role) = server.verifyToken(tokenStr)
+  let (valid, _, _) = server.verifyToken(tokenStr)
   if not valid:
     ctx.json(%*{"error": "Unauthorized"}, 401)
     return false
@@ -229,7 +229,7 @@ proc scramStartHandler(server: HttpServer): RequestHandler =
       if body == nil or "username" notin body or "clientFirstMessage" notin body:
         ctx.json(%*{"error": "Missing username or clientFirstMessage"}, 400)
         return
-      let username = body["username"].getStr()
+      let username {.used.} = body["username"].getStr()
       let clientFirst = body["clientFirstMessage"].getStr()
       try:
         let serverFirst = server.authManager.startScram(clientFirst)

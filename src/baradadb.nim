@@ -114,7 +114,7 @@ proc main() =
   asyncCheck cm.startCompactionLoop()
 
   # Create TCP server (initialization is synchronous, run is async)
-  let localId = if config.raftNodeId.len > 0: config.raftNodeId else: "node-" & $config.port
+  let localId {.used.} = if config.raftNodeId.len > 0: config.raftNodeId else: "node-" & $config.port
   var tcpServer = newServer(config)
 
   # Start Raft cluster if enabled

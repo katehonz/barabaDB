@@ -416,7 +416,7 @@ proc peekRune(l: Lexer): Rune =
     return r
   return Rune(0)
 
-proc advanceRune(l: var Lexer): Rune =
+proc advanceRune(l: var Lexer): Rune {.used.} =
   if l.pos < l.input.len:
     var r: Rune
     fastRuneAt(l.input, l.pos, r, true)

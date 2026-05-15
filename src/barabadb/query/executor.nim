@@ -1723,7 +1723,6 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
   if rows.len == 0: return
 
   let wfName = expr.wfName.toLower()
-  let frameMode = expr.wfFrameMode
   let frameStart = expr.wfFrameStart
   let frameEnd = expr.wfFrameEnd
 
@@ -1808,11 +1807,11 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
           result[rowIdx] = defaultVal
     of "first_value":
       for pos, rowIdx in sortedIdxs:
-        let (fStart, fEnd) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
+        let (fStart, _) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
         result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[fStart]], ctx)
     of "last_value":
       for pos, rowIdx in sortedIdxs:
-        let (fStart, fEnd) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
+        let (_, fEnd) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
         result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[fEnd]], ctx)
     else:
       # Unknown window function — fill with empty
@@ -2439,7 +2438,6 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     # The graph is stored by name; for simplicity, we'll use a table-based approach
     # Graph nodes are stored as rows with their properties
     let graphTable = plan.graphName & "_nodes"
-    let edgeTable = plan.graphName & "_edges"
     # Try to scan the nodes table
     let nodeRows = execScan(ctx, graphTable)
     if nodeRows.len > 0:
@@ -3395,7 +3393,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     if isMigrationApplied(ctx, stmt.amName):
       return okResult(msg="Migration '" & stmt.amName & "' already applied")
 
-    let (found, upBody, downBody) = getMigrationBody(ctx, stmt.amName)
+    let (found, upBody, _) = getMigrationBody(ctx, stmt.amName)
     if not found:
       return errResult("Migration '" & stmt.amName & "' not found")
 
@@ -3459,7 +3457,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     var appliedCount = 0
     var totalDuration = 0
     for name in toApply:
-      let (found, upBody, downBody) = getMigrationBody(ctx, name)
+      let (found, upBody, _) = getMigrationBody(ctx, name)
       if not found:
         return errResult("Migration '" & name & "' not found during batch apply")
       let startTime = epochTime()
@@ -3501,7 +3499,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
 
     var rolledBackCount = 0
     for name in toRollback:
-      let (found, upBody, downBody) = getMigrationBody(ctx, name)
+      let (found, _, downBody) = getMigrationBody(ctx, name)
       if not found:
         return errResult("Migration '" & name & "' not found during rollback")
       if downBody.len == 0:

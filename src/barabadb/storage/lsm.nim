@@ -10,7 +10,6 @@ import std/locks
 import bloom
 import wal
 import mmap
-import streams
 
 const
   SSTableMagic* = 0x53535442'u32  # "SSTB"

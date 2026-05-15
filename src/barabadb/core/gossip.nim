@@ -7,7 +7,6 @@ import std/net
 import std/asyncnet
 import std/strutils
 import std/streams
-import std/os
 
 type
   NodeState* = enum
@@ -312,7 +311,7 @@ proc startGossipListener*(gp: GossipProtocol) {.async.} =
   gp.running = true
   while gp.running:
     try:
-      let (data, senderAddr, senderPort) = await gp.sock.recvFrom(65535)
+      let (data, senderAddr, _) = await gp.sock.recvFrom(65535)
       if data.len > 0:
         gp.handleIncomingGossip(data, senderAddr)
     except:
