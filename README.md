@@ -6,6 +6,7 @@
 
 [![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](baradadb.nimble)
 [![Documentation](https://img.shields.io/badge/docs-7_languages-blue.svg)](docs/index.md)
+[![Stars](https://img.shields.io/github/stars/katehonz/barabaDB?style=social)](https://github.com/katehonz/barabaDB)
 
 ## Documentation
 
@@ -14,6 +15,8 @@
 BaraDB combines document, graph, vector, columnar, and full-text search storage
 in a single engine with a unified query language (BaraQL). It compiles to a
 single 3.3MB binary with no runtime dependencies.
+
+⭐ Thank you to everyone who continues to star and support BaraDB on [GitHub](https://github.com/katehonz/barabaDB)!
 
 > **Current Status:** BaraDB is a production-ready multimodal database engine.
 > All core storage engines, query processing, and protocol layers are fully
