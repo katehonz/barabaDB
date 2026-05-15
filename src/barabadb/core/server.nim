@@ -478,9 +478,8 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
             slowQueryLog(slowLog, queryStr, durationMs, clientId)
 
           if success:
-            if result.rows.len > 0:
-              let dataMsg = serializeResult(result, header.requestId)
-              await client.send(cast[string](dataMsg))
+            let dataMsg = serializeResult(result, header.requestId)
+            await client.send(cast[string](dataMsg))
             let completeMsg = serializeComplete(result.affectedRows, header.requestId)
             await client.send(cast[string](completeMsg))
           else:
@@ -499,9 +498,8 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           slowQueryLog(slowLog, queryStr, durationMs, clientId)
 
         if success:
-          if result.rows.len > 0:
-            let dataMsg = serializeResult(result, header.requestId)
-            await client.send(cast[string](dataMsg))
+          let dataMsg = serializeResult(result, header.requestId)
+          await client.send(cast[string](dataMsg))
           let completeMsg = serializeComplete(result.affectedRows, header.requestId)
           await client.send(cast[string](completeMsg))
         else:

@@ -250,6 +250,7 @@ type
       cdName*: string
       cdType*: string
       cdConstraints*: seq[Node]
+      cdAutoIncrement*: bool
     of nkConstraintDef:
       cstName*: string
       cstType*: string

@@ -526,7 +526,23 @@ proc parseSelect(p: var Parser): Node =
       elif p.peek().kind == tkIdent:
         alias = p.advance().value
       result.selFrom = Node(kind: nkFrom, fromTable: tableTok.value,
-                            fromAlias: alias, line: tableTok.line, col: tableTok.col)
+                             fromAlias: alias, line: tableTok.line, col: tableTok.col)
+
+    # Comma join: FROM t1, t2 → implicit CROSS JOIN
+    while p.peek().kind == tkComma:
+      discard p.advance()
+      let nextTableTok = p.expect(tkIdent)
+      var nextAlias = ""
+      if p.match(tkAs):
+        nextAlias = p.expect(tkIdent).value
+      elif p.peek().kind == tkIdent:
+        nextAlias = p.advance().value
+      let joinNode = Node(kind: nkJoin, joinKind: jkCross,
+                          joinTarget: Node(kind: nkFrom, fromTable: nextTableTok.value,
+                                           fromAlias: nextAlias, line: nextTableTok.line, col: nextTableTok.col),
+                          joinOn: nil, joinAlias: nextAlias, joinLateral: false,
+                          line: nextTableTok.line, col: nextTableTok.col)
+      result.selJoins.add(joinNode)
 
     # Parse PIVOT / UNPIVOT after FROM source
     if p.peek().kind == tkPivot:
@@ -1006,13 +1022,24 @@ proc parseCreateTable(p: var Parser): Node =
     let colDef = Node(kind: nkColumnDef, cdName: colName, cdType: colType)
     colDef.cdConstraints = @[]
 
+    # SERIAL / BIGSERIAL imply AUTO_INCREMENT
+    if colType in @["SERIAL", "BIGSERIAL"]:
+      colDef.cdAutoIncrement = true
+      if colType == "SERIAL":
+        colDef.cdType = "INTEGER"
+      else:
+        colDef.cdType = "BIGINT"
+
     # Parse column constraints
-    while p.peek().kind in {tkPrimary, tkNot, tkNull, tkUnique, tkCheck, tkDefault, tkReferences}:
+    while p.peek().kind in {tkPrimary, tkNot, tkNull, tkUnique, tkCheck, tkDefault, tkReferences, tkAutoIncrement}:
       let cst = Node(kind: nkConstraintDef)
       cst.cstColumns = @[colName]; cst.cstRefColumns = @[]
       if p.match(tkPrimary):
         discard p.expect(tkKey)
         cst.cstType = "pkey"
+      elif p.match(tkAutoIncrement):
+        colDef.cdAutoIncrement = true
+        continue
       elif p.match(tkNot):
         discard p.expect(tkNull)
         cst.cstType = "notnull"

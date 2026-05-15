@@ -67,8 +67,8 @@ suite "JOIN execution":
   test "aliased column projection":
     let r = execSql(ctx, "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id")
     check r.rows.len == 2
-    check r.rows[0]["name"] == "Alice"
-    check r.rows[0]["total"] == "99.5"
+    check r.rows[0]["u.name"] == "Alice"
+    check r.rows[0]["o.total"] == "99.5"
     check "id" notin r.rows[0]
 
   test "count after FULL JOIN":
@@ -84,8 +84,8 @@ suite "JOIN execution":
     let r = execSql(ctx,
       "SELECT u.name, recent.total FROM users u JOIN LATERAL (SELECT o.total FROM orders o WHERE o.user_id = u.id ORDER BY o.total DESC LIMIT 1) AS recent ON 1=1")
     check r.rows.len == 1
-    check r.rows[0]["name"] == "Alice"
-    check r.rows[0]["total"] == "99.5"
+    check r.rows[0]["u.name"] == "Alice"
+    check r.rows[0]["recent.total"] == "99.5"
 
   test "LATERAL JOIN returns no rows when subquery empty":
     let r = execSql(ctx,
@@ -99,8 +99,8 @@ suite "JOIN execution":
     # Alice has match (99.5), Bob has no orders -> NULL
     var foundBob = false
     for row in r.rows:
-      if row["name"] == "Bob":
-        check row["total"] == ""
+      if row["u.name"] == "Bob":
+        check row["x.total"] == ""
         foundBob = true
     check foundBob
 

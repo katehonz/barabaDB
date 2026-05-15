@@ -158,6 +158,12 @@ type
     tkDfs
     tkPath
 
+    tkAutoIncrement
+    tkSequence
+    tkNextval
+    tkCurrval
+    tkUuid
+
     # Window functions
     tkOver
     tkPartition
@@ -389,6 +395,8 @@ const keywords*: Table[string, TokenKind] = {
   "first_value": tkFirstValue,
   "last_value": tkLastValue,
   "ntile": tkNtile,
+  "auto_increment": tkAutoIncrement,
+  "sequence": tkSequence,
 }.toTable
 
 proc newLexer*(input: string): Lexer =

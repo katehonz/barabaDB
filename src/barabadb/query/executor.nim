@@ -9,6 +9,8 @@ import checksums/sha2
 import std/math
 import std/times
 import std/json
+import std/random
+import std/monotimes
 import lexer as qlex
 import parser as qpar
 import ast
@@ -70,6 +72,8 @@ type
     currentUser*: string
     currentRole*: string
     sessionVars*: Table[string, string]  # session-scoped key/value variables
+    autoIncCounters*: Table[string, int64]  # table.col -> next auto-increment value
+    sequences*: Table[string, int64]  # sequence name -> current value
 
   MigrationRecord* = object
     name*: string
@@ -112,6 +116,7 @@ type
     defaultVal*: string
     fkTable*: string
     fkColumn*: string
+    autoIncrement*: bool
 
   Row* = Table[string, string]
 
@@ -138,6 +143,7 @@ proc errResult*(msg: string): ExecResult =
 # Context management
 # ----------------------------------------------------------------------
 
+proc evalNodeToString(node: Node): string
 proc restoreSchema(ctx: ExecutionContext)
 
 proc newExecutionContext*(db: LSMTree): ExecutionContext =
@@ -151,6 +157,8 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
                    policies: initTable[string, seq[PolicyDef]](),
                    currentUser: "", currentRole: "",
                    sessionVars: initTable[string, string](),
+                   autoIncCounters: initTable[string, int64](),
+                   sequences: initTable[string, int64](),
                    onChange: nil)
   restoreSchema(result)
 
@@ -281,6 +289,7 @@ proc restoreSchema(ctx: ExecutionContext) =
         for col in stmt.crtColumns:
           if col.kind == nkColumnDef:
             var colDef = ColumnDef(name: col.cdName, colType: col.cdType)
+            colDef.autoIncrement = col.cdAutoIncrement
             for cst in col.cdConstraints:
               if cst.kind == nkConstraintDef:
                 case cst.cstType
@@ -292,6 +301,12 @@ proc restoreSchema(ctx: ExecutionContext) =
                 of "unique":
                   colDef.isUnique = true
                   ctx.btrees[stmt.crtName & "." & col.cdName] = newBTreeIndex[string, IndexEntry]()
+                of "default":
+                  if cst.cstDefault != nil:
+                    colDef.defaultVal = evalNodeToString(cst.cstDefault)
+                of "fkey":
+                  colDef.fkTable = cst.cstRefTable
+                  colDef.fkColumn = if cst.cstRefColumns.len > 0: cst.cstRefColumns[0] else: ""
                 else: discard
             tbl.columns.add(colDef)
         ctx.tables[stmt.crtName] = tbl
@@ -326,6 +341,8 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
                    txnManager: ctx.txnManager,
                    currentUser: ctx.currentUser, currentRole: ctx.currentRole,
                    sessionVars: ctx.sessionVars,
+                   autoIncCounters: ctx.autoIncCounters,
+                   sequences: ctx.sequences,
                    pendingTxn: nil, onChange: ctx.onChange)
 
 # ----------------------------------------------------------------------
@@ -846,6 +863,49 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return $now().format("yyyy-MM-dd HH:mm:ss")
     of "now":
       return $now().format("yyyy-MM-dd HH:mm:ss")
+    of "gen_random_uuid", "uuid":
+      # Generate UUID v4
+      var uuidStr = ""
+      for i in 0..<36:
+        if i in @[8, 13, 18, 23]:
+          uuidStr.add('-')
+        elif i == 14:
+          uuidStr.add('4')
+        elif i == 19:
+          uuidStr.add(['8', '9', 'a', 'b'][rand(3)])
+        else:
+          uuidStr.add("0123456789abcdef"[rand(15)])
+      return uuidStr
+    of "nextval":
+      if expr.irFuncArgs.len < 1:
+        return "0"
+      if ctx == nil: return "0"
+      let seqName = evalExpr(expr.irFuncArgs[0], row, ctx)
+      var val: int64 = 0
+      if seqName in ctx.sequences:
+        val = ctx.sequences[seqName]
+      val += 1
+      ctx.sequences[seqName] = val
+      return $val
+    of "currval":
+      if expr.irFuncArgs.len < 1:
+        return "0"
+      if ctx == nil: return "0"
+      let seqName = evalExpr(expr.irFuncArgs[0], row, ctx)
+      if seqName in ctx.sequences:
+        return $ctx.sequences[seqName]
+      return "0"
+    of "snowflake_id":
+      # Snowflake ID: timestamp_ms(41 bits) | node_id(10 bits) | sequence(12 bits)
+      var nodeId: int64 = 0
+      if expr.irFuncArgs.len > 0:
+        try: nodeId = parseInt(evalExpr(expr.irFuncArgs[0], row, ctx))
+        except: nodeId = 0
+      nodeId = nodeId and 0x3FF  # 10 bits
+      let ts = int64(epochTime() * 1000) and 0x1FFFFFFFFFF  # 41 bits
+      var snowSeq = int64(getMonoTime().ticks() and 0xFFF)  # 12 bits from monotonic
+      let snowflakeId = (ts shl 22) or (nodeId shl 12) or snowSeq
+      return $snowflakeId
     of "strftime":
       if expr.irFuncArgs.len >= 2:
         let fmt = evalExpr(expr.irFuncArgs[0], row, ctx)
@@ -1233,7 +1293,7 @@ proc fireTriggers*(ctx: ExecutionContext, tableName: string, timing: string, eve
           discard executeQuery(ctx, astNode)
 
 proc validateConstraints*(ctx: ExecutionContext, tableName: string,
-    fields: seq[string], values: seq[seq[string]]): (bool, string) =
+    fields: seq[string], values: seq[seq[string]], skipPkCheck: bool = false): (bool, string) =
   let tbl = ctx.getTableDef(tableName)
 
   for rowIdx, rowVals in values:
@@ -1268,13 +1328,14 @@ proc validateConstraints*(ctx: ExecutionContext, tableName: string,
           if not found:
             return (false, "FOREIGN KEY violation: '" & val & "' not found in " & col.fkTable & "." & col.fkColumn)
 
-    # PK uniqueness
-    if tbl.pkColumns.len > 0:
+    # PK uniqueness (skip during UPDATE — PK shouldn't change)
+    if not skipPkCheck and tbl.pkColumns.len > 0:
       var pkVals: seq[string] = @[]
       for pkCol in tbl.pkColumns:
         pkVals.add(getValue(rowVals, fields, pkCol))
       let pkStr = pkVals.join("|")
-      let pkKey = tableName & "." & pkStr
+      # Check with field=value format (as stored by execInsert)
+      var pkKey = tableName & "." & tbl.pkColumns[0] & "=" & escapeRowVal(pkVals[0])
       let (exists, _) = ctx.db.get(pkKey)
       if exists:
         return (false, "UNIQUE constraint violated: duplicate key '" & pkStr & "'")
@@ -1629,9 +1690,12 @@ proc lowerSelect*(node: Node): IRPlan =
     elif e.kind == nkIdent:
       projectPlan.projectAliases.add(e.identName)
     elif e.kind == nkPath and e.pathParts.len > 0:
-      projectPlan.projectAliases.add(e.pathParts[^1])
+      projectPlan.projectAliases.add(e.pathParts.join("."))
     elif e.kind == nkFuncCall:
-      projectPlan.projectAliases.add(e.funcName & "()")
+      var aliasArgs: seq[string] = @[]
+      for arg in e.funcArgs:
+        aliasArgs.add(exprToSql(arg))
+      projectPlan.projectAliases.add(e.funcName & "(" & aliasArgs.join(", ") & ")")
     elif e.kind == nkStar:
       projectPlan.projectAliases.add("*")
     else:
@@ -2067,9 +2131,15 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         groups[groupKey].add(row)
       for gk, groupRows in groups:
         var aggRow: Table[string, string]
+        # Populate GROUP BY key columns
         for gkExpr in gkeys:
           if gkExpr.kind == irekField and gkExpr.fieldPath.len > 0:
             aggRow[gkExpr.fieldPath[^1]] = evalExpr(gkExpr, groupRows[0], ctx)
+        # Populate non-aggregated columns from first row in group
+        if groupRows.len > 0:
+          for k, v in groupRows[0]:
+            if not k.startsWith("$") and k notin aggRow:
+              aggRow[k] = v
         # Compute each aggregate expression
         for aggExpr in plan.groupAggs:
           let aggKey = "$agg_" & $aggExpr.aggOp & "_" & $plan.groupAggs.find(aggExpr)
@@ -3004,8 +3074,35 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
       for col in tbl.columns: fields.add(col.name)
 
     let tbl = ctx.getTableDef(stmt.insTarget)
+
+    # Auto-increment: populate missing auto-increment columns
     var mutableFields = fields
     var mutableValues = values
+    for col in tbl.columns:
+      if col.autoIncrement and col.name notin mutableFields:
+        let counterKey = stmt.insTarget & "." & col.name
+        var nextVal: int64 = 1
+        if counterKey in ctx.autoIncCounters:
+          nextVal = ctx.autoIncCounters[counterKey]
+        ctx.autoIncCounters[counterKey] = nextVal + int64(mutableValues.len)
+        # Insert at position 0 so it becomes the primary storage key
+        mutableFields.insert(col.name, 0)
+        for i in 0..<mutableValues.len:
+          mutableValues[i].insert($(nextVal + int64(i)), 0)
+      elif col.autoIncrement and col.name in mutableFields:
+        # User provided value — update counter to max
+        let idx = mutableFields.find(col.name)
+        if idx >= 0:
+          for rowVals in mutableValues.mitems:
+            if idx < rowVals.len:
+              let providedVal = rowVals[idx]
+              try:
+                let intVal = parseInt(providedVal)
+                let counterKey = stmt.insTarget & "." & col.name
+                if counterKey notin ctx.autoIncCounters or intVal >= ctx.autoIncCounters[counterKey]:
+                  ctx.autoIncCounters[counterKey] = intVal + 1
+              except: discard
+
     applyDefaultValues(tbl, mutableFields, mutableValues)
 
     let (valid, errMsg) = validateConstraints(ctx, stmt.insTarget, mutableFields, mutableValues)
@@ -3028,6 +3125,41 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     if ctx.onChange != nil:
       for i in 0..<count:
         ctx.onChange(ChangeEvent(table: stmt.insTarget, kind: ckInsert, key: "", data: ""))
+
+    # RETURNING clause
+    if stmt.insReturning.len > 0 and mutableValues.len > 0:
+      var returnRows: seq[Row] = @[]
+      var returnCols: seq[string] = @[]
+      for retExpr in stmt.insReturning:
+        if retExpr.kind == nkIdent:
+          returnCols.add(retExpr.identName)
+        elif retExpr.kind == nkStar:
+          returnCols.add("*")
+        elif retExpr.exprAlias.len > 0:
+          returnCols.add(retExpr.exprAlias)
+        else:
+          returnCols.add("col" & $returnCols.len)
+      for rowVals in mutableValues:
+        var rowMap = initTable[string, string]()
+        for i, f in mutableFields:
+          if i < rowVals.len:
+            rowMap[f] = rowVals[i]
+        var returnRow = initTable[string, string]()
+        for i, retExpr in stmt.insReturning:
+          let ir = lowerExpr(retExpr)
+          let val = evalExpr(ir, rowMap, ctx)
+          if returnCols[i] == "*":
+            for k, v in rowMap:
+              returnRow[k] = v
+          else:
+            returnRow[returnCols[i]] = val
+        returnRows.add(returnRow)
+      if returnCols.contains("*"):
+        var expandedCols: seq[string] = @[]
+        for c in tbl.columns: expandedCols.add(c.name)
+        return okResult(returnRows, expandedCols, affected=count)
+      return okResult(returnRows, returnCols, affected=count)
+
     return okResult(affected=count, kvPairs=kvPairs)
 
   of nkUpdate:
@@ -3068,7 +3200,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
             updValues.add(row[col.name])
           else:
             updValues.add("")
-        let (valid, errMsg) = validateConstraints(ctx, stmt.updTarget, updFields, @[updValues])
+        let (valid, errMsg) = validateConstraints(ctx, stmt.updTarget, updFields, @[updValues], skipPkCheck = true)
         if not valid: return errResult(errMsg)
         # Fire BEFORE UPDATE triggers
         var oldRow = row
@@ -3208,6 +3340,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     for col in stmt.crtColumns:
       if col.kind == nkColumnDef:
         var colDef = ColumnDef(name: col.cdName, colType: col.cdType)
+        colDef.autoIncrement = col.cdAutoIncrement
         for cst in col.cdConstraints:
           if cst.kind == nkConstraintDef:
             case cst.cstType
@@ -3239,6 +3372,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     for col in tbl.columns:
       var parts = @[col.name, col.colType]
       if col.isPk: parts.add("PRIMARY KEY")
+      if col.autoIncrement: parts.add("AUTO_INCREMENT")
       if col.isNotNull: parts.add("NOT NULL")
       if col.isUnique: parts.add("UNIQUE")
       if col.defaultVal.len > 0: parts.add("DEFAULT '" & col.defaultVal & "'")
