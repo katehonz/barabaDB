@@ -4,9 +4,9 @@
 # └─────────────────────────────────────────────────────────┘
 #
 # Този Dockerfile build-ва BaraDB от source код.
-# ВНИМАНИЕ: Изисква локални nimble пакети (hunos, nimmax), които
-# не са в публичния nimble repository. Преди build трябва да:
-#   1. symlink-нете или копирате hunos/ и nimmax/ в проекта, или
+# ВНИМАНИЕ: Изисква локален nimble пакет (hunos), който
+# не е в публичния nimble repository. Преди build трябва да:
+#   1. symlink-нете или копирате hunos/ в проекта, или
 #   2. копирате ~/.nimble/pkgs2 в builder стейджа.
 #
 # Build:

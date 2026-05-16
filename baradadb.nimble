@@ -15,13 +15,13 @@ requires "checksums >= 0.2.0"
 
 # Tasks
 task build_debug, "Build debug version":
-  exec "nim c -d:ssl --threads:on --debugger:native --linedir:on -o:build/baradadb src/baradadb.nim"
+  exec "nim c --debugger:native --linedir:on -o:build/baradadb src/baradadb.nim"
 
 task build_release, "Build release version":
-  exec "nim c -d:ssl --threads:on -d:release --opt:speed -o:build/baradadb src/baradadb.nim"
+  exec "nim c -d:release --opt:speed -o:build/baradadb src/baradadb.nim"
 
 task test, "Run all tests":
-  exec "nim c --path:src -d:ssl --threads:on -r tests/test_all.nim"
+  exec "nim c -r tests/test_all.nim"
 
 task bench, "Run benchmarks":
-  exec "nim c --path:src -d:ssl --threads:on -d:release -r benchmarks/bench_all.nim"
+  exec "nim c -d:release -r benchmarks/bench_all.nim"
