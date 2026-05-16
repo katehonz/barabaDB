@@ -7,6 +7,9 @@ nimblecache/
 # Binaries (compiled test executables)
 tests/test_all
 tests/stress_test
+tests/test_lock
+tests/test_minimal
+tests/tla_faithfulness
 benchmarks/bench_all
 benchmarks/compare
 clients/nim/tests/test_client

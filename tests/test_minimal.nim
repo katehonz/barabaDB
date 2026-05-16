@@ -3,5 +3,5 @@ import barabadb/core/types
 
 suite "Minimal":
   test "Value creation":
-    let v = Value(kind: vkInt, intVal: 42)
-    check v.intVal == 42
+    let v = Value(kind: vkInt64, int64Val: 42)
+    check v.int64Val == 42
