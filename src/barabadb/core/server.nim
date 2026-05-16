@@ -130,7 +130,7 @@ proc typeToFieldKind*(colType: string): FieldKind =
     return fkString
 
 proc valueToWire(val: string, colType: string): WireValue =
-  if val.len == 0 or val.toLower() == "null":
+  if val == "\\N" or val.toLower() == "null":
     return WireValue(kind: fkNull)
   let t = colType.toUpper()
   if t.startsWith("INT") or t == "SERIAL" or t == "BIGINT" or t == "SMALLINT" or t == "BIGSERIAL" or t == "SMALLSERIAL":
@@ -199,7 +199,7 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
       for row in res.rows:
         var wireRow: seq[WireValue] = @[]
         for i, col in res.columns:
-          let val = if col in row: row[col] else: ""
+          let val = if col in row: row[col] else: "\\N"
           let cType = if i < colTypes.len: colTypes[i] else: ""
           wireRow.add(valueToWire(val, cType))
         qr.rows.add(wireRow)

@@ -164,9 +164,10 @@ proc queryHandler(server: HttpServer): RequestHandler =
           var jsonRow = newJObject()
           for col in res.columns:
             let key = col
-            var val = ""
-            if key in row: val = row[key]
-            jsonRow[key] = %val
+            if key in row and not isNull(row[key]):
+              jsonRow[key] = %row[key]
+            else:
+              jsonRow[key] = newJNull()
           jsonRows.add(jsonRow)
         var jsonCols = newJArray()
         for c in res.columns:

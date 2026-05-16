@@ -481,6 +481,16 @@ proc readString(l: var Lexer, quote: char): string =
   if l.pos < l.input.len:
     discard l.advance()  # skip closing quote
 
+proc readBacktickIdent(l: var Lexer, startLine, startCol: int): Token =
+  var ident = ""
+  discard l.advance()  # skip opening backtick
+  while l.pos < l.input.len and l.input[l.pos] != '`':
+    ident.add(l.input[l.pos])
+    discard l.advance()
+  if l.pos < l.input.len:
+    discard l.advance()  # skip closing backtick
+  return Token(kind: tkIdent, value: ident, line: startLine, col: startCol)
+
 proc readNumber(l: var Lexer, startLine, startCol: int): Token =
   var numStr = ""
   var isFloat = false
@@ -692,6 +702,8 @@ proc nextToken*(l: var Lexer): Token =
   of '#':
     l.skipLineComment()
     return l.nextToken()
+  of '`':
+    return l.readBacktickIdent(startLine, startCol)
   else:
     if ch in Digits:
       return l.readNumber(startLine, startCol)

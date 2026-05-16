@@ -161,6 +161,56 @@ All DB operations (`query`, `getRow`, `exec`, etc.) are wrapped in this lock.
 
 ---
 
+## 9. `key` is a Reserved SQL Keyword
+
+**Problem:** BaraDB's SQL parser treats `key` as a reserved keyword. Using it as a column or table name causes parse errors:
+
+```
+Expected tkIdent but got tkKey
+```
+
+**Result:** The `settings` table could not use `key varchar(100) primary key`.
+
+**Fix:** Added backtick-quoted identifier support in `query/lexer.nim`. Users can now escape reserved keywords using backticks:
+
+```sql
+CREATE TABLE settings(
+  `key` varchar(100) primary key,
+  value varchar(500) default ''
+);
+```
+
+Changes made:
+- Added `readBacktickIdent()` proc in `lexer.nim`
+- Added backtick case in `nextToken()` to recognize `` `identifier` `` as `tkIdent`
+
+---
+
+## 10. Empty String (`""`) Treated as NULL
+
+**Problem:** BaraDB normalized empty strings to `NULL` internally. A column defined as `NOT NULL` rejected empty string inserts, even when the application explicitly passed `''`.
+
+**Result:** SMTP settings saved via the admin panel failed with constraint violations when fields were left blank:
+
+```sql
+INSERT INTO settings (skey, value) VALUES ('smtpUser', '');
+-- ERROR: NOT NULL constraint violation
+```
+
+**Fix:** Changed internal NULL representation from empty string `""` to `\N` in `query/executor.nim`:
+
+1. `isNull()` now checks for `\N` instead of `value.len == 0`
+2. NULL literals in INSERT/UPDATE store `\N` instead of `""`
+3. Missing columns return `\N` instead of `""`
+4. `getValue()` returns `\N` for missing fields
+5. JOIN padding uses `\N` for unmatched rows
+6. Server wire protocol uses `\N` sentinel to send `fkNull`
+7. HTTP server sends JSON `null` for NULL values
+
+This allows empty strings to be stored in NOT NULL columns while still properly supporting NULL values.
+
+---
+
 ## Summary Table
 
 | # | Issue | Location | Type |
@@ -173,7 +223,9 @@ All DB operations (`query`, `getRow`, `exec`, etc.) are wrapped in this lock.
 | 6 | Inconsistent agg names | N/A (engine behavior) | Naming convention |
 | 7 | Async client unstable | `forum/src/baradb_client.nim` | Client design |
 | 8 | No thread safety | `forum/src/baradb_sqlite.nim` | Adapter design |
+| 9 | `key` reserved keyword | `query/lexer.nim` | Parser limitation |
+| 10 | Empty string = NULL | `query/executor.nim` | Data handling bug |
 
 ---
 
-*Document version: 2026-05-15*
+*Document version: 2026-05-17*

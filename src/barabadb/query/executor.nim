@@ -428,10 +428,10 @@ proc getValue(values: seq[string], fields: seq[string], colName: string): string
   for i, f in fields:
     if f.toLower() == colName.toLower() and i < values.len:
       return values[i]
-  return ""
+  return "\\N"
 
 proc isNull*(value: string): bool =
-  value.len == 0 or value.toLower() == "null"
+  value == "\\N" or value.toLower() == "null"
 
 proc escapeRowVal(v: string): string =
   v.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=")
@@ -506,8 +506,8 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     of vkInt64: return $expr.literal.int64Val
     of vkFloat64: return $expr.literal.float64Val
     of vkBool: return $expr.literal.boolVal
-    of vkNull: return ""
-    else: return ""
+    of vkNull: return "\\N"
+    else: return "\\N"
   of irekField:
     if expr.fieldPath.len > 0:
       # Check full path first for joined columns (e.g. "u.name")
@@ -520,12 +520,12 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if "$value" in row:
         let parsed = parseRowData(row["$value"])
         if colName in parsed: return parsed[colName]
-    return ""
+    return "\\N"
   of irekStar:
     return "*"
   of irekJsonPath:
     let srcVal = evalExpr(expr.jpExpr, row, ctx)
-    if srcVal.len == 0: return ""
+    if srcVal.len == 0 or isNull(srcVal): return "\\N"
     try:
       let node = parseJson(srcVal)
       if node.hasKey(expr.jpKey):
@@ -1147,7 +1147,7 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string,
           if c in oldRow:
             oldVals.add(oldRow[c])
           else:
-            oldVals.add("")
+            oldVals.add("\\N")
         let oldIdxVal = oldVals.join("|")
         if oldIdxVal.len > 0 and not isNull(oldIdxVal):
           ctx.btrees[colName].remove(oldIdxVal, IndexEntry(lsmKey: fullKey, rowValue: cast[string](existingVal)))
@@ -1196,11 +1196,11 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
         if c in oldRow:
           oldVals.add(oldRow[c])
         else:
-          oldVals.add("")
+          oldVals.add("\\N")
         if c in parsed:
           newVals.add(parsed[c])
         else:
-          newVals.add("")
+          newVals.add("\\N")
       let oldIdxVal = oldVals.join("|")
       if oldIdxVal.len > 0 and not isNull(oldIdxVal):
         ctx.btrees[colName].remove(oldIdxVal, IndexEntry(lsmKey: fullKey, rowValue: cast[string](existing)))
@@ -1220,22 +1220,23 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
         docId = docId * 31 + uint64(ord(ch))
       ftsIdx.removeDocument(docId)
       let colName = ftsKey[table.len + 1..^1]
-      let newText = if colName in parsed: parsed[colName] else: ""
-      if newText.len > 0:
+      let newText = if colName in parsed: parsed[colName] else: "\\N"
+      if newText.len > 0 and not isNull(newText):
         ftsIdx.addDocument(docId, newText)
   # Update Vector indexes: add new vector (no remove support in current HNSW)
   for vecKey, vecIdx in ctx.vectorIndexes:
     if vecKey.startsWith(table & "."):
       let colName = vecKey[table.len + 1..^1]
-      let vecStr = if colName in parsed: parsed[colName] else: ""
-      let vec = parseVectorString(vecStr)
-      if vec.len > 0:
-        var docId: uint64 = 0
-        for ch in fullKey:
-          docId = docId * 31 + uint64(ord(ch))
-        var meta = initTable[string, string]()
-        meta["key"] = fullKey
-        vengine.insert(vecIdx, docId, vec, meta)
+      let vecStr = if colName in parsed: parsed[colName] else: "\\N"
+      if not isNull(vecStr):
+        let vec = parseVectorString(vecStr)
+        if vec.len > 0:
+          var docId: uint64 = 0
+          for ch in fullKey:
+            docId = docId * 31 + uint64(ord(ch))
+          var meta = initTable[string, string]()
+          meta["key"] = fullKey
+          vengine.insert(vecIdx, docId, vec, meta)
   return 1
 
 # ----------------------------------------------------------------------
@@ -1357,7 +1358,7 @@ proc validateConstraints*(ctx: ExecutionContext, tableName: string,
           if i < rowVals.len:
             row[f] = rowVals[i]
           else:
-            row[f] = ""
+            row[f] = "\\N"
         let checkExpr = lowerExpr(check.checkNode)
         let checkResult = evalExpr(checkExpr, row, ctx)
         if checkResult != "true":
@@ -1878,9 +1879,9 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
         let (_, fEnd) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
         result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[fEnd]], ctx)
     else:
-      # Unknown window function — fill with empty
+      # Unknown window function — fill with null
       for rowIdx in sortedIdxs:
-        result[rowIdx] = ""
+        result[rowIdx] = "\\N"
 
 # ----------------------------------------------------------------------
 # IR Plan Execution (with actual filter/sort/projection)
@@ -2314,14 +2315,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             if not k.startsWith("$"):
               padded[k] = v
           for col in rightCols:
-            if col notin padded: padded[col] = ""
+            if col notin padded: padded[col] = "\\N"
           if leftAlias.len > 0:
             for k, v in l:
               if not k.startsWith("$"):
                 padded[leftAlias & "." & k] = v
           if rightAlias.len > 0:
             for col in rightCols:
-              padded[rightAlias & "." & col] = ""
+              padded[rightAlias & "." & col] = "\\N"
           result.add(padded)
       return result
 
@@ -2361,14 +2362,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           if not k.startsWith("$"):
             padded[k] = v
         for col in rightCols:
-          if col notin padded: padded[col] = ""
+          if col notin padded: padded[col] = "\\N"
         if leftAlias.len > 0:
           for k, v in l:
             if not k.startsWith("$"):
               padded[leftAlias & "." & k] = v
         if rightAlias.len > 0:
           for col in rightCols:
-            padded[rightAlias & "." & col] = ""
+            padded[rightAlias & "." & col] = "\\N"
         result.add(padded)
 
     if plan.joinKind == irjkRight or plan.joinKind == irjkFull:
@@ -2385,14 +2386,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             if not k.startsWith("$"):
               padded[k] = v
           for col in leftCols:
-            if col notin padded: padded[col] = ""
+            if col notin padded: padded[col] = "\\N"
           if rightAlias.len > 0:
             for k, v in r:
               if not k.startsWith("$"):
                 padded[rightAlias & "." & k] = v
           if leftAlias.len > 0:
             for col in leftCols:
-              padded[leftAlias & "." & col] = ""
+              padded[leftAlias & "." & col] = "\\N"
           result.add(padded)
 
     return result
@@ -2496,7 +2497,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           if col in row:
             newRow[col] = row[col]
         newRow[plan.unpivotForCol] = inCol
-        newRow[plan.unpivotValueCol] = (if inCol in row: row[inCol] else: "")
+        newRow[plan.unpivotValueCol] = (if inCol in row: row[inCol] else: "\\N")
         result.add(newRow)
     return result
 
@@ -3058,14 +3059,14 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
           elif v.kind == nkIntLit: row.add($v.intVal)
           elif v.kind == nkFloatLit: row.add($v.floatVal)
           elif v.kind == nkBoolLit: row.add($v.boolVal)
-          elif v.kind == nkNullLit: row.add("")
+          elif v.kind == nkNullLit: row.add("\\N")
           else: row.add(evalNodeToString(v))
       else:
         if rowNode.kind == nkStringLit: row.add(rowNode.strVal)
         elif rowNode.kind == nkIntLit: row.add($rowNode.intVal)
         elif rowNode.kind == nkFloatLit: row.add($rowNode.floatVal)
         elif rowNode.kind == nkBoolLit: row.add($rowNode.boolVal)
-        elif rowNode.kind == nkNullLit: row.add("")
+        elif rowNode.kind == nkNullLit: row.add("\\N")
         else: row.add(evalNodeToString(rowNode))
       values.add(row)
 
@@ -3173,7 +3174,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
                     elif s.binRight.kind == nkIntLit: $s.binRight.intVal
                     elif s.binRight.kind == nkFloatLit: $s.binRight.floatVal
                     elif s.binRight.kind == nkBoolLit: $s.binRight.boolVal
-                    elif s.binRight.kind == nkNullLit: ""
+                    elif s.binRight.kind == nkNullLit: "\\N"
                     else: evalNodeToString(s.binRight)
           sets[s.binLeft.identName] = val
 
@@ -3199,7 +3200,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
           elif col.name in row:
             updValues.add(row[col.name])
           else:
-            updValues.add("")
+            updValues.add("\\N")
         let (valid, errMsg) = validateConstraints(ctx, stmt.updTarget, updFields, @[updValues], skipPkCheck = true)
         if not valid: return errResult(errMsg)
         # Fire BEFORE UPDATE triggers
@@ -3296,7 +3297,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
               let valExpr = lowerExpr(v)
               values.add(evalExpr(valExpr, combinedRow, ctx))
             else:
-              values.add("")
+              values.add("\\N")
         if fields.len > 0:
           var row = initTable[string, string]()
           for i, f in fields:
@@ -3724,7 +3725,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         if col in row:
           colVals.add(row[col])
         else:
-          colVals.add("")
+          colVals.add("\\N")
       let idxVal = colVals.join("|")
       if idxVal.len > 0 and not isNull(idxVal):
         let lsmKey = if "$key" in row: stmt.ciTarget & "." & row["$key"] else: ""

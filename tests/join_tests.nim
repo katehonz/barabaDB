@@ -47,13 +47,13 @@ suite "JOIN execution":
     check r.rows[0]["name"] == "Alice"
     check r.rows[1]["name"] == "Alice"
     check r.rows[2]["name"] == "Bob"
-    check r.rows[2]["total"] == ""  # NULL represented as empty string
+    check r.rows[2]["total"] == "\\N"  # NULL represented as \N
 
   test "RIGHT JOIN keeps unmatched right rows":
     let r = execSql(ctx, "SELECT * FROM users u RIGHT JOIN orders o ON u.id = o.user_id")
     check r.rows.len == 3
     check r.rows[2]["id"] == "30"
-    check r.rows[2]["name"] == ""  # NULL
+    check r.rows[2]["name"] == "\\N"  # NULL
     check r.rows[2]["total"] == "150.0"
 
   test "FULL JOIN keeps all rows":
@@ -100,7 +100,7 @@ suite "JOIN execution":
     var foundBob = false
     for row in r.rows:
       if row["u.name"] == "Bob":
-        check row["x.total"] == ""
+        check row["x.total"] == "\\N"
         foundBob = true
     check foundBob
 
