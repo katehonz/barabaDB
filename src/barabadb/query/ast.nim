@@ -41,6 +41,8 @@ type
     nkGrant
     nkRevoke
     nkSetVar
+    nkCreateGraph
+    nkDropGraph
 
     # Clauses
     nkFrom
@@ -328,6 +330,12 @@ type
     of nkSetVar:
       svName*: string
       svValue*: string
+    of nkCreateGraph:
+      cgName*: string
+      cgIfNotExists*: bool
+    of nkDropGraph:
+      dgName*: string
+      dgIfExists*: bool
     of nkApplyMigration:
       amName*: string
     of nkMigrationStatus:
@@ -440,6 +448,7 @@ type
       gtEnd*: Node
       gtMaxDepth*: int
       gtReturnCols*: seq[string]
+      gtAlgo*: string
     of nkBfsQuery:
       bfsStart*: Node
       bfsTarget*: Node

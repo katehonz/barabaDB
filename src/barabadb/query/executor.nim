@@ -25,6 +25,8 @@ import ../core/mvcc
 import ../core/tracing
 import ../fts/engine as fts
 import ../vector/engine as vengine
+import ../graph/engine as gengine
+import ../graph/community as gcomm
 
 type
   IndexEntry* = ref object
@@ -68,6 +70,7 @@ type
     cteTables*: Table[string, seq[Row]]  # CTE name -> rows
     ftsIndexes*: Table[string, fts.InvertedIndex]  # table.col -> FTS index
     vectorIndexes*: Table[string, vengine.HNSWIndex]  # table.col -> HNSW index
+    graphs*: Table[string, gengine.Graph]  # graph name -> Graph object
     txnManager*: TxnManager
     pendingTxn*: Transaction
     onChange*: proc(ev: ChangeEvent) {.closure.}
@@ -1539,6 +1542,48 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
               meta[col] = val
           vengine.insert(vecIdx, docId, vec, meta)
 
+    # Update Graph objects for graph node/edge tables
+    for graphName, graph in ctx.graphs:
+      if table == graphName & "_nodes":
+        var nodeIdStr = ""
+        for i, f in fields:
+          if f == "id" and i < rowVals.len:
+            nodeIdStr = rowVals[i]
+            break
+        if nodeIdStr.len > 0:
+          let nid = gengine.NodeId(parseUInt(nodeIdStr))
+          var label = ""
+          var props = initTable[string, string]()
+          for i, f in fields:
+            if i < rowVals.len:
+              if f == "node_label":
+                label = rowVals[i]
+              elif f != "id" and f != "properties":
+                props[f] = rowVals[i]
+          try:
+            gengine.addNodeWithId(graph, nid, label, props)
+          except:
+            discard
+      elif table == graphName & "_edges":
+        var srcStr = ""
+        var dstStr = ""
+        var label = ""
+        var weight = 1.0
+        for i, f in fields:
+          if i < rowVals.len:
+            if f == "source_id": srcStr = rowVals[i]
+            elif f == "dest_id": dstStr = rowVals[i]
+            elif f == "edge_label": label = rowVals[i]
+            elif f == "weight":
+              try: weight = parseFloat(rowVals[i]) except: discard
+        if srcStr.len > 0 and dstStr.len > 0:
+          let srcId = gengine.NodeId(parseUInt(srcStr))
+          let dstId = gengine.NodeId(parseUInt(dstStr))
+          try:
+            gengine.addEdgeWithId(graph, srcId, dstId, label, weight)
+          except:
+            discard
+
     inc count
   return count
 
@@ -2138,7 +2183,17 @@ proc lowerSelect*(node: Node): IRPlan =
     elif node.selFrom.kind == nkGraphTraversal:
       let graphPlan = IRPlan(kind: irpkGraphTraversal)
       graphPlan.graphName = node.selFrom.gtGraphName
-      graphPlan.graphAlgo = "bfs"
+      graphPlan.graphAlgo = node.selFrom.gtAlgo.toLowerAscii()
+      if node.selFrom.gtStart != nil:
+        if node.selFrom.gtStart.kind == nkIdent:
+          graphPlan.graphStartNode = node.selFrom.gtStart.identName
+        elif node.selFrom.gtStart.kind == nkIntLit:
+          graphPlan.graphStartNode = $node.selFrom.gtStart.intVal
+      if node.selFrom.gtEnd != nil:
+        if node.selFrom.gtEnd.kind == nkIdent:
+          graphPlan.graphEndNode = node.selFrom.gtEnd.identName
+        elif node.selFrom.gtEnd.kind == nkIntLit:
+          graphPlan.graphEndNode = $node.selFrom.gtEnd.intVal
       graphPlan.graphEdgeLabel = node.selFrom.gtEdge
       graphPlan.graphMaxDepth = node.selFrom.gtMaxDepth
       graphPlan.graphReturnCols = node.selFrom.gtReturnCols
@@ -3247,20 +3302,136 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     return result
 
   of irpkGraphTraversal:
-    # Execute graph traversal using the graph engine
-    # For now, return graph metadata as rows
+    # Execute real graph traversal using the graph engine
     result = @[]
-    # Check if we have a cross-modal engine with graph
-    # The graph is stored by name; for simplicity, we'll use a table-based approach
-    # Graph nodes are stored as rows with their properties
-    let graphTable = plan.graphName & "_nodes"
-    # Try to scan the nodes table
-    let nodeRows = execScan(ctx, graphTable)
-    if nodeRows.len > 0:
-      for row in nodeRows:
-        var resultRow = row
-        result.add(resultRow)
-    return result
+    let graphName = plan.graphName
+    if graphName notin ctx.graphs:
+      return @[]
+
+    let g = ctx.graphs[graphName]
+    if g == nil or g.nodes.len == 0:
+      return @[]
+
+    let algo = plan.graphAlgo.toLowerAscii()
+    let returnCols = plan.graphReturnCols
+    let firstNodeId = if g.nodes.len > 0: g.nodes.keys.toSeq[0] else: gengine.NodeId(0)
+
+    case algo
+    of "bfs":
+      let startId = if plan.graphStartNode.len > 0: gengine.NodeId(parseUInt(plan.graphStartNode)) else: firstNodeId
+      let maxDepth = if plan.graphMaxDepth >= 0: plan.graphMaxDepth else: -1
+      let traverseResult = gengine.bfs(g, startId, maxDepth)
+      for nodeId in traverseResult:
+        var row = initTable[string, string]()
+        let nid = uint64(nodeId)
+        row["_node_id"] = $nid
+        if nodeId in g.nodes:
+          let gn = g.nodes[nodeId]
+          row["_node_label"] = gn.label
+          for col in returnCols:
+            if col == "label":
+              row[col] = gn.label
+            elif col == "id":
+              row[col] = $nid
+            elif col in gn.properties:
+              row[col] = gn.properties[col]
+        result.add(row)
+
+    of "dfs":
+      let startId = if plan.graphStartNode.len > 0: gengine.NodeId(parseUInt(plan.graphStartNode)) else: firstNodeId
+      let maxDepth = if plan.graphMaxDepth >= 0: plan.graphMaxDepth else: -1
+      let traverseResult = gengine.dfs(g, startId, maxDepth)
+      for nodeId in traverseResult:
+        var row = initTable[string, string]()
+        let nid = uint64(nodeId)
+        row["_node_id"] = $nid
+        if nodeId in g.nodes:
+          let gn = g.nodes[nodeId]
+          row["_node_label"] = gn.label
+          for col in returnCols:
+            if col == "label":
+              row[col] = gn.label
+            elif col == "id":
+              row[col] = $nid
+            elif col in gn.properties:
+              row[col] = gn.properties[col]
+        result.add(row)
+
+    of "pagerank", "page_rank":
+      let prResult = gengine.pageRank(g, 20, 0.85)
+      var sortedNodes = prResult.keys.toSeq
+      sortedNodes.sort(proc(a, b: gengine.NodeId): int =
+        let va = prResult.getOrDefault(a, 0.0)
+        let vb = prResult.getOrDefault(b, 0.0)
+        if va > vb: return -1 elif va < vb: return 1 else: return 0)
+      for nodeId in sortedNodes:
+        var row = initTable[string, string]()
+        let nid = uint64(nodeId)
+        row["_node_id"] = $nid
+        row["rank"] = $prResult.getOrDefault(nodeId, 0.0)
+        if nodeId in g.nodes:
+          row["_node_label"] = g.nodes[nodeId].label
+          for col in returnCols:
+            if col == "rank": row["rank"] = $prResult.getOrDefault(nodeId, 0.0)
+            elif col == "id": row[col] = $nid
+            elif col == "label": row[col] = g.nodes[nodeId].label
+            elif col in g.nodes[nodeId].properties: row[col] = g.nodes[nodeId].properties[col]
+        result.add(row)
+
+    of "shortest_path", "shortestpath":
+      if plan.graphStartNode.len > 0 and plan.graphEndNode.len > 0:
+        let startId = gengine.NodeId(parseUInt(plan.graphStartNode))
+        let endId = gengine.NodeId(parseUInt(plan.graphEndNode))
+        let path = gengine.shortestPath(g, startId, endId)
+        for nodeId in path:
+          var row = initTable[string, string]()
+          let nid = uint64(nodeId)
+          row["_node_id"] = $nid
+          if nodeId in g.nodes:
+            row["_node_label"] = g.nodes[nodeId].label
+            for col in returnCols:
+              if col == "id": row[col] = $nid
+              elif col == "label": row[col] = g.nodes[nodeId].label
+              elif col in g.nodes[nodeId].properties: row[col] = g.nodes[nodeId].properties[col]
+          result.add(row)
+      else:
+        return @[]
+
+    of "dijkstra":
+      if plan.graphStartNode.len > 0:
+        let startId = gengine.NodeId(parseUInt(plan.graphStartNode))
+        let dists = gengine.dijkstra(g, startId)
+        for nodeId, dist in dists:
+          var row = initTable[string, string]()
+          row["_node_id"] = $(uint64(nodeId))
+          row["distance"] = $dist
+          if nodeId in g.nodes:
+            row["_node_label"] = g.nodes[nodeId].label
+          result.add(row)
+      else:
+        return @[]
+
+    of "community", "community_detect", "louvain":
+      let louvainResult = gcomm.louvain(g)
+      for nodeId, communityId in louvainResult.communities:
+        var row = initTable[string, string]()
+        row["_node_id"] = $(uint64(nodeId))
+        row["community"] = $communityId
+        if nodeId in g.nodes:
+          row["_node_label"] = g.nodes[nodeId].label
+        result.add(row)
+
+    else:
+      for nodeId in g.nodes.keys:
+        var row = initTable[string, string]()
+        let nid = uint64(nodeId)
+        row["_node_id"] = $nid
+        row["_node_label"] = g.nodes[nodeId].label
+        for col in returnCols:
+          if col == "id": row[col] = $nid
+          elif col == "label": row[col] = g.nodes[nodeId].label
+          elif col in g.nodes[nodeId].properties: row[col] = g.nodes[nodeId].properties[col]
+        result.add(row)
 
   else:
     return @[]
@@ -3421,6 +3592,7 @@ proc isDDL(stmt: Node): bool =
      nkCreateTrigger, nkDropTrigger,
      nkCreateUser, nkDropUser,
      nkCreatePolicy, nkDropPolicy,
+     nkCreateGraph, nkDropGraph,
      nkGrant, nkRevoke,
      nkEnableRLS, nkDisableRLS:
     result = true
@@ -4210,6 +4382,48 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       if idxName.startsWith(stmt.drtName & "."): toDelete.add(idxName)
     for idxName in toDelete: ctx.btrees.del(idxName)
     return okResult()
+
+  of nkCreateGraph:
+    let name = stmt.cgName
+    if name in ctx.graphs:
+      if not stmt.cgIfNotExists:
+        return errResult("Graph '" & name & "' already exists")
+      return okResult(msg="Graph '" & name & "' already exists")
+    var g = gengine.newGraph()
+    ctx.graphs[name] = g
+    var createNodesSql = "CREATE TABLE " & name & "_nodes (id INTEGER PRIMARY KEY, node_label TEXT, properties TEXT)"
+    var createEdgesSql = "CREATE TABLE " & name & "_edges (source_id INTEGER, dest_id INTEGER, edge_label TEXT, weight REAL)"
+    let nodesTokens = qlex.tokenize(createNodesSql)
+    let nodesAst = qpar.parse(nodesTokens)
+    let nodesRes = executeQueryImpl(ctx, nodesAst)
+    if not nodesRes.success:
+      ctx.graphs.del(name)
+      return errResult("Failed to create graph nodes table: " & nodesRes.message)
+    let edgesTokens = qlex.tokenize(createEdgesSql)
+    let edgesAst = qpar.parse(edgesTokens)
+    let edgesRes = executeQueryImpl(ctx, edgesAst)
+    if not edgesRes.success:
+      ctx.tables.del(name & "_nodes")
+      ctx.graphs.del(name)
+      return errResult("Failed to create graph edges table: " & edgesRes.message)
+    return okResult(msg="CREATE GRAPH " & name)
+
+  of nkDropGraph:
+    let name = stmt.dgName
+    if name notin ctx.graphs:
+      if stmt.dgIfExists:
+        return okResult()
+      return errResult("Graph '" & name & "' does not exist")
+    ctx.graphs.del(name)
+    var dropNodesSql = "DROP TABLE " & name & "_nodes"
+    var dropEdgesSql = "DROP TABLE " & name & "_edges"
+    let nodesTokens = qlex.tokenize(dropNodesSql)
+    let nodesAst = qpar.parse(nodesTokens)
+    discard executeQueryImpl(ctx, nodesAst)
+    let edgesTokens = qlex.tokenize(dropEdgesSql)
+    let edgesAst = qpar.parse(edgesTokens)
+    discard executeQueryImpl(ctx, edgesAst)
+    return okResult(msg="DROP GRAPH " & name)
 
   of nkBeginTxn:
     if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:

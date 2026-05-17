@@ -4,7 +4,7 @@ author        = "BaraDB Team"
 description   = "BaraDB — Multimodal database written in Nim"
 license       = "Apache-2.0"
 srcDir        = "src"
-bin           = @["baradadb"]
+bin           = @["baradadb", "baramcp"]
 binDir        = "build"
 
 # Dependencies
@@ -16,9 +16,11 @@ requires "checksums >= 0.2.0"
 # Tasks
 task build_debug, "Build debug version":
   exec "nim c --debugger:native --linedir:on -o:build/baradadb src/baradadb.nim"
+  exec "nim c --debugger:native --linedir:on -o:build/baramcp src/baramcp.nim"
 
 task build_release, "Build release version":
   exec "nim c -d:release --opt:speed -o:build/baradadb src/baradadb.nim"
+  exec "nim c -d:release --opt:speed -o:build/baramcp src/baramcp.nim"
 
 task test, "Run all tests":
   exec "nim c -r tests/test_all.nim"

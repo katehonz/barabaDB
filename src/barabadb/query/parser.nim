@@ -42,6 +42,8 @@ proc parseOverClause(p: var Parser): Node
 proc parseFrameSpec(p: var Parser): Node
 proc parseFrameBoundary(p: var Parser): string
 proc parseSetVar(p: var Parser): Node
+proc parseCreateGraph(p: var Parser): Node
+proc parseDropGraph(p: var Parser): Node
 
 proc parsePrimary(p: var Parser): Node =
   let tok = p.peek()
@@ -464,60 +466,108 @@ proc parseSelect(p: var Parser): Node =
       discard p.advance()
       discard p.expect(tkLParen)
       let graphName = p.expect(tkIdent).value
-      discard p.expect(tkMatch)
-      # Parse pattern: (node)-[edge]->(node)
+      var hasMatch = p.match(tkMatch)
       var patternNodes: seq[string]
       var patternEdges: seq[string]
-      # First node
-      discard p.expect(tkLParen)
-      if p.peek().kind == tkIdent:
-        patternNodes.add(p.advance().value)
-      discard p.expect(tkRParen)
-      # Edge and next node(s)
-      while p.peek().kind == tkMinus or p.peek().kind == tkArrowR:
-        if p.match(tkArrowR):
-          discard
-        elif p.match(tkMinus):
-          if p.peek().kind == tkLBracket:
+      if hasMatch:
+        # First node
+        discard p.expect(tkLParen)
+        if p.peek().kind == tkIdent:
+          patternNodes.add(p.advance().value)
+        discard p.expect(tkRParen)
+        # Edge and next node(s)
+        while p.peek().kind == tkMinus or p.peek().kind == tkArrowR:
+          if p.match(tkArrowR):
+            discard
+          elif p.match(tkMinus):
+            if p.peek().kind == tkLBracket:
+              discard p.advance()
+              if p.peek().kind == tkIdent:
+                patternEdges.add(p.advance().value)
+              discard p.expect(tkRBracket)
+              discard p.expect(tkArrowR)
+            else:
+              discard
+          if p.peek().kind == tkLParen:
             discard p.advance()
             if p.peek().kind == tkIdent:
-              patternEdges.add(p.advance().value)
-            discard p.expect(tkRBracket)
-            discard p.expect(tkArrowR)
-          else:
-            discard
-        if p.peek().kind == tkLParen:
-          discard p.advance()
-          if p.peek().kind == tkIdent:
-            patternNodes.add(p.advance().value)
-          discard p.expect(tkRParen)
+              patternNodes.add(p.advance().value)
+            discard p.expect(tkRParen)
       # COLUMNS (col1, col2, ...)
+      var algo = "bfs"
+      var maxDepth = -1
+      var startId = ""
+      var endId = ""
+
+      let startVar = if patternNodes.len > 0: patternNodes[0] else: ""
+      let endVar = if patternNodes.len > 1: patternNodes[1] else: ""
+
+      if p.peek().kind == tkIdent and p.peek().value.toLower() == "algorithm":
+        discard p.advance()
+        algo = p.advance().value.toLower()
+
+      if p.peek().kind == tkIdent and p.peek().value.toLower() == "start":
+        discard p.advance()
+        if p.peek().kind == tkIntLit:
+          startId = p.advance().value
+        elif p.peek().kind == tkIdent:
+          startId = p.advance().value
+
+      if p.peek().kind == tkIdent and p.peek().value.toLower() == "end" or p.peek().kind == tkEnd:
+        discard p.advance()
+        if p.peek().kind == tkIntLit:
+          endId = p.advance().value
+        elif p.peek().kind == tkIdent:
+          endId = p.advance().value
+
+      if p.peek().kind == tkIdent and p.peek().value.toLower() == "maxdepth":
+        discard p.advance()
+        if p.peek().kind == tkIntLit:
+          maxDepth = parseInt(p.advance().value)
+
       var returnCols: seq[string]
       if p.match(tkColumns):
         discard p.expect(tkLParen)
-        if p.peek().kind == tkIdent:
+        if p.peek().kind in {tkIdent, tkLabels, tkEdge, tkGraph, tkRank, tkEnd, tkMatch, tkColumns, tkSrc, tkDst, tkBfs, tkDfs, tkMerge}:
           var colName = p.advance().value
-          # Handle dotted names: e.name
           while p.peek().kind == tkDot:
-            discard p.advance()  # skip dot
-            colName &= "." & p.expect(tkIdent).value
+            discard p.advance()
+            if p.peek().kind in {tkIdent, tkLabels, tkEdge, tkGraph, tkRank, tkBfs, tkDfs, tkMatch, tkColumns, tkEnd, tkSrc, tkDst, tkMerge}:
+              colName &= "." & p.advance().value
+            else:
+              colName &= "." & p.expect(tkIdent).value
           returnCols.add(colName)
           while p.match(tkComma):
-            if p.peek().kind == tkIdent:
+            if p.peek().kind in {tkIdent, tkLabels, tkEdge, tkGraph, tkRank, tkEnd, tkMatch, tkColumns, tkSrc, tkDst, tkBfs, tkDfs, tkMerge}:
               colName = p.advance().value
               while p.peek().kind == tkDot:
                 discard p.advance()
-                colName &= "." & p.expect(tkIdent).value
+                if p.peek().kind in {tkIdent, tkLabels, tkEdge, tkGraph, tkRank, tkBfs, tkDfs, tkMatch, tkColumns, tkEnd, tkSrc, tkDst, tkMerge}:
+                  colName &= "." & p.advance().value
+                else:
+                  colName &= "." & p.expect(tkIdent).value
               returnCols.add(colName)
             if p.match(tkAs):
-              discard p.advance()  # skip alias
+              discard p.advance()
         discard p.expect(tkRParen)
       discard p.expect(tkRParen)
-      # Create a graph traversal node
+
+      var startNode: Node = nil
+      if startId.len > 0:
+        startNode = Node(kind: nkIntLit, intVal: parseInt(startId))
+      elif patternNodes.len > 0:
+        startNode = Node(kind: nkIdent, identName: patternNodes[0])
+
+      var endNode: Node = nil
+      if endId.len > 0:
+        endNode = Node(kind: nkIntLit, intVal: parseInt(endId))
+      elif patternNodes.len > 1:
+        endNode = Node(kind: nkIdent, identName: patternNodes[1])
+
       result.selFrom = Node(kind: nkGraphTraversal, gtGraphName: graphName,
-                            gtStart: nil, gtEdge: if patternEdges.len > 0: patternEdges[0] else: "",
-                            gtDirection: "out", gtEnd: nil, gtMaxDepth: -1,
-                            gtReturnCols: returnCols, line: tok.line, col: tok.col)
+                            gtStart: startNode, gtEdge: if patternEdges.len > 0: patternEdges[0] else: "",
+                            gtDirection: "out", gtEnd: endNode, gtMaxDepth: maxDepth,
+                            gtReturnCols: returnCols, gtAlgo: algo, line: tok.line, col: tok.col)
     else:
       let tableTok = p.expect(tkIdent)
       var alias = ""
@@ -1542,6 +1592,31 @@ proc parseSetVar(p: var Parser): Node =
   result = Node(kind: nkSetVar, svName: varName, svValue: valStr,
                 line: tok.line, col: tok.col)
 
+proc parseCreateGraph(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  discard p.expect(tkGraph)
+  var ifNotExists = false
+  if p.peek().kind == tkIdent and p.peek().value.toLower() == "if":
+    discard p.advance()
+    discard p.expect(tkNot)
+    discard p.expect(tkExists)
+    ifNotExists = true
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkCreateGraph, cgName: name, cgIfNotExists: ifNotExists,
+                line: tok.line, col: tok.col)
+
+proc parseDropGraph(p: var Parser): Node =
+  let tok = p.expect(tkDrop)
+  discard p.expect(tkGraph)
+  var ifExists = false
+  if p.peek().kind == tkIdent and p.peek().value.toLower() == "if":
+    discard p.advance()
+    discard p.expect(tkExists)
+    ifExists = true
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkDropGraph, dgName: name, dgIfExists: ifExists,
+                line: tok.line, col: tok.col)
+
 proc parseStatement*(p: var Parser): Node =
   case p.peek().kind
   of tkWith, tkSelect: p.parseSelect()
@@ -1568,6 +1643,8 @@ proc parseStatement*(p: var Parser): Node =
         p.parseCreateUser()
       elif next.kind == tkPolicy:
         p.parseCreatePolicy()
+      elif next.kind == tkGraph:
+        p.parseCreateGraph()
       else:
         p.parseCreateType()
     else:
@@ -1587,6 +1664,8 @@ proc parseStatement*(p: var Parser): Node =
         p.parseDropUser()
       elif next.kind == tkPolicy:
         p.parseDropPolicy()
+      elif next.kind == tkGraph:
+        p.parseDropGraph()
       else:
         let tok = p.advance()
         Node(kind: nkNullLit, line: tok.line, col: tok.col)

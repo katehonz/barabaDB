@@ -135,6 +135,8 @@ type
     tkEdge
     tkLabels
     tkGraphTable
+    tkCreateGraph
+    tkDropGraph
     tkMatch
     tkColumns
     tkSrc
@@ -362,6 +364,9 @@ const keywords*: Table[string, TokenKind] = {
   "label": tkLabels,
   "labels": tkLabels,
   "graph_table": tkGraphTable,
+  "create_graph": tkCreateGraph,
+  "drop_graph": tkDropGraph,
+  "graph": tkGraph,
   "match": tkMatch,
   "columns": tkColumns,
   "src": tkSrc,
@@ -370,7 +375,6 @@ const keywords*: Table[string, TokenKind] = {
   "matched": tkMatched,
   "array": tkArray,
   "vector": tkVector,
-  "graph": tkGraph,
   "document": tkDocument,
   "similar": tkSimilar,
   "nearest": tkNearest,

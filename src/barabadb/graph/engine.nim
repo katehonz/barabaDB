@@ -44,6 +44,8 @@ proc `==`*(a, b: EdgeId): bool = uint64(a) == uint64(b)
 proc `==`*(a, b: NodeId): bool = uint64(a) == uint64(b)
 proc hash*(x: EdgeId): Hash = hash(uint64(x))
 proc hash*(x: NodeId): Hash = hash(uint64(x))
+proc `$`*(x: NodeId): string = $(uint64(x))
+proc `$`*(x: EdgeId): string = $(uint64(x))
 
 proc newGraph*(): Graph =
   new(result)
@@ -65,6 +67,17 @@ proc addNode*(g: Graph, label: string, properties: Table[string, string] = initT
   g.reverseAdj[id] = @[]
   return id
 
+proc addNodeWithId*(g: Graph, id: NodeId, label: string,
+                     properties: Table[string, string] = initTable[string, string]()) =
+  acquire(g.lock)
+  defer: release(g.lock)
+  if id notin g.nodes:
+    g.nodes[id] = GraphNode(id: id, label: label, properties: properties)
+    g.adjacency[id] = @[]
+    g.reverseAdj[id] = @[]
+    if uint64(id) >= g.nextNodeId:
+      g.nextNodeId = uint64(id) + 1
+
 proc addEdge*(g: Graph, src, dst: NodeId, label: string = "",
               properties: Table[string, string] = initTable[string, string](),
               weight: float64 = 1.0): EdgeId =
@@ -81,6 +94,21 @@ proc addEdge*(g: Graph, src, dst: NodeId, label: string = "",
   g.adjacency[src].add(AdjacencyEntry(edgeId: id, neighbor: dst, weight: weight, label: label))
   g.reverseAdj[dst].add(AdjacencyEntry(edgeId: id, neighbor: src, weight: weight, label: label))
   return id
+
+proc addEdgeWithId*(g: Graph, src, dst: NodeId, label: string = "",
+                     weight: float64 = 1.0) =
+  acquire(g.lock)
+  defer: release(g.lock)
+  if src notin g.nodes:
+    raise newException(KeyError, "Source node does not exist: " & $(uint64(src)))
+  if dst notin g.nodes:
+    raise newException(KeyError, "Destination node does not exist: " & $(uint64(dst)))
+  let id = EdgeId(g.nextEdgeId)
+  inc g.nextEdgeId
+  g.edges[id] = Edge(id: id, src: src, dst: dst, label: label,
+                     properties: initTable[string, string](), weight: weight)
+  g.adjacency[src].add(AdjacencyEntry(edgeId: id, neighbor: dst, weight: weight, label: label))
+  g.reverseAdj[dst].add(AdjacencyEntry(edgeId: id, neighbor: src, weight: weight, label: label))
 
 proc getNode*(g: Graph, id: NodeId): GraphNode =
   acquire(g.lock)

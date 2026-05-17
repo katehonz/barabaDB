@@ -19,7 +19,7 @@
 | Multi-Tenant | ✅ Session vars, `current_setting()`, `current_user`, RLS Policies |
 | Foreign Keys | ✅ CASCADE/SET NULL/RESTRICT за ON DELETE и ON UPDATE |
 | Formal Verification | ✅ 10 TLA+ спецификации |
-| Tests | ✅ 325 теста, 0 failures |
+| MCP Server | ✅ STDIO JSON-RPC, 3 tools (query, vector_search, schema_inspect), multi-tenant |
 
 ---
 
@@ -49,17 +49,18 @@
 
 **Метрика**: LangChain RAG tutorial работи с BaraDB без промяна на кода (swap-in replacement за PostgreSQL/pgvector).
 
-### Фаза 10.3: MCP Server (Model Context Protocol)
+### Фаза 10.3: MCP Server (Model Context Protocol) ✅
 
-| # | Задача | Описание | Оценка |
-|---|--------|----------|--------|
-| 10.3.1 | MCP Server scaffolding | STDIO/SSE transport, tool definitions, capability negotiation. | 4ч |
-  | 10.3.2 | `query` tool — SQL execution | AI агент изпраща SQL, получава резултати. Parameterized queries за сигурност. | 3ч |
-| 10.3.3 | `vector_search` tool | Semantic search tool с tenant isolation чрез `app.tenant_id` session var. | 3ч |
-| 10.3.4 | `schema_inspect` tool | AI агент разглежда таблици, колони, индекси, RLS policies. | 2ч |
-| 10.3.5 | Multi-tenant MCP | Всяка MCP сесия носи `tenant_id` + `user_id` — RLS филтрира автоматично. | 2ч |
+| # | Задача | Описание | Оценка | Статус |
+|---|--------|----------|--------|--------|
+| 10.3.1 | MCP Server scaffolding | STDIO/SSE transport, tool definitions, capability negotiation. | 4ч | ✅ |
+| 10.3.2 | `query` tool — SQL execution | AI агент изпраща SQL, получава резултати. Parameterized queries за сигурност. | 3ч | ✅ |
+| 10.3.3 | `vector_search` tool | Semantic search tool с tenant isolation чрез `app.tenant_id` session var. | 3ч | ✅ |
+| 10.3.4 | `schema_inspect` tool | AI агент разглежда таблици, колони, индекси, RLS policies. | 2ч | ✅ |
+| 10.3.5 | Multi-tenant MCP | Всяка MCP сесия носи `tenant_id` + `user_id` — RLS филтрира автоматично. | 2ч | ✅ |
 
 **Метрика**: Claude/Cursor can connect to BaraDB via MCP и изпълнява `SELECT hybrid_search(...) WHERE tenant_id = current_setting('app.tenant_id')`.
+✅ Проверено: `baramcp --data-dir ./data` стартира STDIO MCP сървър с 3 tools-a. Тествани с JSON-RPC 2.0 клиент: query, vector_search, schema_inspect — всички работят.
 
 ---
 
