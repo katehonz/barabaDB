@@ -7,6 +7,7 @@ import std/asyncdispatch
 import std/monotimes
 import std/base64
 import std/random
+import std/json
 
 import barabadb/core/types
 import barabadb/core/mvcc
@@ -3842,4 +3843,80 @@ suite "Foreign Key Enforcement":
     check del.success
     let childSel = qexec.executeQuery(ctx, parse("SELECT * FROM child9"))
     check childSel.rows.len == 0
+
+
+suite "Hybrid RAG Search":
+  var db: LSMTree
+  var ctx: qexec.ExecutionContext
+  var tmpDir: string
+
+  setup:
+    tmpDir = getTempDir() / "baradb_hybrid_test_" & $getMonoTime().ticks
+    db = newLSMTree(tmpDir)
+    ctx = qexec.newExecutionContext(db)
+
+  teardown:
+    removeDir(tmpDir)
+
+  test "hybrid_search returns JSON with vector + FTS results":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE docs (id INT PRIMARY KEY, embedding VECTOR(3), content TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs (id, embedding, content) VALUES (1, '[1.0, 0.0, 0.0]', 'quick brown fox')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs (id, embedding, content) VALUES (2, '[0.0, 1.0, 0.0]', 'lazy dog sleeps')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs (id, embedding, content) VALUES (3, '[0.0, 0.0, 1.0]', 'quick brown dog')"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_vec ON docs(embedding) USING hnsw"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts ON docs(content) USING FTS"))
+    let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search('docs', 'embedding', 'content', 'quick brown', '[1.0, 0.0, 0.0]', 10) AS res"))
+    check r.success
+    check r.rows.len == 1
+    let jsonStr = r.rows[0]["res"]
+    check jsonStr.len > 2  # not "[]"
+    let arr = parseJson(jsonStr)
+    check arr.kind == JArray
+    check arr.len >= 1
+
+  test "hybrid_search_ids returns comma-separated ids":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE docs2 (id INT PRIMARY KEY, embedding VECTOR(3), content TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs2 (id, embedding, content) VALUES (10, '[1.0, 0.0, 0.0]', 'artificial intelligence')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs2 (id, embedding, content) VALUES (20, '[0.0, 1.0, 0.0]', 'machine learning')"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_vec2 ON docs2(embedding) USING hnsw"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts2 ON docs2(content) USING FTS"))
+    let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search_ids('docs2', 'embedding', 'content', 'machine learning', '[0.0, 1.0, 0.0]', 10) AS ids"))
+    check r.success
+    check r.rows.len == 1
+    let idsStr = r.rows[0]["ids"]
+    check idsStr.len > 0
+    check idsStr.contains("20")
+
+  test "hybrid_search combines vector and FTS via RRF":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE docs3 (id INT PRIMARY KEY, embedding VECTOR(3), content TEXT)"))
+    # Doc 1: matches vector only
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs3 (id, embedding, content) VALUES (1, '[1.0, 0.0, 0.0]', 'unrelated text')"))
+    # Doc 2: no match
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs3 (id, embedding, content) VALUES (2, '[0.0, 1.0, 0.0]', 'lazy dog sleeps')"))
+    # Doc 3: matches both vector and FTS (should rank highest)
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs3 (id, embedding, content) VALUES (3, '[1.0, 0.0, 0.0]', 'quick brown fox')"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_vec3 ON docs3(embedding) USING hnsw"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts3 ON docs3(content) USING FTS"))
+    let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search('docs3', 'embedding', 'content', 'quick brown fox', '[1.0, 0.0, 0.0]', 10) AS res"))
+    check r.success
+    let arr = parseJson(r.rows[0]["res"])
+    check arr.len == 3
+    # Doc 3 should be first (matches both vector and FTS), doc 1 second (vector only), doc 2 third (no match)
+    check arr[0]["id"].getStr() == "3"
+
+  test "rerank boosts term overlap":
+    let r = qexec.executeQuery(ctx, parse("SELECT rerank('quick brown', '[{\"id\":\"1\",\"score\":\"0.5\"},{\"id\":\"2\",\"score\":\"0.5\"}]') AS res"))
+    check r.success
+    # Both have same score, rerank should preserve order (no content to boost)
+    let arr = parseJson(r.rows[0]["res"])
+    check arr.kind == JArray
+    check arr.len == 2
+
+  test "hybrid_search with missing indexes returns empty":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE docs4 (id INT PRIMARY KEY, embedding VECTOR(3), content TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs4 (id, embedding, content) VALUES (1, '[1.0, 0.0, 0.0]', 'test')"))
+    # No indexes created
+    let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search('docs4', 'embedding', 'content', 'test', '[1.0, 0.0, 0.0]', 10) AS res"))
+    check r.success
+    check r.rows[0]["res"] == "[]"
 

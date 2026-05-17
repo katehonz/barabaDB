@@ -258,6 +258,32 @@ proc search*(idx: HNSWIndex, query: Vector, k: int,
   for i in 0..<n:
     result[i] = (nearest[i].id, nearest[i].dist)
 
+proc searchEx*(idx: HNSWIndex, query: Vector, k: int,
+               metric: DistanceMetric = dmCosine): seq[(uint64, float64, Table[string, string])] =
+  acquire(idx.lock)
+  defer: release(idx.lock)
+  if idx.nodes.len == 0:
+    return @[]
+
+  var currEntry = idx.entryPoint
+
+  for lc in countdown(idx.maxLevel, 1):
+    let nearest = searchLayer(idx, currEntry, query, 1, lc, metric)
+    if nearest.len > 0:
+      currEntry = nearest[0].id
+
+  let ef = max(k * 2, idx.efConstruction)
+  let nearest = searchLayer(idx, currEntry, query, ef, 0, metric)
+
+  let n = min(k, nearest.len)
+  result = newSeq[(uint64, float64, Table[string, string])](n)
+  for i in 0..<n:
+    let nodeId = nearest[i].id
+    var meta = initTable[string, string]()
+    if nodeId in idx.nodes:
+      meta = idx.nodes[nodeId].metadata
+    result[i] = (nodeId, nearest[i].dist, meta)
+
 proc searchWithFilter*(idx: HNSWIndex, query: Vector, k: int,
                        filter: proc(metadata: Table[string, string]): bool {.gcsafe.},
                        metric: DistanceMetric = dmCosine): seq[(uint64, float64)] =

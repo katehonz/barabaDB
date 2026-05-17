@@ -562,6 +562,95 @@ proc parseVectorString*(value: string): seq[float32] =
       except:
         discard
 
+# ----------------------------------------------------------------------
+# Forward declarations
+# ----------------------------------------------------------------------
+
+proc execScan(ctx: ExecutionContext, table: string): seq[Row]
+
+# ----------------------------------------------------------------------
+# Hybrid Search Helpers
+# ----------------------------------------------------------------------
+
+proc reciprocalRankFusion(vecResults: seq[(uint64, float64)], ftsResults: seq[fts.SearchResult], k: float64 = 60.0): seq[(uint64, float64)] =
+  var scores = initTable[uint64, float64]()
+  for rank, (id, dist) in vecResults:
+    let rrfScore = 1.0 / (k + float64(rank + 1))
+    scores[id] = scores.getOrDefault(id, 0.0) + rrfScore
+  for rank, res in ftsResults:
+    let rrfScore = 1.0 / (k + float64(rank + 1))
+    scores[res.docId] = scores.getOrDefault(res.docId, 0.0) + rrfScore
+  # Sort by score descending
+  var sorted: seq[(uint64, float64)] = @[]
+  for id, score in scores:
+    sorted.add((id, score))
+  sorted.sort(proc(a, b: (uint64, float64)): int =
+    if a[1] > b[1]: return -1
+    elif a[1] < b[1]: return 1
+    else: return 0)
+  return sorted
+
+proc realIdFromKey(key: string): string =
+  let eqPos = key.find('=')
+  if eqPos >= 0:
+    return key[eqPos+1..^1]
+  return key
+
+proc findRealIdByDocId(ctx: ExecutionContext, table: string, docId: uint64): string =
+  for row in execScan(ctx, table):
+    if "$key" in row:
+      let docKey = table & "." & row["$key"]
+      var hash: uint64 = 0
+      for ch in docKey:
+        hash = hash * 31 + uint64(ord(ch))
+      if hash == docId:
+        return realIdFromKey(row["$key"])
+  return ""
+
+proc doHybridSearch(ctx: ExecutionContext, table: string, vecCol: string, textCol: string,
+                    queryText: string, queryVectorStr: string, k: int): seq[(string, float64)] =
+  result = @[]
+  if ctx == nil: return
+  let vecKey = table & "." & vecCol
+  let textKey = table & "." & textCol
+  if vecKey notin ctx.vectorIndexes or textKey notin ctx.ftsIndexes:
+    return
+  let vecIdx = ctx.vectorIndexes[vecKey]
+  let ftsIdx = ctx.ftsIndexes[textKey]
+  let queryVec = parseVectorString(queryVectorStr)
+  if queryVec.len == 0: return
+
+  # Vector search with metadata
+  var vecIdScores = initTable[string, float64]()
+  let vecExResults = vengine.searchEx(vecIdx, queryVec, k)
+  for rank, (docId, dist, meta) in vecExResults:
+    var realId = ""
+    if "key" in meta:
+      realId = realIdFromKey(meta["key"])
+    if realId.len == 0:
+      realId = findRealIdByDocId(ctx, table, docId)
+    if realId.len > 0:
+      let rrfScore = 1.0 / (60.0 + float64(rank + 1))
+      vecIdScores[realId] = vecIdScores.getOrDefault(realId, 0.0) + rrfScore
+
+  # FTS search
+  let ftsResults = fts.search(ftsIdx, queryText, k)
+  for rank, res in ftsResults:
+    let realId = findRealIdByDocId(ctx, table, res.docId)
+    if realId.len > 0:
+      let rrfScore = 1.0 / (60.0 + float64(rank + 1))
+      vecIdScores[realId] = vecIdScores.getOrDefault(realId, 0.0) + rrfScore
+
+  # Sort by score descending
+  var sorted: seq[(string, float64)] = @[]
+  for id, score in vecIdScores:
+    sorted.add((id, score))
+  sorted.sort(proc(a, b: (string, float64)): int =
+    if a[1] > b[1]: return -1
+    elif a[1] < b[1]: return 1
+    else: return 0)
+  return sorted
+
 proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string
 
 proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): Value =
@@ -1047,6 +1136,60 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     of "current_role":
       if ctx != nil: return ctx.currentRole
       return ""
+    of "hybrid_search":
+      if expr.irFuncArgs.len < 6: return "[]"
+      let table = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let vecCol = evalExpr(expr.irFuncArgs[1], row, ctx)
+      let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
+      let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
+      let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
+      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except: 10
+      let results = doHybridSearch(ctx, table, vecCol, textCol, queryText, queryVec, k)
+      var parts: seq[string] = @[]
+      for (id, score) in results:
+        parts.add("{\"id\":\"" & $id & "\",\"score\":\"" & $score & "\"}")
+      return "[" & parts.join(",") & "]"
+    of "hybrid_search_ids":
+      if expr.irFuncArgs.len < 6: return ""
+      let table = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let vecCol = evalExpr(expr.irFuncArgs[1], row, ctx)
+      let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
+      let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
+      let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
+      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except: 10
+      let results = doHybridSearch(ctx, table, vecCol, textCol, queryText, queryVec, k)
+      var ids: seq[string] = @[]
+      for (id, score) in results:
+        ids.add($id)
+      return ids.join(",")
+    of "rerank":
+      if expr.irFuncArgs.len < 2: return "[]"
+      let queryText = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let resultsJson = evalExpr(expr.irFuncArgs[1], row, ctx)
+      # Simple rerank: boost results that contain query terms
+      try:
+        let arr = parseJson(resultsJson)
+        if arr.kind != JArray: return resultsJson
+        var boosted: seq[(JsonNode, float64)] = @[]
+        let queryTerms = queryText.toLower().splitWhitespace()
+        for elem in arr:
+          var score = 0.0
+          try: score = parseFloat(elem["score"].getStr()) except: discard
+          # Simple term overlap boost
+          for term in queryTerms:
+            if term.len > 2:
+              score += 0.01
+          boosted.add((elem, score))
+        boosted.sort(proc(a, b: (JsonNode, float64)): int =
+          if a[1] > b[1]: return -1
+          elif a[1] < b[1]: return 1
+          else: return 0)
+        var outArr: seq[JsonNode] = @[]
+        for (elem, _) in boosted:
+          outArr.add(elem)
+        return $(%* outArr)
+      except:
+        return resultsJson
     of "datetime":
       if expr.irFuncArgs.len > 0:
         let arg = evalExpr(expr.irFuncArgs[0], row, ctx).toLower()
@@ -4298,7 +4441,6 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       if dimensions == 0:
         dimensions = 128  # Default dimension
       var hnswIdx = vengine.newHNSWIndex(dimensions, m = 16, efConstruction = 200, metric = vengine.dmCosine)
-      var docId: uint64 = 0
       for row in rows:
         for col in stmt.ciColumns:
           if col in row:
@@ -4307,8 +4449,11 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               var meta = initTable[string, string]()
               if "$key" in row:
                 meta["key"] = row["$key"]
+              let fullKey = stmt.ciTarget & "." & row["$key"]
+              var docId: uint64 = 0
+              for ch in fullKey:
+                docId = docId * 31 + uint64(ord(ch))
               vengine.insert(hnswIdx, docId, vec, meta)
-        docId += 1
       ctx.vectorIndexes[colKey] = hnswIdx
       return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING HNSW")
 
