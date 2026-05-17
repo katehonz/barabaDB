@@ -27,6 +27,8 @@ import ../fts/engine as fts
 import ../vector/engine as vengine
 import ../graph/engine as gengine
 import ../graph/community as gcomm
+import ../ai/chunk as chunkmod
+import ../ai/embed as embedmod
 
 type
   IndexEntry* = ref object
@@ -71,6 +73,7 @@ type
     ftsIndexes*: Table[string, fts.InvertedIndex]  # table.col -> FTS index
     vectorIndexes*: Table[string, vengine.HNSWIndex]  # table.col -> HNSW index
     graphs*: Table[string, gengine.Graph]  # graph name -> Graph object
+    embedder*: embedmod.Embedder  # optional embedding service client
     txnManager*: TxnManager
     pendingTxn*: Transaction
     onChange*: proc(ev: ChangeEvent) {.closure.}
@@ -1269,6 +1272,30 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         return $(%* outArr)
       except:
         return resultsJson
+    of "chunk":
+      if expr.irFuncArgs.len < 1: return "[]"
+      let text = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let maxSize = if expr.irFuncArgs.len >= 2:
+        try: parseInt(evalExpr(expr.irFuncArgs[1], row, ctx)) except: 1024
+      else: 1024
+      let overlap = if expr.irFuncArgs.len >= 3:
+        try: parseInt(evalExpr(expr.irFuncArgs[2], row, ctx)) except: 128
+      else: 128
+      let cfg = chunkmod.ChunkConfig(maxChunkSize: maxSize, chunkOverlap: overlap,
+                                     strategy: chunkmod.csRecursive, minChunkSize: 64)
+      let chunks = chunkmod.chunk(text, cfg)
+      var jsonChunks = newJArray()
+      for i, c in chunks:
+        jsonChunks.add(%*{"index": i, "text": c, "size": c.len})
+      return $(jsonChunks)
+    of "embed_text":
+      if expr.irFuncArgs.len < 1: return "[]"
+      let text = evalExpr(expr.irFuncArgs[0], row, ctx)
+      if ctx.embedder == nil or not ctx.embedder.config.enabled:
+        return "[]"
+      let vec = embedmod.embed(ctx.embedder, text)
+      if vec.len == 0: return "[]"
+      return embedmod.vectorToJson(vec)
     of "datetime":
       if expr.irFuncArgs.len > 0:
         let arg = evalExpr(expr.irFuncArgs[0], row, ctx).toLower()
@@ -1541,6 +1568,53 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
             if col.len > 0 and col != "$key" and col != "$value":
               meta[col] = val
           vengine.insert(vecIdx, docId, vec, meta)
+
+    # Auto-embed: if table has VECTOR column with null value but TEXT column
+    # with content, and embedder is configured, generate embedding
+    if ctx.embedder != nil and ctx.embedder.config.enabled:
+      for vecKey in ctx.vectorIndexes.keys:
+        if not vecKey.startsWith(table & "."): continue
+        let vecCol = vecKey[table.len + 1..^1]
+        let vecStr = getValue(rowVals, fields, vecCol)
+        if vecStr.len == 0 or vecStr == "null" or vecStr == "[]":
+          var sourceText = ""
+          for i, f in fields:
+            if i < rowVals.len and (f == "text" or f == "content" or f == "body"):
+              sourceText = rowVals[i]
+              break
+          if sourceText.len > 0:
+            let vec = embedmod.embed(ctx.embedder, sourceText)
+            if vec.len > 0:
+              let vecStr2 = "[" & vec.mapIt($it).join(",") & "]"
+              var updateKey = ""
+              var updateVals: seq[string] = @[]
+              for i, f in fields:
+                if i < rowVals.len:
+                  if f == vecCol:
+                    updateVals.add(f & "=" & escapeRowVal(vecStr2))
+                  elif updateKey.len == 0:
+                    updateKey = f & "=" & escapeRowVal(rowVals[i])
+                  else:
+                    updateVals.add(f & "=" & escapeRowVal(rowVals[i]))
+                elif f == vecCol:
+                  updateVals.add(f & "=" & escapeRowVal(vecStr2))
+              if updateVals.len > 0:
+                let fullKey = table & "." & updateKey
+                let valStr = updateVals.join(",")
+                if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
+                  discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](valStr))
+                else:
+                  ctx.db.put(fullKey, cast[seq[byte]](valStr))
+                var docId: uint64 = 0
+                for ch in fullKey:
+                  docId = docId * 31 + uint64(ord(ch))
+                var meta = initTable[string, string]()
+                meta["key"] = fullKey
+                for col, val in row:
+                  if col.len > 0 and col != "$key" and col != "$value":
+                    meta[col] = val
+                meta[vecCol] = vecStr2
+                vengine.insert(ctx.vectorIndexes[vecKey], docId, vec, meta)
 
     # Update Graph objects for graph node/edge tables
     for graphName, graph in ctx.graphs:
