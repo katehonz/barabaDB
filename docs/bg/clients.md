@@ -129,7 +129,7 @@ asyncio.run(main())
 
 ```nim
 # Във вашия .nimble файл
-requires "barabadb >= 1.1.0"
+requires "barabadb >= 1.1.4"
 ```
 
 ### Вградена Употреба

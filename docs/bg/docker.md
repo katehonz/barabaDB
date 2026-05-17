@@ -39,7 +39,7 @@ docker compose logs -f
 docker build -t baradb:latest .
 
 # С конкретна версия
-docker build -t baradb:1.1.0 .
+docker build -t baradb:1.1.4 .
 ```
 
 ## Стартиране

@@ -157,7 +157,7 @@ raft_peers = "node2:9001,node3:9001"
 ```
 
 ```
-BaraDB v1.1.0 — Multimodal Database Engine
+BaraDB v1.1.4 — Multimodal Database Engine
 
 Употреба:
   baradadb [опции]

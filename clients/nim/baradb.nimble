@@ -1,6 +1,6 @@
 # Package
 
-version       = "1.1.2"
+version       = "1.1.4"
 author        = "BaraDB Team"
 description   = "Official Nim client for BaraDB — async binary protocol client"
 license       = "Apache-2.0"

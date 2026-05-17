@@ -1,5 +1,5 @@
 # Package
-version       = "1.1.2"
+version       = "1.1.4"
 author        = "BaraDB Team"
 description   = "BaraDB — Multimodal database written in Nim"
 license       = "Apache-2.0"

@@ -40,7 +40,7 @@ docker compose up -d
 
 ```bash
 ./build/baradadb --version
-# BaraDB v1.1.2 — Multimodal Database Engine
+# BaraDB v1.1.4 — Multimodal Database Engine
 
 ./build/baramcp --data-dir ./data &
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | ./build/baramcp

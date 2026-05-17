@@ -119,7 +119,7 @@ GET /health
 ```json
 {
   "status": "healthy",
-  "version": "1.1.0",
+  "version": "1.1.4",
   "uptime_seconds": 86400
 }
 ```

@@ -50,7 +50,7 @@ Alle bemerkenswerten Änderungen an BaraDB werden in dieser Datei dokumentiert.
 
 ### Hinzugefügt
 
-- **Client SDKs v1.1.0** — Vollständige Clients für alle Sprachen:
+- **Client SDKs v1.1.4** — Vollständige Clients für alle Sprachen:
   - JavaScript: TypeScript Definitionen, package.json, Beispiele, Unit & Integration Tests
   - Python: Umstrukturiert als proper Package (`baradb/` mit `__init__.py` und `core.py`), pyproject.toml, Beispiele, Tests
   - Nim: Beispiele, Integration Tests, README
@@ -81,7 +81,7 @@ Alle bemerkenswerten Änderungen an BaraDB werden in dieser Datei dokumentiert.
 ### Geändert
 
 - **Version auf 1.1.0 erhöht** über alle Komponenten
-- **README** — Version Badge aktualisiert; alle Feature-Tabellen referenzieren jetzt v1.1.0
+- **README** — Version Badge aktualisiert; alle Feature-Tabellen referenzieren jetzt v1.1.4
 - **TLA+ Formal Verification** — `crossmodal.tla`, `backup.tla`, `recovery.tla` hinzugefügt; Symmetrie-Reduktion in allen 9 Specs
 - **Clean build** — 0 Compiler Warnings auf Nim 2.2.10
 

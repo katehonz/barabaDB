@@ -4,7 +4,7 @@
 
 **A multimodal database engine written in Nim — 100% native, zero dependencies.**
 
-[![Version](https://img.shields.io/badge/version-1.1.2-blue.svg)](baradadb.nimble)
+[![Version](https://img.shields.io/badge/version-1.1.4-blue.svg)](baradadb.nimble)
 [![Documentation](https://img.shields.io/badge/docs-7_languages-blue.svg)](docs/index.md)
 [![Stars](https://img.shields.io/github/stars/katehonz/barabaDB?style=social)](https://github.com/katehonz/barabaDB)
 
@@ -1456,7 +1456,7 @@ nim c -d:release -r benchmarks/bench_all.nim
 | Protocol (binary + HTTP + WS + pool + auth + ratelimit) | ✅ | 100% | v1.0.0 |
 | Schema (inheritance + computed + migrations) | ✅ | 100% | v1.0.0 |
 | Vector engine (HNSW + IVF-PQ + quant + SIMD + metadata) | ✅ | 100% | v1.0.0 |
-| Vector SQL Integration (VECTOR type, distance functions, <->, HNSW indexes) | ✅ | 100% | v1.1.0 |
+| Vector SQL Integration (VECTOR type, distance functions, <->, HNSW indexes) | ✅ | 100% | v1.1.4 |
 | Graph engine (all algorithms + pattern matching) | ✅ | 100% | v1.0.0 |
 | FTS (BM25 + TF-IDF + fuzzy + regex + multi-language) | ✅ | 100% | v1.0.0 |
 | CLI shell | ✅ | 100% | v1.0.0 |
@@ -1464,13 +1464,13 @@ nim c -d:release -r benchmarks/bench_all.nim
 | Cross-modal queries | ✅ | 100% | v1.0.0 |
 | Backup & Recovery | ✅ | 100% | v1.0.0 |
 | Client SDKs (JS, Python, Nim, Rust) | ✅ | 100% | v1.0.0 |
-| Graph SQL Integration (CREATE GRAPH, GRAPH_TABLE, Cypher) | ✅ | 100% | v1.1.2 |
-| Hybrid RAG Search (vector + FTS + RRF reranking) | ✅ | 100% | v1.1.2 |
-| AI Chunking & Auto-Embedding (`chunk()`, `embed_text()`) | ✅ | 100% | v1.1.2 |
-| NL→SQL (`nl_to_sql()`, `schema_prompt()`) | ✅ | 100% | v1.1.2 |
-| MCP Server (STDIO JSON-RPC for AI agents) | ✅ | 100% | v1.1.2 |
-| LangChain Vector Store (Python + JS) | ✅ | 100% | v1.1.2 |
-| Production Hardening (prop tests, fuzz tests, thread safety) | ✅ | 100% | v1.1.2 |
+| Graph SQL Integration (CREATE GRAPH, GRAPH_TABLE, Cypher) | ✅ | 100% | v1.1.4 |
+| Hybrid RAG Search (vector + FTS + RRF reranking) | ✅ | 100% | v1.1.4 |
+| AI Chunking & Auto-Embedding (`chunk()`, `embed_text()`) | ✅ | 100% | v1.1.4 |
+| NL→SQL (`nl_to_sql()`, `schema_prompt()`) | ✅ | 100% | v1.1.4 |
+| MCP Server (STDIO JSON-RPC for AI agents) | ✅ | 100% | v1.1.4 |
+| LangChain Vector Store (Python + JS) | ✅ | 100% | v1.1.4 |
+| Production Hardening (prop tests, fuzz tests, thread safety) | ✅ | 100% | v1.1.4 |
 
 ## Current Limitations
 
