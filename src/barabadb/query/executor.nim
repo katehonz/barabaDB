@@ -30,6 +30,7 @@ import ../graph/community as gcomm
 import ../ai/chunk as chunkmod
 import ../ai/embed as embedmod
 import ../ai/llm as llmmod
+import ../graph/cypher as cyphermod
 
 type
   IndexEntry* = ref object
@@ -1402,13 +1403,62 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         for pol in ctx.policies[table]:
           result.add("-- CREATE POLICY " & pol.name & " FOR " & pol.command & "\n")
 
-      # Foreign keys
       if tbl.foreignKeys.len > 0:
         result.add("\n-- Foreign Keys:\n")
         for fk in tbl.foreignKeys:
           result.add("-- " & fk.refTable & "(" & fk.refColumn & ") ON DELETE " & fk.onDelete & "\n")
 
       return result
+    of "similarity_nodes":
+      if expr.irFuncArgs.len < 1: return "[]"
+      let graphName = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let metric = if expr.irFuncArgs.len >= 2: evalExpr(expr.irFuncArgs[1], row, ctx).toLower() else: "jaccard"
+      if graphName notin ctx.graphs:
+        return "[]"
+      let g = ctx.graphs[graphName]
+      let simMetric = if metric == "adamic_adar" or metric == "adamic-adar": gengine.smAdamicAdar else: gengine.smJaccard
+      let pairs = gengine.similarityNodes(g, simMetric)
+      var arr = newJArray()
+      for (a, b, sim) in pairs:
+        arr.add(%*{"node_a": uint64(a), "node_b": uint64(b), "similarity": sim})
+      return $(arr)
+    of "node2vec_embed":
+      if expr.irFuncArgs.len < 1: return "[]"
+      let graphName = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let dims = if expr.irFuncArgs.len >= 2:
+        try: parseInt(evalExpr(expr.irFuncArgs[1], row, ctx)) except: 64
+      else: 64
+      if graphName notin ctx.graphs:
+        return "[]"
+      let g = ctx.graphs[graphName]
+      let embeddings = gengine.node2vec(g, dims, 10, 5)
+      var obj = newJObject()
+      for nid, emb in embeddings:
+        var vecStr = "["
+        for i, v in emb:
+          if i > 0: vecStr.add(",")
+          vecStr.add($v)
+        vecStr.add("]")
+        obj[$(uint64(nid))] = %vecStr
+      return $(obj)
+    of "cypher":
+      if expr.irFuncArgs.len < 1: return "[]"
+      let cypherQuery = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let sql = cyphermod.cypherToSql(cypherQuery)
+      if sql.len == 0: return "[]"
+      let tokens = qlex.tokenize(sql)
+      let astNode = qpar.parse(tokens)
+      if astNode.stmts.len == 0: return "[]"
+      let res = executeQuery(ctx, astNode)
+      if not res.success:
+        return "Error: " & res.message
+      var jsonRows = newJArray()
+      for r in res.rows:
+        var jsonRow = newJObject()
+        for col in res.columns:
+          jsonRow[col] = if col in r: %r[col] else: newJNull()
+        jsonRows.add(jsonRow)
+      return $(jsonRows)
     of "datetime":
       if expr.irFuncArgs.len > 0:
         let arg = evalExpr(expr.irFuncArgs[0], row, ctx).toLower()
@@ -3501,10 +3551,12 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     let algo = plan.graphAlgo.toLowerAscii()
     let returnCols = plan.graphReturnCols
     let firstNodeId = if g.nodes.len > 0: g.nodes.keys.toSeq[0] else: gengine.NodeId(0)
+    let explicitStart = try: parseUInt(plan.graphStartNode) except: 0'u64
+    let explicitEnd = try: parseUInt(plan.graphEndNode) except: 0'u64
 
     case algo
     of "bfs":
-      let startId = if plan.graphStartNode.len > 0: gengine.NodeId(parseUInt(plan.graphStartNode)) else: firstNodeId
+      let startId = if explicitStart > 0: gengine.NodeId(explicitStart) else: firstNodeId
       let maxDepth = if plan.graphMaxDepth >= 0: plan.graphMaxDepth else: -1
       let traverseResult = gengine.bfs(g, startId, maxDepth)
       for nodeId in traverseResult:
@@ -3524,7 +3576,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         result.add(row)
 
     of "dfs":
-      let startId = if plan.graphStartNode.len > 0: gengine.NodeId(parseUInt(plan.graphStartNode)) else: firstNodeId
+      let startId = if explicitStart > 0: gengine.NodeId(explicitStart) else: firstNodeId
       let maxDepth = if plan.graphMaxDepth >= 0: plan.graphMaxDepth else: -1
       let traverseResult = gengine.dfs(g, startId, maxDepth)
       for nodeId in traverseResult:
@@ -3565,9 +3617,9 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         result.add(row)
 
     of "shortest_path", "shortestpath":
-      if plan.graphStartNode.len > 0 and plan.graphEndNode.len > 0:
-        let startId = gengine.NodeId(parseUInt(plan.graphStartNode))
-        let endId = gengine.NodeId(parseUInt(plan.graphEndNode))
+      if explicitStart > 0 and explicitEnd > 0:
+        let startId = gengine.NodeId(explicitStart)
+        let endId = gengine.NodeId(explicitEnd)
         let path = gengine.shortestPath(g, startId, endId)
         for nodeId in path:
           var row = initTable[string, string]()
@@ -3584,8 +3636,8 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         return @[]
 
     of "dijkstra":
-      if plan.graphStartNode.len > 0:
-        let startId = gengine.NodeId(parseUInt(plan.graphStartNode))
+      if explicitStart > 0:
+        let startId = gengine.NodeId(explicitStart)
         let dists = gengine.dijkstra(g, startId)
         for nodeId, dist in dists:
           var row = initTable[string, string]()

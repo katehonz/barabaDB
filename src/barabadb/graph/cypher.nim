@@ -214,9 +214,164 @@ proc toCypher*(query: string): string =
   ## Convert basic BaraQL to Cypher-like syntax for graph queries
   let upper = query.toUpper()
   if upper.startsWith("SELECT") and upper.contains("MATCH"):
-    # Already Cypher-like
     return query
   return query
+
+# ---------------------------------------------------------------------------
+# Cypher → BaraQL GRAPH_TABLE translation
+# ---------------------------------------------------------------------------
+
+proc cypherToSql*(cypher: string): string =
+  ## Translate a Cypher MATCH query to BaraQL GRAPH_TABLE syntax.
+  ## Example:
+  ##   MATCH (a:Person)-[r:KNOWS]->(b:Person) WHERE a.name = 'Alice' RETURN b.name
+  ##   → SELECT b.name FROM GRAPH_TABLE(g MATCH (a)-[r]->(b) COLUMNS (a.label, b.name))
+  let trimmed = cypher.strip()
+  if not trimmed.toUpper().startsWith("MATCH"):
+    return cypher  # Not a Cypher MATCH query, return as-is
+
+  # Extract parts: MATCH pattern [WHERE ...] [RETURN ...] [ORDER BY ...] [LIMIT n]
+  var pattern = ""
+  var whereClause = ""
+  var returnClause = ""
+  var orderByClause = ""
+  var limitVal = ""
+
+  var remaining = trimmed[5..^1]  # Strip "MATCH"
+
+  # Extract the MATCH pattern up to WHERE/RETURN/ORDER/LIMIT
+  let upperRemaining = remaining.toUpper()
+  let wherePos = upperRemaining.find("WHERE")
+  let returnPos = upperRemaining.find("RETURN")
+  let orderPos = upperRemaining.find("ORDER")
+  let limitPos = upperRemaining.find("LIMIT")
+
+  var patternEnd = remaining.len
+  for pos in [wherePos, returnPos, orderPos, limitPos]:
+    if pos > 0 and pos < patternEnd:
+      patternEnd = pos
+
+  pattern = remaining[0..<patternEnd].strip()
+
+  if returnPos > 0:
+    var returnStart = returnPos + 6
+    var returnEnd = remaining.len
+    for pos in [orderPos, limitPos]:
+      if pos > returnStart and pos < returnEnd:
+        returnEnd = pos
+    returnClause = remaining[returnStart..<returnEnd].strip()
+
+  if wherePos > 0 and (wherePos < returnPos or returnPos < 0):
+    var whereStart = wherePos + 5
+    var whereEnd = remaining.len
+    for pos in [returnPos, orderPos, limitPos]:
+      if pos > whereStart and pos < whereEnd:
+        whereEnd = pos
+    whereClause = remaining[whereStart..<whereEnd].strip()
+
+  if orderPos > 0:
+    var orderStart = orderPos + 5
+    if upperRemaining[orderPos + 5..<orderPos + 7] == "BY":
+      orderStart = orderPos + 8
+    var orderEnd = remaining.len
+    if limitPos > orderStart and limitPos < orderEnd:
+      orderEnd = limitPos
+    orderByClause = remaining[orderStart..<orderEnd].strip()
+
+  if limitPos > 0:
+    var limitStart = limitPos + 5
+    limitVal = remaining[limitStart..^1].strip().split(' ')[0]
+
+  # Parse pattern: (a:Label)-[r:TYPE]->(b:Label)
+  # Extract graph name from context or use "g"
+  var graphName = "g"
+  var patternNodes: seq[(string, string)] = @[]  # (variable, label)
+  var patternEdges: seq[(string, string, string)] = @[]  # (variable, label, direction)
+
+  var i = 0
+  while i < pattern.len:
+    if pattern[i] == '(':
+      inc i
+      var nodeVar = ""
+      var nodeLabel = ""
+      while i < pattern.len and pattern[i] != ')' and pattern[i] != ':':
+        if pattern[i] != ' ':
+          nodeVar.add(pattern[i])
+        inc i
+      if i < pattern.len and pattern[i] == ':':
+        inc i
+        while i < pattern.len and pattern[i] != ')' and pattern[i] != ' ':
+          nodeLabel.add(pattern[i])
+          inc i
+      if i < pattern.len and pattern[i] == ')':
+        inc i
+      patternNodes.add((nodeVar, nodeLabel))
+    elif pattern[i] == '[':
+      inc i
+      var edgeVar = ""
+      var edgeLabel = ""
+      var edgeDir = "->"
+      while i < pattern.len and pattern[i] != ']' and pattern[i] != ':':
+        if pattern[i] != ' ':
+          edgeVar.add(pattern[i])
+        inc i
+      if i < pattern.len and pattern[i] == ':':
+        inc i
+        while i < pattern.len and pattern[i] != ']' and pattern[i] != ' ':
+          edgeLabel.add(pattern[i])
+          inc i
+      if i < pattern.len and pattern[i] == ']':
+        inc i
+      if i < pattern.len and (pattern[i] == '-' or pattern[i] == '<'):
+        edgeDir = ""
+        while i < pattern.len and pattern[i] != '(':
+          if pattern[i] notin {' ', '-'}:
+            edgeDir.add(pattern[i])
+          inc i
+      patternEdges.add((edgeVar, edgeLabel, edgeDir))
+    elif pattern[i] in {'-', '<', '>'}:
+      inc i
+    else:
+      inc i
+
+  # Build GRAPH_TABLE SQL
+  var columns: seq[string] = @[]
+  if returnClause.len > 0:
+    for part in returnClause.split(','):
+      let col = part.strip()
+      if col == "*": continue
+      columns.add(col)
+
+  # Build pattern string for GRAPH_TABLE
+  var graphPattern = ""
+  for j in 0 ..< patternNodes.len:
+    graphPattern.add("(" & patternNodes[j][0] & ")")
+    if j < patternEdges.len:
+      graphPattern.add("-[" & patternEdges[j][0] & "]->")
+    elif j < patternNodes.len - 1:
+      graphPattern.add("-")
+
+  # Build SQL
+  let colsStr = if columns.len > 0: columns.join(", ") else: "*"
+
+  var sql = "SELECT " & colsStr & " FROM GRAPH_TABLE(" & graphName & " MATCH " & graphPattern
+
+  sql.add(" COLUMNS (")
+  if columns.len > 0:
+    sql.add(columns.join(", "))
+  sql.add("))")
+
+  if whereClause.len > 0:
+    sql.add(" WHERE ")
+    sql.add(whereClause)
+  if orderByClause.len > 0:
+    sql.add(" ORDER BY ")
+    sql.add(orderByClause)
+  if limitVal.len > 0:
+    sql.add(" LIMIT ")
+    sql.add(limitVal)
+
+  return sql
 
 proc matchNodes*(g: Graph, label: string,
                  props: Table[string, string] = initTable[string, string]()): seq[GraphNode] =

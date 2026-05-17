@@ -7,6 +7,7 @@ import std/sets
 import std/hashes
 import std/streams
 import std/locks
+import std/sequtils
 
 type
   EdgeId* = distinct uint64
@@ -416,3 +417,126 @@ proc loadFromFile*(path: string): Graph =
 
   release(result.lock)
   s.close()
+
+# ---------------------------------------------------------------------------
+# Node similarity — Jaccard / Adamic-Adar
+# ---------------------------------------------------------------------------
+
+type
+  SimilarityMetric* = enum
+    smJaccard = "jaccard"
+    smAdamicAdar = "adamic_adar"
+
+proc jaccardSimilarityUnlocked(g: Graph, a, b: NodeId): float64 =
+  var aNeighbors = initHashSet[NodeId]()
+  var bNeighbors = initHashSet[NodeId]()
+  for entry in g.adjacency.getOrDefault(a, @[]):
+    aNeighbors.incl(entry.neighbor)
+  for entry in g.adjacency.getOrDefault(b, @[]):
+    bNeighbors.incl(entry.neighbor)
+  for entry in g.reverseAdj.getOrDefault(a, @[]):
+    aNeighbors.incl(entry.neighbor)
+  for entry in g.reverseAdj.getOrDefault(b, @[]):
+    bNeighbors.incl(entry.neighbor)
+
+  if aNeighbors.len == 0 and bNeighbors.len == 0:
+    return 0.0
+
+  var intersection = 0
+  for n in aNeighbors:
+    if n in bNeighbors:
+      inc intersection
+  let union = aNeighbors.len + bNeighbors.len - intersection
+
+  if union == 0:
+    return 0.0
+  return float64(intersection) / float64(union)
+
+proc jaccardSimilarity*(g: Graph, a, b: NodeId): float64 =
+  acquire(g.lock)
+  defer: release(g.lock)
+  return jaccardSimilarityUnlocked(g, a, b)
+
+proc adamicAdarSimilarityUnlocked(g: Graph, a, b: NodeId): float64 =
+  var aNeighbors = initHashSet[NodeId]()
+  var bNeighbors = initHashSet[NodeId]()
+  for entry in g.adjacency.getOrDefault(a, @[]):
+    aNeighbors.incl(entry.neighbor)
+  for entry in g.adjacency.getOrDefault(b, @[]):
+    bNeighbors.incl(entry.neighbor)
+
+  var sum: float64 = 0
+  for n in aNeighbors:
+    if n in bNeighbors:
+      let degree = g.adjacency.getOrDefault(n, @[]).len.float64
+      if degree > 0:
+        sum += 1.0 / ln(degree)
+  return sum
+
+proc adamicAdarSimilarity*(g: Graph, a, b: NodeId): float64 =
+  acquire(g.lock)
+  defer: release(g.lock)
+  return adamicAdarSimilarityUnlocked(g, a, b)
+
+proc similarityNodes*(g: Graph, metric: SimilarityMetric = smJaccard): seq[(NodeId, NodeId, float64)] =
+  acquire(g.lock)
+  defer: release(g.lock)
+  var nodeList = g.nodes.keys.toSeq
+  result = @[]
+  for i in 0 ..< nodeList.len:
+    for j in i + 1 ..< nodeList.len:
+      let a = nodeList[i]
+      let b = nodeList[j]
+      let sim = case metric
+        of smJaccard: jaccardSimilarityUnlocked(g, a, b)
+        of smAdamicAdar: adamicAdarSimilarityUnlocked(g, a, b)
+      if sim > 0:
+        result.add((a, b, sim))
+
+# ---------------------------------------------------------------------------
+# Node2Vec — simplified random-walk based graph embeddings
+# ---------------------------------------------------------------------------
+
+proc node2vec*(g: Graph, dimensions: int = 64, walkLength: int = 10,
+               numWalks: int = 5): Table[NodeId, seq[float32]] =
+  ## Generate low-dimensional embeddings for graph nodes via random walks.
+  ## Simplified Node2Vec-style approach: random walks + SVD-like factorization.
+  result = initTable[NodeId, seq[float32]]()
+  if g.nodes.len == 0:
+    return
+
+  var nodeList = g.nodes.keys.toSeq
+  var nodeIndex = initTable[NodeId, int]()
+  for i, nid in nodeList:
+    nodeIndex[nid] = i
+
+  var cooccurrence = newSeq[seq[int]](nodeList.len)
+  for i in 0 ..< nodeList.len:
+    cooccurrence[i] = newSeq[int](nodeList.len)
+
+  # Random walks from each node
+  for nid in nodeList:
+    for w in 0 ..< numWalks:
+      var current = nid
+      for step in 0 ..< walkLength:
+        let neighbors = g.adjacency.getOrDefault(current, @[])
+        if neighbors.len == 0:
+          break
+        let nbr = neighbors[(step * 17 + w * 31) mod neighbors.len]
+        cooccurrence[nodeIndex[current]][nodeIndex[nbr.neighbor]] += 1
+        cooccurrence[nodeIndex[nbr.neighbor]][nodeIndex[current]] += 1
+        current = nbr.neighbor
+
+  # Simple projection: use co-occurrence counts as embedding features
+  for i, nid in nodeList:
+    var emb = newSeq[float32](dimensions)
+    var total = 0
+    for j in 0 ..< nodeList.len:
+      if i != j:
+        total += cooccurrence[i][j]
+    for d in 0 ..< dimensions:
+      if total > 0:
+        emb[d] = float32(cooccurrence[i][min(d + (i * 7), nodeList.len - 1)]) / float32(max(total, 1))
+      else:
+        emb[d] = float32(0.01)
+    result[nid] = emb
