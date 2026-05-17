@@ -2678,7 +2678,10 @@ proc getSelectColumns(stmt: Node): seq[string] =
     elif e.kind == nkPath and e.pathParts.len > 0:
       result.add(e.pathParts[^1])
     elif e.kind == nkFuncCall:
-      result.add(e.funcName & "()")
+      var aliasArgs: seq[string] = @[]
+      for arg in e.funcArgs:
+        aliasArgs.add(exprToSql(arg))
+      result.add(e.funcName & "(" & aliasArgs.join(", ") & ")")
     elif e.kind == nkStar:
       result.add("*")
     else:
