@@ -1,207 +1,164 @@
-# BaraDB — PLAN
+# BaraDB — AI-Native Data Platform Roadmap
 
-> **v1.0.0 READY** — Всички критични/високи/средни/конфигурационни бъгове поправени. Всички 10 TLA+ спецификации са завършени. Build е чист (0 warnings).
-
----
-
-## Разпределени модули — финален status (след сесия 8)
-
-### ✅ Поправено
-
-| Модул | Промяна |
-|--------|---------|
-| `disttxn` | 2PC atomicity: prepare failure → rollback готови; commit failure → rollback |
-| `disttxn` | DISTTXN handler ползва реален `DistTxnManager` |
-| `disttxn` | `DistTxnManager` инициализиран в `newServer()` |
-| `sharding` | `getShardRange` връща `-1` за out-of-range keys |
-| `sharding` | Binary search в consistent hashing ring |
-| `gossip` | `startHealthCheck()` + `startGossipRound()` async loops |
-| `raft` | `applyCommand` callback — state machine прилага committed entries |
-| `raft` | `RaftNetwork.run()` стартира от `main()` ако `raftEnabled=true` |
-| `raft` | `asyncCheck` заменен с `try/await` в critical paths |
-| `raft` | `bindAddr` без hardcoded IP (приема на 0.0.0.0) |
-| `raft` | Disk persistence: `saveState()`/`loadState()` за term/votedFor/log |
-| `config` | Raft config: `raftEnabled`, `raftPort`, `raftPeers`, `raftNodeId` + env vars |
-| `auth` | JWT `exp`/`nbf`/`iat` validation + constant-time signature comparison |
-| `auth` | **SCRAM-SHA-256**: истински challenge-response със salt + iteration count |
-| `backup` | TLA+ спек: `BackupSnapshotsValid`, `RestoreIntegrity`, `RetentionInvariant` |
-| `recovery` | TLA+ спек: `RedoCommitted`, `RecoveryCompleteness`, `WalIntegrity` |
-| `crossmodal` | TLA+ спек: `MetadataVectorConsistency`, `HybridResultValid`, `TxnAtomicity` |
-
-### ⚠️ Оставащи distributed gaps (non-critical за single-node)
-
-| Модул | Gap | Статус |
-|--------|-----|--------|
-| `replication` | `writeLsn` не изпраща данни към replicas | ✅ Добавен UDP transport + binary serialization |
-| `gossip` | Няма UDP/TCP transport — in-memory само | ✅ Добавен UDP listener + broadcast + binary serialization |
-| `sharding` | `rebalance` не мигрира данни | ✅ Добавен `migrateData` протокол + `scanAll` на LSM |
-| `inter-module` | Няма raft→disttxn, gossip→sharding, replication→disttxn връзки | ✅ Всички връзки реализирани |
-| `server` | Няма shard-aware routing | ✅ ClusterMembership + ShardRouter в Server |
+> **Визия**: BaraDB не е "релационна база + векторна добавка", а единна AI-native база данни, където релационни, векторни, граф и текстови данни живеят в един engine. Както MariaDB интегрира vectors в ядрото, така и BaraDB прави vector/graph/fts първокласни граждани в SQL execution layer-а.
+>
+> **Принцип**: Универсалност + Multi-Tenancy. Всяка AI функция работи с Row-Level Security (RLS) и session variables (`app.tenant_id`). Няма отделни "AI таблици" — всичко е SQL.
 
 ---
 
-## Formal Verification — финален status
+## Текущо състояние (май 2026)
 
-### 🔴 Критични (всички поправени ✅)
-
-| # | Задача | Статус |
-|---|--------|--------|
-| FV-1 | Raft: prevLogIndex/prevLogTerm в Replicate | ✅ |
-| FV-2 | Raft: Leader step-down при partition | ✅ |
-| FV-3 | 2PC: Coordinator crash/recovery | ✅ |
-| FV-4 | 2PC: Participant timeout | ✅ |
-
-### 🟡 Важни (всички поправени ✅)
-
-| # | Задача | Статус |
-|---|--------|--------|
-| FV-5 | Symmetry reduction във всички .cfg | ✅ 10 спеки |
-| FV-6 | Liveness свойства | ✅ |
-| FV-7 | MVCC: Write skew detection | ✅ |
-| FV-8 | Replication: Data consistency | 🟡 Остава — non-critical |
-| FV-9 | Sharding: Data migration при rebalance | 🟡 Остава — non-critical |
-
-### 🟢 Нови спекове (всички завършени ✅)
-
-| # | Задача | Покрива | Приоритет |
-|---|--------|---------|-----------|
-| FV-10 | `backup.tla` | `backup.nim` | ✅ |
-| FV-11 | `recovery.tla` | `recovery.nim` | ✅ |
-| FV-12 | `crossmodal.tla` | `crossmodal.nim` | ✅ |
-
-### 🔧 Инфраструктурни (всички поправени ✅)
-
-| # | Задача | Статус |
-|---|--------|--------|
-| FV-13 | CI: Поправка на verify job | ✅ |
-| FV-14 | Property-based testing мост | ✅ |
+| Компонент | Статус |
+|-----------|--------|
+| SQL:2023 Engine | ✅ Window, MERGE, LATERAL, GROUPING SETS, PIVOT, SQL/PGQ |
+| Vector Engine | ✅ HNSW + IVF-PQ + SIMD (ядро) |
+| Vector SQL | ✅ `VECTOR(n)` тип, `CREATE VECTOR INDEX`, distance функции, `<->` оператор |
+| Graph Engine | ✅ BFS/DFS/PageRank/Dijkstra + SQL/PGQ `GRAPH_TABLE` |
+| Full-Text Search | ✅ Inverted Index + BM25 + Hybrid Search |
+| JSON/JSONB | ✅ Колони, оператори, функции |
+| Multi-Tenant | ✅ Session vars, `current_setting()`, `current_user`, RLS Policies |
+| Foreign Keys | ✅ CASCADE/SET NULL/RESTRICT за ON DELETE и ON UPDATE |
+| Formal Verification | ✅ 10 TLA+ спецификации |
+| Tests | ✅ 325 теста, 0 failures |
 
 ---
 
-## ✅ Сесия 8 — v1.0.0 финален спринт
+## Сесия 10: Vector AI Native Integration
 
-### Опция A: "Clean build" ✅
-- Почистване на 5-те build warnings
-- TLA+ symmetry reduction в `.cfg` файловете
-- Резултат: чист build без warnings + 3-10x по-бърз TLC
+> **Цел**: Да превърнем vector search от "engine feature" в "AI-native SQL experience" — RAG-ready, LangChain-compatible, MCP-enabled.
 
-### Опция B: `crossmodal.tla` ✅
-- TLA+ спек за cross-modal consistency
-- Моделира sync между document/vector/graph/FTS индекси
-- Резултат: 10-ти TLA+ спек, пълно покритие на core модулите
+### Фаза 10.1: Hybrid RAG Search
 
-### Опция C: Auth hardening + SCRAM ✅
-- Истински SCRAM-SHA-256 със salt (4096 iterations), challenge-response
-- Нов `scram.nim` модул per RFC 7677
-- HTTP endpoints: `/auth/scram/start` + `/auth/scram/finish`
-- Резултат: production-grade auth
+| # | Задача | Описание | Оценка |
+|---|--------|----------|--------|
+| 10.1.1 | `hybrid_search()` SQL функция | Комбинира vector similarity + BM25 FTS + релационни филтри в една заявка. Reranking с RRF (Reciprocal Rank Fusion). | 6-8ч |
+| 10.1.2 | `rerank()` SQL функция | Cross-encoder reranking — приема query text + резултати, връща преподредени по relevance. | 4ч |
+| 10.1.3 | Metadata filtering в vector search | `WHERE` клауза върху JSONB/релационни колони ДО vector index scan-а (pre-filtering). | 6ч |
+| 10.1.4 | Chunking + embedding pipeline | `INSERT INTO docs (text)` → автоматично chunk-ване + embedding generation чрез външен embedder. | 8ч |
 
----
+**Метрика**: `SELECT hybrid_search('AI query', embedding, content, k => 10)` връща релевантни резултати за under 50ms с 1M vectors.
 
-## Финални метрики
+### Фаза 10.2: LangChain Vector Store Interface
 
-| Метрика | Стойност |
-|---------|----------|
-| **Тестове** | 294 — 0 failures ✅ |
-| **Критични бъгове** | 0 ✅ |
-| **Високи бъгове** | 0 ✅ |
-| **Средни бъгове** | 0 ✅ |
-| **TLA+ спецификации** | 10 — всички с symmetry reduction ✅ |
-| **Build warnings** | 0 ✅ |
-| **Security audit** | Всички 🔴 и 🟠 поправени ✅ |
-| **Общ брой поправени бъгове** | 32 (9 критични + 7 високи + 12 средни + 4 конфигурационни) |
-| **Общ брой сесии** | 9 |
+| # | Задача | Описание | Оценка |
+|---|--------|----------|--------|
+| 10.2.1 | `BaraDBStore` за Python LangChain | Имплементира `VectorStore` интерфейса — `add_texts()`, `similarity_search()`, `max_marginal_relevance_search()`. | 4ч |
+| 10.2.2 | `BaraDBStore` за JS LangChain | Същото за LangChain.js. | 4ч |
+| 10.2.3 | Conversation buffer в BaraDB | `ChatMessageHistory` имплементация — съхранява message threads в релационна таблица с RLS. | 3ч |
+| 10.2.4 | RAG pipeline example | End-to-end пример: ingest PDF → chunks → embeddings → hybrid search → LLM context. | 3ч |
 
----
+**Метрика**: LangChain RAG tutorial работи с BaraDB без промяна на кода (swap-in replacement за PostgreSQL/pgvector).
 
-## Оставащи задачи (post-v1.0.0, non-critical)
+### Фаза 10.3: MCP Server (Model Context Protocol)
 
-| # | Задача | Оценка |
-|---|--------|--------|
-| — | Няма — всички планирани задачи са завършени | — |
+| # | Задача | Описание | Оценка |
+|---|--------|----------|--------|
+| 10.3.1 | MCP Server scaffolding | STDIO/SSE transport, tool definitions, capability negotiation. | 4ч |
+  | 10.3.2 | `query` tool — SQL execution | AI агент изпраща SQL, получава резултати. Parameterized queries за сигурност. | 3ч |
+| 10.3.3 | `vector_search` tool | Semantic search tool с tenant isolation чрез `app.tenant_id` session var. | 3ч |
+| 10.3.4 | `schema_inspect` tool | AI агент разглежда таблици, колони, индекси, RLS policies. | 2ч |
+| 10.3.5 | Multi-tenant MCP | Всяка MCP сесия носи `tenant_id` + `user_id` — RLS филтрира автоматично. | 2ч |
 
-**BaraDB v1.0.0 е production-ready за blogs, e-commerce и small ERP системи.**
-**Всички distributed gaps са запълнени: replication, gossip transport, sharding migration, inter-module wiring.**
-**Thread safety: SharedLock ref споделен между всички connection-и — конкурентни DDL/DML защитени.**
+**Метрика**: Claude/Cursor can connect to BaraDB via MCP и изпълнява `SELECT hybrid_search(...) WHERE tenant_id = current_setting('app.tenant_id')`.
 
 ---
 
-## 🆕 Сесия 9 — Stabilization Sprint (май 2026)
+## Сесия 11: Graph Engine Deep Integration
 
-> **Цел:** Да махнем всички workaround-и от `BARADB_DEFICIENCIES.md`, да почистим build-а и да подготвим почвата за типова система.
-> **Принцип:** Без нови светове — само stabilizaция на съществуващото.
+> **Цел**: SQL/PGQ парсерът е готов, но execution-ът е table-based. Да го направим първокласен citizen с native graph storage и Cypher compatibility.
 
-### Седмица 1: Deficiency Hunt + Build Cleanup
+### Фаза 11.1: Native Graph Storage
 
-| # | Задача | Оценка | Статус |
-|---|--------|--------|--------|
-| 9.1.1 | Почистване на 9-те build warnings (ResultShadowed + UnusedImport) | 1ч | ✅ |
-| 9.1.2 | Issue #6: Aggregate column names (`count(*)` → `count(*)`, `max(id)` → `max(id)`) | 2ч | ✅ |
-| 9.1.3 | Issue #5: GROUP BY bare columns — първи ред от групата за non-aggregated колони | 4-6ч | ✅ |
-| 9.1.4 | Issue #7+8: Решение за async vs sync client + thread safety | 2ч | ✅ |
-| 9.1.5 | Regression тестове за всички 10 deficiencies | 2ч | ✅ |
+| # | Задача | Описание | Оценка |
+|---|--------|----------|--------|
+| 11.1.1 | Property Graph DDL | `CREATE GRAPH g`, `CREATE NODE TABLE`, `CREATE EDGE TABLE` — native graph schema. | 4ч |
+| 11.1.2 | Adjacency list storage | Ребрата се пазят като adjacency lists (не като отделни LSM редове) за O(1) neighbors access. | 6ч |
+| 11.1.3 | Graph indexes | Index на `source→targets` и `target→sources` за bidirectional traversal. | 4ч |
+| 11.1.4 | Graph + RLS integration | `CREATE POLICY` върху graph nodes/edges — tenant isolation за граф данни. | 3ч |
 
-**Метрика:** NimForum миграционният код маха всички `DISTINCT` workaround-и за GROUP BY.
+### Фаза 11.2: Advanced Graph Algorithms
 
----
+| # | Задача | Описание | Оценка |
+|---|--------|----------|--------|
+| 11.2.1 | `shortest_path()` SQL функция | Dijkstra/A* между два node-а, връща path като JSON array. | 3ч |
+| 11.2.2 | `community_detection()` SQL функция | Louvain algorithm, връща community ID за всеки node. | 6ч |
+| 11.2.3 | `similarity_nodes()` SQL функция | Jaccard/Adamic-Adar similarity между neighbors. | 3ч |
+| 11.2.4 | Vector + Graph hybrid | Node embeddings + graph structure: `node2vec` или `graph neural network` inference. | 8ч |
 
-### Седмица 2: Type Safety in Execution Layer
+### Фаза 11.3: Cypher Compatibility Layer
 
-| # | Задача | Оценка | Статус |
-|---|--------|--------|--------|
-| 9.2.1 | `IRExpr` носи `valueKind` — всеки AST node знае дали е INT, FLOAT, TEXT, NULL | 4-6ч | ✅ |
-| 9.2.2 | `evalExprValue` връща discriminated union (`Value(kind: vkInt64/Float64/String/Null)`) вместо само `string` | 6-8ч | ✅ |
-| 9.2.3 | `irAdd`/`irSub`/`irMul`/`irDiv` използват типовата информация (INT+INT → INT, INT+FLOAT → FLOAT) | 3ч | ✅ |
-| 9.2.4 | `validateType` използва `Value.kind` вместо `parseInt`/`parseFloat` на string | 2ч | ✅ |
+| # | Задача | Описание | Оценка |
+|---|--------|----------|--------|
+| 11.3.1 | Cypher parser (subset) | `MATCH (a)-[r]->(b) WHERE a.name = 'X' RETURN b` → BaraQL AST. | 6ч |
+| 11.3.2 | Cypher → SQL/PGQ translation | `MATCH` → `GRAPH_TABLE(... MATCH ...)` за съвместимост със съществуващ executor. | 4ч |
+| 11.3.3 | APOC-style functions | `apoc.path.expand()`, `apoc.coll.*` — полезни utility функции. | 4ч |
 
-**Метрика:** Премахваме всички `try: parseFloat catch: return fallback` евристики от `evalExpr`.
-
----
-
-### Седмица 3: JOIN Performance
-
-| # | Задача | Оценка | Статус |
-|---|--------|--------|--------|
-| 9.3.1 | Hash Join: `ON a.col = b.col` с hash table върху по-малката страна | 6ч | ✅ |
-| 9.3.2 | Index Nested Loop Join: ако има B-Tree индекс на join колоната | 4ч | ✅ |
-| 9.3.3 | Benchmark: `thread JOIN category` с 10K/100K редове | 2ч | ✅ |
-| 9.3.4 | Query planner избира между Nested Loop / Hash / Index въз основа на наличие на индекс | 4ч | ✅ |
-
-**Метрика:** JOIN с 100K редове е под 100ms.
+**Метрика**: Neo4j `movies` example работи с BaraDB Cypher layer без промяна.
 
 ---
 
-### Седмица 4: Production Hardening
+## Сесия 12: AI Agents & Natural Language → SQL
 
-| # | Задача | Оценка | Статус |
-|---|--------|--------|--------|
-| 9.4.1 | Property-based tests за `evalExpr` — случайни AST-та, проверка на invariant-и | 4ч | ✅ |
-| 9.4.2 | Fuzz test за wire protocol — случайни байтове, mutation fuzzing, roundtrip за всички FieldKind | 3ч | ✅ |
-| 9.4.3 | Thread safety audit + fix: `execInsert`/`execUpdate`/`execDelete` с shared `ExecutionContext` | 3ч | ✅ |
-| 9.4.4 | ~~NimForum integration test~~ — отпада, запазваме универсалност | — | ❌ |
+> **Цел**: No-code / low-code AI агенти, които работят директно с BaraDB.
 
-**Метрика:** 58 property-based invariant-а + 35 fuzz сценария. `ctxLock` → `SharedLock` ref споделен между всички connection-и.
+### Фаза 12.1: NL → SQL Agent
 
-**Thread safety fix:** `ctxLock` беше per-connection `Lock` — всеки клониран контекст имаше собствен mutex, което не пази shared state (tables, btrees, ftsIndexes, users, policies, etc.) при конкурентни DDL/DML. Преместен в `SharedLock = ref object` споделен между всички клонинги на `ExecutionContext`.
+| # | Задача | Описание | Оценка |
+|---|--------|----------|--------|
+| 12.1.1 | Schema-aware prompt template | Prompt който вкарва `CREATE TABLE` дефиниции + sample data + RLS policies. | 2ч |
+| 12.1.2 | `nl_to_sql()` SQL функция | `SELECT nl_to_sql('Show me top 5 customers by revenue')` → generated SQL string. | 4ч |
+| 12.1.3 | Query validation layer | Генерираният SQL минава през sandbox execution с `LIMIT 1` + explain plan. | 3ч |
+| 12.1.4 | Self-correction loop | Ако SQL-ът фейлва, агентът получава error message и генерира fix. | 3ч |
+
+### Фаза 12.2: Multi-Tenant AI Agent
+
+| # | Задача | Описание | Оценка |
+|---|--------|----------|--------|
+| 12.2.1 | Per-tenant schema views | AI агентът вижда само таблици/колони, достъпни за текущия tenant. | 2ч |
+| 12.2.2 | Tenant-aware NL → SQL | `app.tenant_id` се инжектира автоматично в генерирания SQL. | 2ч |
+| 12.2.3 | Agent memory per tenant | Conversation history се изолира по tenant_id + user_id. | 2ч |
 
 ---
 
-### Финални метрики (след сесия 9 — завършена)
+## Приоритети и зависимости
 
-| Метрика | Стойност |
-|---------|----------|
-| **Тестове** | 316 — 0 failures |
-| **Prop тестове** | 58 (commutativity, associativity, distributivity, identity, NULL propagation, type coercion, comparisons) |
-| **Fuzz тестове** | 35 (deserializeValue, roundtrip всички FieldKind, mutation, stress) |
-| **Build warnings** | 0 |
-| **BARADB_DEFICIENCIES** | 0 непоправени (всички 10 поправени) |
-| **Workaround-и в NimForum** | 0 |
-| **evalExprValue** | Връща `Value(kind: vkInt64/Float64/String/Null)` |
-| **Аритметични ops** | INT+INT→INT, INT+FLOAT→FLOAT, FLOAT/INT→FLOAT |
-| **Join стратегии** | Hash Join + Index Nested Loop + Nested Loop |
-| **JOIN 10K (Hash)** | ~115ms |
-| **JOIN 10K (Index NL)** | ~90ms |
-| **Shared lock** | `SharedLock` ref — един mutex за всички connection-и |
-| **Общ брой сесии** | 9 |
+```
+Сесия 10 (Vector AI) ──→ Сесия 12 (AI Agents)
+       │                      │
+       ↓                      ↓
+Сесия 11 (Graph) ──────→ Hybrid Vector+Graph
+```
 
-**BaraDB v1.0.0 — production-ready. Сесия 9 завършена: build чист, типова система в execution layer, JOIN performance, production hardening.**
+**Препоръчителен ред:**
+1. **Сесия 10.1** — Hybrid RAG Search (най-висок business value)
+2. **Сесия 10.2** — LangChain интеграция (екосистемна съвместимост)
+3. **Сесия 10.3** — MCP Server (AI агенти могат да работят веднага)
+4. **Сесия 11.1** — Native Graph Storage (performance foundation)
+5. **Сесия 11.2** — Advanced Graph Algorithms (feature completeness)
+6. **Сесия 12** — NL → SQL (user-facing wow factor)
+
+---
+
+## Какво остава от старите планове
+
+| Стар план | Статус |
+|-----------|--------|
+| `PLAN_old_1.md` — Base SQL + MVCC + Raft | ✅ Завършен |
+| `PLAN_old_2.md` — Production Roadmap | ✅ Завършен |
+| `PLAN_old_3.md` — Stabilization Sprint (сесия 9) | ✅ Завършен |
+| `PLAN_SQL_ADVANCED.md` — Window Functions, MERGE, etc. | ✅ Завършен |
+| `PLAN_ID_GENERATORS.md` — AUTO_INCREMENT, Sequences, FK | ✅ Завършен |
+
+---
+
+## Философия
+
+> BaraDB не добавя "AI модули" — BaraDB става AI-native като вгради embeddings, similarity search, graph traversal и natural language интерфейси в съществуващия SQL engine. Всяка нова функция работи с:
+> - **MVCC транзакции**
+> - **RLS + Multi-tenancy**
+> - **WAL + Replication**
+> - **Nim performance**
+
+---
+
+*План версия: 2026-05-17*
