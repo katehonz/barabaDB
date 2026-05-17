@@ -181,6 +181,15 @@ class BaraDBClient:
         resp = requests.post(f"{self.base}/query", json={"query": sql}, timeout=30)
         return resp.json()
 
+    def query_params(self, sql: str, params: list) -> dict:
+        """Execute a parameterized query via HTTP API."""
+        resp = requests.post(
+            f"{self.base}/query",
+            json={"query": sql, "params": params},
+            timeout=30,
+        )
+        return resp.json()
+
 
 def setup_bara_db(client: BaraDBClient, table: str = "rag_docs"):
     client.execute(f"""
@@ -216,16 +225,16 @@ def ingest_document(
             chunk_idx = batch_start + i
             if embedding:
                 vec_str = "[" + ",".join(str(v) for v in embedding) + "]"
-                content_escaped = chunk.replace("'", "''")
-                client.execute(
+                client.query_params(
                     f"INSERT INTO {table} (chunk_index, content, embedding) "
-                    f"VALUES ({chunk_idx}, '{content_escaped}', '{vec_str}')"
+                    f"VALUES (? , ?, ?)",
+                    [chunk_idx, chunk, vec_str],
                 )
             else:
-                content_escaped = chunk.replace("'", "''")
-                client.execute(
+                client.query_params(
                     f"INSERT INTO {table} (chunk_index, content) "
-                    f"VALUES ({chunk_idx}, '{content_escaped}')"
+                    f"VALUES (?, ?)",
+                    [chunk_idx, chunk],
                 )
 
         print(f"  Ingested chunks {batch_start + 1}-{min(batch_start + batch_size, len(chunks))}")
@@ -241,15 +250,17 @@ def search(
     query_embedding = embed([query], embedder_config)[0]
     if query_embedding:
         vec_str = "[" + ",".join(str(v) for v in query_embedding) + "]"
-        result = client.execute(
-            f"SELECT id, chunk_index, content, cos_distance(embedding, '{vec_str}') AS distance "
+        result = client.query_params(
+            f"SELECT id, chunk_index, content, cos_distance(embedding, ?) AS distance "
             f"FROM {table} "
             f"ORDER BY distance ASC "
-            f"LIMIT {k}"
+            f"LIMIT ?",
+            [vec_str, k],
         )
     else:
-        result = client.execute(
-            f"SELECT id, chunk_index, content FROM {table} LIMIT {k}"
+        result = client.query_params(
+            f"SELECT id, chunk_index, content FROM {table} LIMIT ?",
+            [k],
         )
 
     if "rows" in result:

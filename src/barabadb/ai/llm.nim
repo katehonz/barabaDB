@@ -78,7 +78,7 @@ proc generate*(client: LLMClient, prompt: string, systemPrompt: string = ""): st
         result = data["response"].getStr()
       elif data.hasKey("choices") and data["choices"].kind == JArray and data["choices"].len > 0:
         result = data["choices"][0]["message"]["content"].getStr()
-  except:
+  except CatchableError:
     result = ""
   finally:
     httpClient.close()

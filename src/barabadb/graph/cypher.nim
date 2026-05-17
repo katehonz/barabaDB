@@ -171,7 +171,7 @@ proc parseCypher*(query: string): CypherQuery =
   if limPos >= 0:
     try:
       result.limit = parseInt(query[limPos + 7..^1].strip())
-    except:
+    except CatchableError:
       result.limit = 0
 
 proc executeCypher*(g: Graph, query: CypherQuery): CypherResult =

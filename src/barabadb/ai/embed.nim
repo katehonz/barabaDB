@@ -55,7 +55,7 @@ proc embed*(e: Embedder, text: string): seq[float32] =
     elif data.hasKey("data") and data["data"].kind == JArray and data["data"].len > 0:
       for val in data["data"][0]["embedding"]:
         result.add(float32(val.getFloat()))
-  except:
+  except CatchableError:
     discard
   finally:
     client.close()
@@ -83,5 +83,5 @@ proc jsonToVector*(s: string): seq[float32] =
     if p.len > 0:
       try:
         result.add(parseFloat(p))
-      except:
+      except CatchableError:
         discard

@@ -1214,7 +1214,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
       let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
       let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
-      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except: 10
+      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
       let results = doHybridSearch(ctx, table, vecCol, textCol, queryText, queryVec, k)
       var parts: seq[string] = @[]
       for (id, score) in results:
@@ -1227,7 +1227,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
       let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
       let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
-      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except: 10
+      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
       let results = doHybridSearch(ctx, table, vecCol, textCol, queryText, queryVec, k)
       var ids: seq[string] = @[]
       for (id, score) in results:
@@ -1240,7 +1240,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
       let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
       let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
-      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except: 10
+      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
       let filterCol = evalExpr(expr.irFuncArgs[6], row, ctx)
       let filterVal = evalExpr(expr.irFuncArgs[7], row, ctx)
       let results = doHybridSearchFiltered(ctx, table, vecCol, textCol, queryText, queryVec, k, filterCol, filterVal)
@@ -1260,7 +1260,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         let queryTerms = queryText.toLower().splitWhitespace()
         for elem in arr:
           var score = 0.0
-          try: score = parseFloat(elem["score"].getStr()) except: discard
+          try: score = parseFloat(elem["score"].getStr()) except ValueError: discard
           # Simple term overlap boost
           for term in queryTerms:
             if term.len > 2:
@@ -1274,16 +1274,16 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         for (elem, _) in boosted:
           outArr.add(elem)
         return $(%* outArr)
-      except:
+      except CatchableError:
         return resultsJson
     of "chunk":
       if expr.irFuncArgs.len < 1: return "[]"
       let text = evalExpr(expr.irFuncArgs[0], row, ctx)
       let maxSize = if expr.irFuncArgs.len >= 2:
-        try: parseInt(evalExpr(expr.irFuncArgs[1], row, ctx)) except: 1024
+        try: parseInt(evalExpr(expr.irFuncArgs[1], row, ctx)) except ValueError: 1024
       else: 1024
       let overlap = if expr.irFuncArgs.len >= 3:
-        try: parseInt(evalExpr(expr.irFuncArgs[2], row, ctx)) except: 128
+        try: parseInt(evalExpr(expr.irFuncArgs[2], row, ctx)) except ValueError: 128
       else: 128
       let cfg = chunkmod.ChunkConfig(maxChunkSize: maxSize, chunkOverlap: overlap,
                                      strategy: chunkmod.csRecursive, minChunkSize: 64)
@@ -1426,7 +1426,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if expr.irFuncArgs.len < 1: return "[]"
       let graphName = evalExpr(expr.irFuncArgs[0], row, ctx)
       let dims = if expr.irFuncArgs.len >= 2:
-        try: parseInt(evalExpr(expr.irFuncArgs[1], row, ctx)) except: 64
+        try: parseInt(evalExpr(expr.irFuncArgs[1], row, ctx)) except ValueError: 64
       else: 64
       if graphName notin ctx.graphs:
         return "[]"
@@ -1514,7 +1514,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       var nodeId: int64 = 0
       if expr.irFuncArgs.len > 0:
         try: nodeId = parseInt(evalExpr(expr.irFuncArgs[0], row, ctx))
-        except: nodeId = 0
+        except ValueError: nodeId = 0
       nodeId = nodeId and 0x3FF  # 10 bits
       let ts = int64(epochTime() * 1000) and 0x1FFFFFFFFFF  # 41 bits
       var snowSeq = int64(getMonoTime().ticks() and 0xFFF)  # 12 bits from monotonic

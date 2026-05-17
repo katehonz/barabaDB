@@ -2,7 +2,7 @@
  * BaraDB LangChain.js Vector Store Integration
  *
  * Usage:
- *   const { Client } = require('./baradb');
+ *   const { Client, WireValue } = require('./baradb');
  *   const { BaraDBStore } = require('./baradb_langchain');
  *
  *   const client = new Client('localhost', 9472);
@@ -23,6 +23,8 @@
  *
  *   const results = await store.similaritySearch('hello', 5);
  */
+
+const { WireValue } = require('./baradb');
 
 class BaraDBStore {
   constructor(options = {}) {
@@ -63,28 +65,23 @@ class BaraDBStore {
       const vec = await this.embeddingFunction(text);
       const vecStr = '[' + vec.join(',') + ']';
 
-      const metaCols = [];
-      const metaVals = [];
+      const colNames = [this.embeddingCol, this.textCol];
+      const params = [WireValue.string(vecStr), WireValue.string(text)];
+
       if (this.tenantId) {
-        metaCols.push('tenant_id');
-        metaVals.push(`'${this.tenantId}'`);
+        colNames.push('tenant_id');
+        params.push(WireValue.string(this.tenantId));
       }
       for (const mc of this.metadataCols) {
         if (meta[mc] !== undefined) {
-          metaCols.push(mc);
-          metaVals.push(`'${String(meta[mc]).replace(/'/g, "''")}'`);
+          colNames.push(mc);
+          params.push(WireValue.string(String(meta[mc])));
         }
       }
 
-      let colList = `${this.embeddingCol}, ${this.textCol}`;
-      let valList = `'${vecStr}', '${text.replace(/'/g, "''")}'`;
-      if (metaCols.length > 0) {
-        colList += ', ' + metaCols.join(', ');
-        valList += ', ' + metaVals.join(', ');
-      }
-
-      const sql = `INSERT INTO ${this.table} (${colList}) VALUES (${valList}) RETURNING id`;
-      const result = await this.client.query(sql);
+      const placeholders = params.map((_, i) => `$${i + 1}`).join(', ');
+      const sql = `INSERT INTO ${this.table} (${colNames.join(', ')}) VALUES (${placeholders}) RETURNING id`;
+      const result = await this.client.queryParams(sql, params);
       if (result.rows && result.rows.length > 0) {
         insertedIds.push(result.rows[0].id || result.rows[0][0]);
       }
@@ -110,17 +107,36 @@ class BaraDBStore {
     const vecStr = '[' + vec.join(',') + ']';
 
     if (this.tenantId) {
-      await this.client.query(`SET app.tenant_id = '${this.tenantId}'`);
+      await this.client.queryParams('SET app.tenant_id = $1', [WireValue.string(this.tenantId)]);
     }
 
     let sql;
+    let params;
     if (filter && filter.column && filter.value) {
-      sql = `SELECT hybrid_search_filtered('${this.table}', '${this.embeddingCol}', '${this.textCol}', '${query.replace(/'/g, "''")}', '${vecStr}', ${k}, '${filter.column}', '${filter.value}') AS res`;
+      sql = 'SELECT hybrid_search_filtered($1, $2, $3, $4, $5, $6, $7, $8) AS res';
+      params = [
+        WireValue.string(this.table),
+        WireValue.string(this.embeddingCol),
+        WireValue.string(this.textCol),
+        WireValue.string(query),
+        WireValue.string(vecStr),
+        WireValue.int32(k),
+        WireValue.string(filter.column),
+        WireValue.string(filter.value),
+      ];
     } else {
-      sql = `SELECT hybrid_search('${this.table}', '${this.embeddingCol}', '${this.textCol}', '${query.replace(/'/g, "''")}', '${vecStr}', ${k}) AS res`;
+      sql = 'SELECT hybrid_search($1, $2, $3, $4, $5, $6) AS res';
+      params = [
+        WireValue.string(this.table),
+        WireValue.string(this.embeddingCol),
+        WireValue.string(this.textCol),
+        WireValue.string(query),
+        WireValue.string(vecStr),
+        WireValue.int32(k),
+      ];
     }
 
-    const result = await this.client.query(sql);
+    const result = await this.client.queryParams(sql, params);
     if (!result.rows || result.rows.length === 0) return [];
 
     const raw = result.rows[0].res || result.rows[0][0] || '[]';
@@ -135,7 +151,10 @@ class BaraDBStore {
     for (const item of arr) {
       const docId = item.id;
       const score = parseFloat(item.score || 0);
-      const rowResult = await this.client.query(`SELECT * FROM ${this.table} WHERE id = ${docId}`);
+      const rowResult = await this.client.queryParams(
+        `SELECT * FROM ${this.table} WHERE id = $1`,
+        [WireValue.string(String(docId))]
+      );
       if (rowResult.rows && rowResult.rows.length > 0) {
         const row = rowResult.rows[0];
         const pageContent = row[this.textCol] || row[Object.keys(row).find(k => k.toLowerCase() === this.textCol.toLowerCase())];
@@ -180,13 +199,17 @@ class BaraDBStore {
   async delete(ids) {
     await this._ensureTable();
     if (!ids || ids.length === 0) return;
-    const idList = ids.join(', ');
-    await this.client.query(`DELETE FROM ${this.table} WHERE id IN (${idList})`);
+    const params = ids.map((id, i) => WireValue.string(String(id)));
+    const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
+    await this.client.queryParams(
+      `DELETE FROM ${this.table} WHERE id IN (${placeholders})`,
+      params
+    );
   }
 
   async setTenant(tenantId) {
     this.tenantId = tenantId;
-    await this.client.query(`SET app.tenant_id = '${tenantId}'`);
+    await this.client.queryParams('SET app.tenant_id = $1', [WireValue.string(tenantId)]);
   }
 }
 

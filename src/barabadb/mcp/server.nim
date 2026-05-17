@@ -225,7 +225,7 @@ proc handleQuery(params: JsonNode): JsonNode =
   var tokens: seq[qlexer.Token]
   try:
     tokens = qlexer.tokenize(sql)
-  except:
+  except CatchableError:
     serverCtx.execCtx.sessionVars["app.tenant_id"] = prevTenant
     serverCtx.execCtx.currentUser = prevUser
     return %*{"error": "Failed to tokenize SQL: " & getCurrentExceptionMsg()}
@@ -233,7 +233,7 @@ proc handleQuery(params: JsonNode): JsonNode =
   var astNode: Node
   try:
     astNode = qparser.parse(tokens)
-  except:
+  except CatchableError:
     serverCtx.execCtx.sessionVars["app.tenant_id"] = prevTenant
     serverCtx.execCtx.currentUser = prevUser
     return %*{"error": "Failed to parse SQL: " & getCurrentExceptionMsg()}
@@ -246,7 +246,7 @@ proc handleQuery(params: JsonNode): JsonNode =
   var res: ExecResult
   try:
     res = executeQuery(serverCtx.execCtx, astNode, wireParams)
-  except:
+  except CatchableError:
     serverCtx.execCtx.sessionVars["app.tenant_id"] = prevTenant
     serverCtx.execCtx.currentUser = prevUser
     return %*{"error": "Query execution failed: " & getCurrentExceptionMsg()}
@@ -368,6 +368,7 @@ proc handleVectorSearch(params: JsonNode): JsonNode =
     item["metadata"] = metaObj
     jsonResults.add(item)
 
+  var prevTenant = serverCtx.execCtx.sessionVars.getOrDefault("app.tenant_id", "")
   var sessionInfo = newJObject()
   if "tenant_id" in params and params["tenant_id"].kind == JString:
     let tid = params["tenant_id"].getStr()
@@ -375,7 +376,7 @@ proc handleVectorSearch(params: JsonNode): JsonNode =
     sessionInfo["tenant_id"] = %tid
   sessionInfo["user_id"] = %serverCtx.execCtx.currentUser
 
-  return %*{
+  var r = %*{
     "table": %table,
     "column": %column,
     "index_size": idx.nodes.len,
@@ -384,6 +385,8 @@ proc handleVectorSearch(params: JsonNode): JsonNode =
     "results": jsonResults,
     "_session": sessionInfo
   }
+  serverCtx.execCtx.sessionVars["app.tenant_id"] = prevTenant
+  return r
 
 # ---------------------------------------------------------------------------
 # Tool: schema_inspect
@@ -394,6 +397,7 @@ proc handleSchemaInspect(params: JsonNode): JsonNode =
   if params.kind == JObject and "table" in params and params["table"].kind == JString:
     targetTable = params["table"].getStr()
 
+  var prevTenant = serverCtx.execCtx.sessionVars.getOrDefault("app.tenant_id", "")
   if "tenant_id" in params and params["tenant_id"].kind == JString:
     serverCtx.execCtx.sessionVars["app.tenant_id"] = params["tenant_id"].getStr()
 
@@ -474,17 +478,20 @@ proc handleSchemaInspect(params: JsonNode): JsonNode =
     jsonTables.add(tblObj)
 
   if targetTable.len > 0 and jsonTables.len == 0:
+    serverCtx.execCtx.sessionVars["app.tenant_id"] = prevTenant
     return %*{"error": "Table '" & targetTable & "' not found"}
 
   var sessionInfo = newJObject()
   sessionInfo["tenant_id"] = %serverCtx.execCtx.sessionVars.getOrDefault("app.tenant_id", "")
   sessionInfo["user_id"] = %serverCtx.execCtx.currentUser
 
-  return %*{
+  var r = %*{
     "tables": jsonTables,
     "table_count": jsonTables.len,
     "_session": sessionInfo
   }
+  serverCtx.execCtx.sessionVars["app.tenant_id"] = prevTenant
+  return r
 
 # ---------------------------------------------------------------------------
 # MCP Protocol handlers
@@ -578,14 +585,14 @@ proc writeToStdout(line: string) =
   try:
     stdout.writeLine(line)
     stdout.flushFile()
-  except:
+  except CatchableError:
     discard
 
 proc logToStderr*(msg: string) =
   try:
     stderr.writeLine("[baradb-mcp] " & msg)
     stderr.flushFile()
-  except:
+  except CatchableError:
     discard
 
 proc processMessage(raw: string): string =
@@ -595,7 +602,7 @@ proc processMessage(raw: string): string =
   var req: JsonNode
   try:
     req = parseJson(raw)
-  except:
+  except CatchableError:
     logToStderr("JSON parse error: " & getCurrentExceptionMsg())
     let resp = %*{
       "jsonrpc": "2.0",
@@ -640,7 +647,7 @@ proc processMessage(raw: string): string =
   var dispResult: JsonNode
   try:
     dispResult = dispatch(meth, params)
-  except:
+  except CatchableError:
     logToStderr("Dispatch error for " & meth & ": " & getCurrentExceptionMsg())
     let msg = getCurrentExceptionMsg()
     var errResp = %*{
@@ -705,7 +712,7 @@ proc run*() =
       if startupDone:
         logToStderr("STDIN closed, exiting.")
       break
-    except:
+    except CatchableError:
       logToStderr("STDIN read error: " & getCurrentExceptionMsg())
       break
 
@@ -740,7 +747,7 @@ when isMainModule:
   try:
     discard init(dataDir)
     run()
-  except:
+  except CatchableError:
     logToStderr("Fatal error: " & getCurrentExceptionMsg())
   finally:
     close()

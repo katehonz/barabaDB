@@ -5,7 +5,7 @@ Implements LangChain's BaseChatMessageHistory interface backed by BaraDB.
 Supports multi-tenant isolation via tenant_id and user_id.
 
 Usage:
-    from baradb import Client
+    from baradb import Client, WireValue
     from baradb.chat_history import BaraDBChatHistory
 
     client = Client("localhost", 9472)
@@ -59,7 +59,7 @@ class BaraDBChatHistory:
     async def _ensure_table(self):
         if self._initialized:
             return
-        await self.client.execute(
+        await self.client.query(
             f"""
             CREATE TABLE IF NOT EXISTS {self.table} (
                 id TEXT PRIMARY KEY,
@@ -73,7 +73,7 @@ class BaraDBChatHistory:
             )
             """
         )
-        await self.client.execute(
+        await self.client.query(
             f"CREATE INDEX IF NOT EXISTS idx_{self.table}_session "
             f"ON {self.table}(session_id) USING btree"
         )
@@ -98,14 +98,23 @@ class BaraDBChatHistory:
         created_at = datetime.utcnow().isoformat()
 
         for key, val in self._build_session().items():
-            await self.client.execute(f"SET {key} = '{val}'")
+            await self.client.query_params(
+                f"SET {key} = $1", [self._wire_string(val)]
+            )
 
-        await self.client.execute(
-            f"INSERT INTO {self.table} (id, session_id, role, content, metadata, "
-            f"tenant_id, user_id, created_at) "
-            f"VALUES ('{msg_id}', '{self.session_id}', '{role}', "
-            f"'{_escape(content)}', '{_escape(metadata)}', "
-            f"'{self.tenant_id or ''}', '{self.user_id or ''}', '{created_at}')"
+        await self.client.query_params(
+            f"INSERT INTO {self.table} (id, session_id, role, content, metadata, tenant_id, user_id, created_at) "
+            f"VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+            [
+                self._wire_string(msg_id),
+                self._wire_string(self.session_id),
+                self._wire_string(role),
+                self._wire_string(content),
+                self._wire_string(metadata),
+                self._wire_string(self.tenant_id or ""),
+                self._wire_string(self.user_id or ""),
+                self._wire_string(created_at),
+            ],
         )
 
     def add_user_message(self, message: Any) -> None:
@@ -132,14 +141,22 @@ class BaraDBChatHistory:
         created_at = datetime.utcnow().isoformat()
 
         for key, val in self._build_session().items():
-            await self.client.execute(f"SET {key} = '{val}'")
+            await self.client.query_params(
+                f"SET {key} = $1", [self._wire_string(val)]
+            )
 
-        await self.client.execute(
-            f"INSERT INTO {self.table} (id, session_id, role, content, "
-            f"tenant_id, user_id, created_at) "
-            f"VALUES ('{msg_id}', '{self.session_id}', '{role}', "
-            f"'{_escape(content)}', '{self.tenant_id or ''}', "
-            f"'{self.user_id or ''}', '{created_at}')"
+        await self.client.query_params(
+            f"INSERT INTO {self.table} (id, session_id, role, content, tenant_id, user_id, created_at) "
+            f"VALUES ($1, $2, $3, $4, $5, $6, $7)",
+            [
+                self._wire_string(msg_id),
+                self._wire_string(self.session_id),
+                self._wire_string(role),
+                self._wire_string(content),
+                self._wire_string(self.tenant_id or ""),
+                self._wire_string(self.user_id or ""),
+                self._wire_string(created_at),
+            ],
         )
 
     async def get_messages(self) -> List[Any]:
@@ -154,13 +171,19 @@ class BaraDBChatHistory:
                 return f"{self.type}: {self.content}"
 
         for key, val in self._build_session().items():
-            await self.client.execute(f"SET {key} = '{val}'")
+            await self.client.query_params(
+                f"SET {key} = $1", [self._wire_string(val)]
+            )
 
-        result = await self.client.execute(
+        result = await self.client.query_params(
             f"SELECT role, content FROM {self.table} "
-            f"WHERE session_id = '{self.session_id}' "
+            f"WHERE session_id = $1 "
             f"ORDER BY created_at ASC "
-            f"LIMIT {self.max_messages}"
+            f"LIMIT $2",
+            [
+                self._wire_string(self.session_id),
+                self._wire_int(self.max_messages),
+            ],
         )
         messages = []
         if result and hasattr(result, "rows"):
@@ -180,9 +203,12 @@ class BaraDBChatHistory:
     async def clear(self) -> None:
         await self._ensure_table()
         for key, val in self._build_session().items():
-            await self.client.execute(f"SET {key} = '{val}'")
-        await self.client.execute(
-            f"DELETE FROM {self.table} WHERE session_id = '{self.session_id}'"
+            await self.client.query_params(
+                f"SET {key} = $1", [self._wire_string(val)]
+            )
+        await self.client.query_params(
+            f"DELETE FROM {self.table} WHERE session_id = $1",
+            [self._wire_string(self.session_id)],
         )
 
     async def get_session_summary(self, max_tokens: int = 2000) -> str:
@@ -197,6 +223,13 @@ class BaraDBChatHistory:
             total_chars += len(text)
         return "\n".join(parts)
 
+    @staticmethod
+    def _wire_string(val: str) -> Any:
+        # Lazy import to avoid circular dependency
+        from baradb import WireValue
+        return WireValue.string(val)
 
-def _escape(s: str) -> str:
-    return s.replace("'", "''").replace("\\", "\\\\")
+    @staticmethod
+    def _wire_int(val: int) -> Any:
+        from baradb import WireValue
+        return WireValue.int64(val)

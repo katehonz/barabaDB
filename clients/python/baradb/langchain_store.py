@@ -2,7 +2,7 @@
 BaraDB LangChain Vector Store Integration
 
 Usage:
-    from baradb import Client
+    from baradb import Client, WireValue
     from baradb.langchain_store import BaraDBStore
     from langchain.embeddings import OpenAIEmbeddings
 
@@ -50,6 +50,19 @@ class BaraDBStore:
         self.vector_dimension = vector_dimension
         self._table_created = False
 
+    def _wire(self, val: Any) -> Any:
+        """Lazy import WireValue to avoid circular deps."""
+        from baradb import WireValue
+        if isinstance(val, str):
+            return WireValue.string(val)
+        if isinstance(val, int):
+            return WireValue.int64(val)
+        if isinstance(val, float):
+            return WireValue.float64(val)
+        if val is None:
+            return WireValue.null()
+        return WireValue.string(str(val))
+
     async def _ensure_table(self) -> None:
         if self._table_created:
             return
@@ -84,24 +97,23 @@ class BaraDBStore:
             vec_str = "[" + ",".join(str(v) for v in vec) + "]"
 
             meta = metadatas[i] if metadatas and i < len(metadatas) else {}
-            meta_cols = []
-            meta_vals = []
+            col_names = [self.embedding_col, self.text_col]
+            params = [self._wire(vec_str), self._wire(text)]
+
             if self.tenant_id:
-                meta_cols.append("tenant_id")
-                meta_vals.append(f"'{self.tenant_id}'")
+                col_names.append("tenant_id")
+                params.append(self._wire(self.tenant_id))
             for mc in self.metadata_cols:
                 if mc in meta:
-                    meta_cols.append(mc)
-                    meta_vals.append(f"'{meta[mc]}'")
+                    col_names.append(mc)
+                    params.append(self._wire(meta[mc]))
 
-            col_list = f"{self.embedding_col}, {self.text_col}"
-            val_list = f"'{vec_str}', '{text.replace(\"'\", \"''\")}'"
-            if meta_cols:
-                col_list += ", " + ", ".join(meta_cols)
-                val_list += ", " + ", ".join(meta_vals)
-
-            sql = f"INSERT INTO {self.table} ({col_list}) VALUES ({val_list}) RETURNING id"
-            result = await self.client.query(sql)
+            placeholders = [f"${j + 1}" for j in range(len(params))]
+            sql = (
+                f"INSERT INTO {self.table} ({', '.join(col_names)}) "
+                f"VALUES ({', '.join(placeholders)}) RETURNING id"
+            )
+            result = await self.client.query_params(sql, params)
             if result.rows:
                 inserted_ids.append(result.rows[0].get("id", str(i)))
             else:
@@ -120,14 +132,36 @@ class BaraDBStore:
 
         # Set tenant session variable if multi-tenant
         if self.tenant_id:
-            await self.client.query(f"SET app.tenant_id = '{self.tenant_id}'")
+            await self.client.query_params(
+                "SET app.tenant_id = $1", [self._wire(self.tenant_id)]
+            )
 
         if filter_col and filter_val:
-            sql = f"SELECT hybrid_search_filtered('{self.table}', '{self.embedding_col}', '{self.text_col}', '{query.replace(\"'\", \"''\")}', '{vec_str}', {k}, '{filter_col}', '{filter_val}') AS res"
+            sql = (
+                "SELECT hybrid_search_filtered($1, $2, $3, $4, $5, $6, $7, $8) AS res"
+            )
+            params = [
+                self._wire(self.table),
+                self._wire(self.embedding_col),
+                self._wire(self.text_col),
+                self._wire(query),
+                self._wire(vec_str),
+                self._wire(k),
+                self._wire(filter_col),
+                self._wire(filter_val),
+            ]
         else:
-            sql = f"SELECT hybrid_search('{self.table}', '{self.embedding_col}', '{self.text_col}', '{query.replace(\"'\", \"''\")}', '{vec_str}', {k}) AS res"
+            sql = "SELECT hybrid_search($1, $2, $3, $4, $5, $6) AS res"
+            params = [
+                self._wire(self.table),
+                self._wire(self.embedding_col),
+                self._wire(self.text_col),
+                self._wire(query),
+                self._wire(vec_str),
+                self._wire(k),
+            ]
 
-        result = await self.client.query(sql)
+        result = await self.client.query_params(sql, params)
         if not result.rows:
             return []
 
@@ -141,8 +175,11 @@ class BaraDBStore:
         for item in arr:
             doc_id = item.get("id", "")
             score = float(item.get("score", 0))
-            # Fetch full row
-            row_result = await self.client.query(f"SELECT * FROM {self.table} WHERE id = {doc_id}")
+            # Fetch full row — use parameterized query
+            row_result = await self.client.query_params(
+                f"SELECT * FROM {self.table} WHERE id = $1",
+                [self._wire(doc_id)],
+            )
             if row_result.rows:
                 page_content = row_result.rows[0].get(self.text_col, "")
                 metadata = dict(row_result.rows[0])
@@ -184,12 +221,19 @@ class BaraDBStore:
     async def delete(self, ids: Optional[List[str]] = None) -> None:
         await self._ensure_table()
         if ids:
-            id_list = ", ".join(str(i) for i in ids)
-            await self.client.query(f"DELETE FROM {self.table} WHERE id IN ({id_list})")
+            # Build parameterized IN clause: $1, $2, ...
+            placeholders = [f"${j + 1}" for j in range(len(ids))]
+            params = [self._wire(i) for i in ids]
+            await self.client.query_params(
+                f"DELETE FROM {self.table} WHERE id IN ({', '.join(placeholders)})",
+                params,
+            )
 
     async def set_tenant(self, tenant_id: str) -> None:
         self.tenant_id = tenant_id
-        await self.client.query(f"SET app.tenant_id = '{tenant_id}'")
+        await self.client.query_params(
+            "SET app.tenant_id = $1", [self._wire(tenant_id)]
+        )
 
 
 class _SimpleDocument:
