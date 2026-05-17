@@ -39,28 +39,31 @@ Add auto-generated ID support to BaraDB so users don't need to manually supply I
 - `snowflake_id(node_id)` function
 - For future distributed use
 
-## Phase 2: JOIN Optimizations (future)
+## Phase 2: JOIN Optimizations ✅
 
-### 2.1 Hash Join
+### 2.1 Hash Join ✅
 - For equi-join ON a.col = b.col
 - Build hash table on smaller side, probe with larger
 - O(N+M) instead of O(N*M)
 
-### 2.2 Index Nested Loop Join
+### 2.2 Index Nested Loop Join ✅
 - If index exists on join column → probe index per left row
 - O(N * log M) instead of O(N*M)
 
 ### 2.3 Merge Join
 - For sorted inputs
 - Two-pointer sweep O(N+M)
+- **Status:** Not yet implemented — can be added if needed
 
-## Phase 3: Foreign Key Enforcement (future)
+## Phase 3: Foreign Key Enforcement ✅
 
-### 3.1 CASCADE DELETE
-### 3.2 SET NULL on delete
-### 3.3 RESTRICT on delete
-### 3.4 ON UPDATE CASCADE
-### 3.5 FK check on UPDATE (not just INSERT)
+### 3.1 CASCADE DELETE ✅
+### 3.2 SET NULL on delete ✅
+### 3.3 RESTRICT on delete ✅
+### 3.4 ON UPDATE CASCADE ✅
+### 3.5 ON UPDATE SET NULL ✅
+### 3.6 ON UPDATE RESTRICT ✅
+### 3.7 FK check on UPDATE (not just INSERT) ✅
 
 ## Implementation Order
 1. AUTO_INCREMENT (lexer + parser + executor)
