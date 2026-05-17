@@ -2997,7 +2997,7 @@ suite "MERGE Statement":
     check r.success
     check r.affectedRows == 1
     let verify = qexec.executeQuery(ctx, parse("SELECT * FROM inventory WHERE sku = 'SKU001'"))
-    check verify.rows[0]["qty"] == "150.0"
+    check verify.rows[0]["qty"] == "150"
 
   test "MERGE WHEN NOT MATCHED INSERT":
     let r = qexec.executeQuery(ctx, parse("""

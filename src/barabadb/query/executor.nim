@@ -581,18 +581,34 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if left == "true" or right == "true": return "true"
       return "false"
     of irAdd:
-      try: return $(parseFloat(left) + parseFloat(right))
+      try:
+        let sum = parseFloat(left) + parseFloat(right)
+        if sum == float(int(sum)):
+          return $int(sum)
+        return $sum
       except: return left & right
     of irSub:
-      try: return $(parseFloat(left) - parseFloat(right))
+      try:
+        let diff = parseFloat(left) - parseFloat(right)
+        if diff == float(int(diff)):
+          return $int(diff)
+        return $diff
       except: return "0"
     of irMul:
-      try: return $(parseFloat(left) * parseFloat(right))
+      try:
+        let prod = parseFloat(left) * parseFloat(right)
+        if prod == float(int(prod)):
+          return $int(prod)
+        return $prod
       except: return "0"
     of irDiv:
       try:
         let r = parseFloat(right)
-        if r != 0: return $(parseFloat(left) / r)
+        if r != 0:
+          let quot = parseFloat(left) / r
+          if quot == float(int(quot)):
+            return $int(quot)
+          return $quot
         return "0"
       except: return "0"
     of irMod:
@@ -1528,6 +1544,9 @@ proc lowerExpr*(node: Node): IRExpr =
       result.binRight = lowerExpr(node.inRight)
   of nkExists:
     result = IRExpr(kind: irekExists)
+  of nkSubquery:
+    result = IRExpr(kind: irekSubquery)
+    result.subqueryPlan = lowerSelect(node.subQuery)
   of nkStar:
     result = IRExpr(kind: irekStar)
   of nkWindowExpr:
@@ -3166,23 +3185,23 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
   of nkUpdate:
     if stmt.updSet.len == 0: return okResult()
     # Simple UPDATE: scan table, filter by WHERE, apply SET
-    var sets = initTable[string, string]()
-    for s in stmt.updSet:
-      if s.kind == nkBinOp and s.binOp == bkAssign:
-        if s.binLeft.kind == nkIdent:
-          let val = if s.binRight.kind == nkStringLit: s.binRight.strVal
-                    elif s.binRight.kind == nkIntLit: $s.binRight.intVal
-                    elif s.binRight.kind == nkFloatLit: $s.binRight.floatVal
-                    elif s.binRight.kind == nkBoolLit: $s.binRight.boolVal
-                    elif s.binRight.kind == nkNullLit: "\\N"
-                    else: evalNodeToString(s.binRight)
-          sets[s.binLeft.identName] = val
-
     # Scan and apply
     let rows = execScan(ctx, stmt.updTarget)
     var count = 0
     var kvPairs: seq[(string, seq[byte])]
     for row in rows:
+      # Compute sets for this row (expressions may reference columns)
+      var sets = initTable[string, string]()
+      for s in stmt.updSet:
+        if s.kind == nkBinOp and s.binOp == bkAssign:
+          if s.binLeft.kind == nkIdent:
+            let val = if s.binRight.kind == nkStringLit: s.binRight.strVal
+                      elif s.binRight.kind == nkIntLit: $s.binRight.intVal
+                      elif s.binRight.kind == nkFloatLit: $s.binRight.floatVal
+                      elif s.binRight.kind == nkBoolLit: $s.binRight.boolVal
+                      elif s.binRight.kind == nkNullLit: "\\N"
+                      else: evalExpr(lowerExpr(s.binRight), row, ctx)
+            sets[s.binLeft.identName] = val
       # Check WHERE
       if stmt.updWhere != nil and stmt.updWhere.whereExpr != nil:
         let whereExpr = lowerExpr(stmt.updWhere.whereExpr)
