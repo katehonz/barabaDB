@@ -136,7 +136,7 @@
 | # | Задача | Оценка | Статус |
 |---|--------|--------|--------|
 | 9.1.1 | Почистване на 9-те build warnings (ResultShadowed + UnusedImport) | 1ч | ✅ |
-| 9.1.2 | Issue #6: Aggregate column names (`count(*)` → `count(*)`, `max(id)` → `max(id)`) | 2ч | 🔄 |
+| 9.1.2 | Issue #6: Aggregate column names (`count(*)` → `count(*)`, `max(id)` → `max(id)`) | 2ч | ✅ |
 | 9.1.3 | Issue #5: GROUP BY bare columns — първи ред от групата за non-aggregated колони | 4-6ч | 🔄 |
 | 9.1.4 | Issue #7+8: Решение за async vs sync client + thread safety | 2ч | 🔄 |
 | 9.1.5 | Regression тестове за всички 10 deficiencies | 2ч | 🔄 |
