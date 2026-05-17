@@ -197,6 +197,7 @@ type
       graphReturnCols*: seq[string]
 
   IRExpr* = ref object
+    valueKind*: ValueKind
     case kind*: IRExprKind
     of irekLiteral:
       literal*: IRLiteral

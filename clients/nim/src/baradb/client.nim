@@ -4,6 +4,8 @@
 
 import std/asyncdispatch
 import std/asyncnet
+import std/net as netmod
+import std/locks
 import std/strutils
 import std/endians
 
@@ -530,32 +532,167 @@ proc build*(qb: QueryBuilder): string =
 proc exec*(qb: QueryBuilder): Future[QueryResult] {.async.} =
   return await qb.client.query(qb.build())
 
-# === Sync Wrapper ===
+# === Blocking Sync Client (production-grade, no waitFor) ===
 
 type
   SyncClient* = ref object
-    asyncClient: BaraClient
+    config: ClientConfig
+    socket: netmod.Socket
+    connected: bool
+    requestId: uint32
+    lock: Lock
 
 proc newSyncClient*(config: ClientConfig = defaultConfig()): SyncClient =
-  SyncClient(asyncClient: newClient(config))
+  result = SyncClient(config: config, connected: false, requestId: 0)
+  result.socket = netmod.newSocket()
+  initLock(result.lock)
+
+proc recvExact(sock: netmod.Socket, size: int): string =
+  result = ""
+  while result.len < size:
+    let chunk = sock.recv(size - result.len)
+    if chunk.len == 0:
+      raise newException(IOError, "Connection closed")
+    result.add(chunk)
+
+proc readQueryResponseBlocking(client: SyncClient): QueryResult =
+  let headerData = client.socket.recvExact(12)
+  var pos = 0
+  let hdrData = toBytes(headerData)
+  let kind = MsgKind(readUint32(hdrData, pos))
+  let payloadLen = int(readUint32(hdrData, pos))
+  discard readUint32(hdrData, pos)
+
+  let payloadStr = client.socket.recvExact(payloadLen)
+  var payload = toBytes(payloadStr)
+
+  result = QueryResult(columns: @[], rows: @[], rowCount: 0, affectedRows: 0)
+
+  if kind == mkReady:
+    return
+  if kind == mkError and payload.len >= 8:
+    var epos = 0
+    let code = readUint32(payload, epos)
+    let emsg = readString(payload, epos)
+    raise newException(IOError, "Error " & $code & ": " & emsg)
+  if kind == mkData:
+    var dpos = 0
+    let colCount = int(readUint32(payload, dpos))
+    var cols: seq[string] = @[]
+    for i in 0..<colCount:
+      cols.add(readString(payload, dpos))
+    result.columns = cols
+    var colTypes: seq[string] = @[]
+    for i in 0..<colCount:
+      colTypes.add($FieldKind(payload[dpos]))
+      inc dpos
+    result.columnTypes = colTypes
+    let rowCount = int(readUint32(payload, dpos))
+    for r in 0..<rowCount:
+      var row: seq[string] = @[]
+      for c in 0..<colCount:
+        let wv = deserializeValue(payload, dpos)
+        row.add(wireValueToString(wv))
+      result.rows.add(row)
+    result.rowCount = rowCount
+    # Read following mkComplete message
+    let compHeader = client.socket.recvExact(12)
+    var chPos = 0
+    let chData = toBytes(compHeader)
+    let compKind = MsgKind(readUint32(chData, chPos))
+    let compLen = int(readUint32(chData, chPos))
+    discard readUint32(chData, chPos)
+    let compPayloadStr = client.socket.recvExact(compLen)
+    if compKind == mkComplete:
+      var cpPos = 0
+      result.affectedRows = int(readUint32(toBytes(compPayloadStr), cpPos))
+    return
+  if kind == mkComplete:
+    var rpos = 0
+    result.affectedRows = int(readUint32(payload, rpos))
+    return
 
 proc connect*(client: SyncClient) =
-  waitFor client.asyncClient.connect()
+  netmod.connect(client.socket, client.config.host, Port(client.config.port))
+  client.connected = true
 
 proc close*(client: SyncClient) =
-  client.asyncClient.close()
+  if client.connected:
+    try:
+      let msg = buildMessage(mkClose, 0, @[])
+      netmod.send(client.socket, toString(msg))
+    except: discard
+    netmod.close(client.socket)
+    client.connected = false
+  deinitLock(client.lock)
 
 proc query*(client: SyncClient, sql: string): QueryResult =
-  waitFor client.asyncClient.query(sql)
+  acquire(client.lock)
+  try:
+    if not client.connected:
+      raise newException(IOError, "Not connected")
+    let msg = makeQueryMessage(0, sql)
+    netmod.send(client.socket, toString(msg))
+    return readQueryResponseBlocking(client)
+  finally:
+    release(client.lock)
 
 proc query*(client: SyncClient, sql: string, params: seq[WireValue]): QueryResult =
-  waitFor client.asyncClient.query(sql, params)
+  acquire(client.lock)
+  try:
+    if not client.connected:
+      raise newException(IOError, "Not connected")
+    let msg = makeQueryParamsMessage(0, sql, params)
+    netmod.send(client.socket, toString(msg))
+    return readQueryResponseBlocking(client)
+  finally:
+    release(client.lock)
+
+proc exec*(client: SyncClient, sql: string): int =
+  let qr = client.query(sql)
+  return qr.affectedRows
 
 proc auth*(client: SyncClient, token: string) =
-  waitFor client.asyncClient.auth(token)
+  acquire(client.lock)
+  try:
+    if not client.connected:
+      raise newException(IOError, "Not connected")
+    let msg = makeAuthMessage(0, token)
+    netmod.send(client.socket, toString(msg))
+    let headerData = client.socket.recvExact(12)
+    var pos = 0
+    let hdrData = toBytes(headerData)
+    let kind = MsgKind(readUint32(hdrData, pos))
+    let payloadLen = int(readUint32(hdrData, pos))
+    discard readUint32(hdrData, pos)
+    if kind == mkAuthOk:
+      return
+    elif kind == mkError:
+      let payloadStr = client.socket.recvExact(payloadLen)
+      var epos = 0
+      let emsg = readString(toBytes(payloadStr), epos)
+      raise newException(IOError, "Auth failed: " & emsg)
+    else:
+      raise newException(IOError, "Unexpected auth response")
+  finally:
+    release(client.lock)
 
 proc ping*(client: SyncClient): bool =
-  waitFor client.asyncClient.ping()
+  acquire(client.lock)
+  try:
+    if not client.connected:
+      return false
+    let msg = buildMessage(mkPing, 0, @[])
+    netmod.send(client.socket, toString(msg))
+    let headerData = client.socket.recvExact(12)
+    var pos = 0
+    let hdrData = toBytes(headerData)
+    let kind = MsgKind(readUint32(hdrData, pos))
+    return kind == mkPong
+  except:
+    return false
+  finally:
+    release(client.lock)
 
 proc `$`*(qr: QueryResult): string =
   if qr.columns.len == 0: return "(no results)"

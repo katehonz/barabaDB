@@ -497,6 +497,149 @@ proc parseVectorString*(value: string): seq[float32] =
       except:
         discard
 
+proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string
+
+proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): Value =
+  if expr == nil: return Value(kind: vkNull)
+  case expr.kind
+  of irekLiteral:
+    case expr.literal.kind
+    of vkString: return Value(kind: vkString, strVal: expr.literal.strVal)
+    of vkInt64: return Value(kind: vkInt64, int64Val: expr.literal.int64Val)
+    of vkFloat64: return Value(kind: vkFloat64, float64Val: expr.literal.float64Val)
+    of vkBool: return Value(kind: vkBool, boolVal: expr.literal.boolVal)
+    of vkNull: return Value(kind: vkNull)
+    else: return Value(kind: vkNull)
+  of irekField:
+    if expr.fieldPath.len > 0:
+      let fullPath = expr.fieldPath.join(".")
+      var s = ""
+      if fullPath in row: s = row[fullPath]
+      else:
+        let colName = expr.fieldPath[^1]
+        if colName in row: s = row[colName]
+        elif "$key" in row and row["$key"].startsWith(colName & "="):
+          s = row["$key"][colName.len+1..^1]
+        elif "$value" in row:
+          let parsed = parseRowData(row["$value"])
+          if colName in parsed: s = parsed[colName]
+      if s == "\\N": return Value(kind: vkNull)
+      case expr.valueKind
+      of vkInt64:
+        try: return Value(kind: vkInt64, int64Val: parseInt(s))
+        except: return Value(kind: vkNull)
+      of vkFloat64:
+        try: return Value(kind: vkFloat64, float64Val: parseFloat(s))
+        except: return Value(kind: vkNull)
+      of vkBool:
+        return Value(kind: vkBool, boolVal: s == "true")
+      of vkNull:
+        return Value(kind: vkNull)
+      else:
+        # Heuristic type inference from string content for untyped fields
+        if s.len == 0: return Value(kind: vkString, strVal: s)
+        try:
+          return Value(kind: vkInt64, int64Val: parseInt(s))
+        except:
+          try:
+            return Value(kind: vkFloat64, float64Val: parseFloat(s))
+          except:
+            return Value(kind: vkString, strVal: s)
+    return Value(kind: vkNull)
+  of irekBinary:
+    case expr.binOp
+    of irAdd:
+      let lv = evalExprValue(expr.binLeft, row, ctx)
+      let rv = evalExprValue(expr.binRight, row, ctx)
+      if lv.kind == vkInt64 and rv.kind == vkInt64:
+        return Value(kind: vkInt64, int64Val: lv.int64Val + rv.int64Val)
+      elif lv.kind == vkFloat64 and rv.kind == vkFloat64:
+        return Value(kind: vkFloat64, float64Val: lv.float64Val + rv.float64Val)
+      elif lv.kind == vkInt64 and rv.kind == vkFloat64:
+        return Value(kind: vkFloat64, float64Val: float(lv.int64Val) + rv.float64Val)
+      elif lv.kind == vkFloat64 and rv.kind == vkInt64:
+        return Value(kind: vkFloat64, float64Val: lv.float64Val + float(rv.int64Val))
+      elif lv.kind == vkString and rv.kind == vkString:
+        return Value(kind: vkString, strVal: lv.strVal & rv.strVal)
+      else:
+        return Value(kind: vkNull)
+    of irSub:
+      let lv = evalExprValue(expr.binLeft, row, ctx)
+      let rv = evalExprValue(expr.binRight, row, ctx)
+      if lv.kind == vkInt64 and rv.kind == vkInt64:
+        return Value(kind: vkInt64, int64Val: lv.int64Val - rv.int64Val)
+      elif lv.kind == vkFloat64 and rv.kind == vkFloat64:
+        return Value(kind: vkFloat64, float64Val: lv.float64Val - rv.float64Val)
+      elif lv.kind == vkInt64 and rv.kind == vkFloat64:
+        return Value(kind: vkFloat64, float64Val: float(lv.int64Val) - rv.float64Val)
+      elif lv.kind == vkFloat64 and rv.kind == vkInt64:
+        return Value(kind: vkFloat64, float64Val: lv.float64Val - float(rv.int64Val))
+      else:
+        return Value(kind: vkNull)
+    of irMul:
+      let lv = evalExprValue(expr.binLeft, row, ctx)
+      let rv = evalExprValue(expr.binRight, row, ctx)
+      if lv.kind == vkInt64 and rv.kind == vkInt64:
+        return Value(kind: vkInt64, int64Val: lv.int64Val * rv.int64Val)
+      elif lv.kind == vkFloat64 and rv.kind == vkFloat64:
+        return Value(kind: vkFloat64, float64Val: lv.float64Val * rv.float64Val)
+      elif lv.kind == vkInt64 and rv.kind == vkFloat64:
+        return Value(kind: vkFloat64, float64Val: float(lv.int64Val) * rv.float64Val)
+      elif lv.kind == vkFloat64 and rv.kind == vkInt64:
+        return Value(kind: vkFloat64, float64Val: lv.float64Val * float(rv.int64Val))
+      else:
+        return Value(kind: vkNull)
+    of irDiv:
+      let lv = evalExprValue(expr.binLeft, row, ctx)
+      let rv = evalExprValue(expr.binRight, row, ctx)
+      var rvf = 0.0
+      if rv.kind == vkFloat64: rvf = rv.float64Val
+      elif rv.kind == vkInt64: rvf = float(rv.int64Val)
+      else: return Value(kind: vkNull)
+      if rvf == 0.0: return Value(kind: vkNull)
+      var lvf = 0.0
+      if lv.kind == vkFloat64: lvf = lv.float64Val
+      elif lv.kind == vkInt64: lvf = float(lv.int64Val)
+      else: return Value(kind: vkNull)
+      return Value(kind: vkFloat64, float64Val: lvf / rvf)
+    of irMod:
+      let lv = evalExprValue(expr.binLeft, row, ctx)
+      let rv = evalExprValue(expr.binRight, row, ctx)
+      if lv.kind == vkInt64 and rv.kind == vkInt64:
+        if rv.int64Val == 0: return Value(kind: vkNull)
+        return Value(kind: vkInt64, int64Val: lv.int64Val mod rv.int64Val)
+      else:
+        return Value(kind: vkNull)
+    of irPow:
+      let lv = evalExprValue(expr.binLeft, row, ctx)
+      let rv = evalExprValue(expr.binRight, row, ctx)
+      var lvf = 0.0
+      if lv.kind == vkFloat64: lvf = lv.float64Val
+      elif lv.kind == vkInt64: lvf = float(lv.int64Val)
+      else: return Value(kind: vkNull)
+      var rvf = 0.0
+      if rv.kind == vkFloat64: rvf = rv.float64Val
+      elif rv.kind == vkInt64: rvf = float(rv.int64Val)
+      else: return Value(kind: vkNull)
+      return Value(kind: vkFloat64, float64Val: pow(lvf, rvf))
+    else:
+      let s = evalExpr(expr, row, ctx)
+      return Value(kind: vkString, strVal: s)
+  of irekUnary:
+    case expr.unOp
+    of irNeg:
+      let v = evalExprValue(expr.unExpr, row, ctx)
+      case v.kind
+      of vkInt64: return Value(kind: vkInt64, int64Val: -v.int64Val)
+      of vkFloat64: return Value(kind: vkFloat64, float64Val: -v.float64Val)
+      else: return Value(kind: vkNull)
+    else:
+      let s = evalExpr(expr, row, ctx)
+      return Value(kind: vkString, strVal: s)
+  else:
+    let s = evalExpr(expr, row, ctx)
+    return Value(kind: vkString, strVal: s)
+
 proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string =
   if expr == nil: return ""
   case expr.kind
@@ -580,47 +723,16 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     of irOr:
       if left == "true" or right == "true": return "true"
       return "false"
-    of irAdd:
-      try:
-        let sum = parseFloat(left) + parseFloat(right)
-        if sum == float(int(sum)):
-          return $int(sum)
-        return $sum
-      except: return left & right
-    of irSub:
-      try:
-        let diff = parseFloat(left) - parseFloat(right)
-        if diff == float(int(diff)):
-          return $int(diff)
-        return $diff
-      except: return "0"
-    of irMul:
-      try:
-        let prod = parseFloat(left) * parseFloat(right)
-        if prod == float(int(prod)):
-          return $int(prod)
-        return $prod
-      except: return "0"
-    of irDiv:
-      try:
-        let r = parseFloat(right)
-        if r != 0:
-          let quot = parseFloat(left) / r
-          if quot == float(int(quot)):
-            return $int(quot)
-          return $quot
-        return "0"
-      except: return "0"
-    of irMod:
-      try:
-        let a = parseInt(left)
-        let b = parseInt(right)
-        if b != 0: return $(a mod b)
-        return "0"
-      except: return "0"
-    of irPow:
-      try: return $(pow(parseFloat(left), parseFloat(right)))
-      except: return "0"
+    of irAdd, irSub, irMul, irDiv, irMod, irPow:
+      let v = evalExprValue(expr, row, ctx)
+      case v.kind
+      of vkInt64: return $v.int64Val
+      of vkFloat64:
+        let s = $v.float64Val
+        if s.endsWith(".0"): return s[0..^3]
+        return s
+      of vkString: return v.strVal
+      else: return "\\N"
     of irLike:
       proc escapeRe(s: string): string =
         result = ""
@@ -805,14 +917,14 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       let v = evalExpr(expr.unExpr, row, ctx)
       return if not isNull(v): "true" else: "false"
     of irNeg:
-      let v = evalExpr(expr.unExpr, row, ctx)
-      try:
-        let f = -parseFloat(v)
-        let s = $f
-        if s.endsWith(".0"):
-          return s[0..^3]
+      let v = evalExprValue(expr.unExpr, row, ctx)
+      case v.kind
+      of vkInt64: return $(-v.int64Val)
+      of vkFloat64:
+        let s = $(-v.float64Val)
+        if s.endsWith(".0"): return s[0..^3]
         return s
-      except: return "0"
+      else: return "0"
     else: return "false"
   of irekFuncCall:
     let fn = expr.irFunc.toLower()
@@ -1410,19 +1522,19 @@ proc lowerExpr*(node: Node): IRExpr =
   if node == nil: return nil
   case node.kind
   of nkIntLit:
-    result = IRExpr(kind: irekLiteral)
+    result = IRExpr(kind: irekLiteral, valueKind: vkInt64)
     result.literal = IRLiteral(kind: vkInt64, int64Val: node.intVal)
   of nkFloatLit:
-    result = IRExpr(kind: irekLiteral)
+    result = IRExpr(kind: irekLiteral, valueKind: vkFloat64)
     result.literal = IRLiteral(kind: vkFloat64, float64Val: node.floatVal)
   of nkStringLit:
-    result = IRExpr(kind: irekLiteral)
+    result = IRExpr(kind: irekLiteral, valueKind: vkString)
     result.literal = IRLiteral(kind: vkString, strVal: node.strVal)
   of nkBoolLit:
-    result = IRExpr(kind: irekLiteral)
+    result = IRExpr(kind: irekLiteral, valueKind: vkBool)
     result.literal = IRLiteral(kind: vkBool, boolVal: node.boolVal)
   of nkNullLit:
-    result = IRExpr(kind: irekLiteral)
+    result = IRExpr(kind: irekLiteral, valueKind: vkNull)
     result.literal = IRLiteral(kind: vkNull)
   of nkCurrentUser:
     result = IRExpr(kind: irekFuncCall)
@@ -1433,10 +1545,10 @@ proc lowerExpr*(node: Node): IRExpr =
     result.irFunc = "current_role"
     result.irFuncArgs = @[]
   of nkIdent:
-    result = IRExpr(kind: irekField)
+    result = IRExpr(kind: irekField, valueKind: vkString)
     result.fieldPath = @[node.identName]
   of nkPath:
-    result = IRExpr(kind: irekField)
+    result = IRExpr(kind: irekField, valueKind: vkString)
     result.fieldPath = node.pathParts
   of nkJsonPath:
     result = IRExpr(kind: irekJsonPath)
@@ -1445,6 +1557,7 @@ proc lowerExpr*(node: Node): IRExpr =
     result.jpAsText = node.jpAsText
   of nkBinOp:
     result = IRExpr(kind: irekBinary)
+    result.valueKind = vkString
     var irOp: IROperator
     case node.binOp
     of bkAdd: irOp = irAdd
@@ -1470,18 +1583,39 @@ proc lowerExpr*(node: Node): IRExpr =
     result.binOp = irOp
     result.binLeft = lowerExpr(node.binLeft)
     result.binRight = lowerExpr(node.binRight)
+    # Infer valueKind for arithmetic operators
+    case irOp
+    of irAdd, irSub, irMul:
+      if result.binLeft != nil and result.binRight != nil:
+        if result.binLeft.valueKind == vkFloat64 or result.binRight.valueKind == vkFloat64:
+          result.valueKind = vkFloat64
+        elif result.binLeft.valueKind == vkInt64 and result.binRight.valueKind == vkInt64:
+          result.valueKind = vkInt64
+    of irDiv:
+      result.valueKind = vkFloat64
+    of irMod:
+      result.valueKind = vkInt64
+    of irPow:
+      result.valueKind = vkFloat64
+    of irEq, irNeq, irLt, irLte, irGt, irGte, irAnd, irOr,
+       irIn, irNotIn, irLike, irILike, irBetween,
+       irIsNull, irIsNotNull, irFtsMatch:
+      result.valueKind = vkBool
+    else: discard
   of nkUnaryOp:
-    result = IRExpr(kind: irekUnary)
+    result = IRExpr(kind: irekUnary, valueKind: vkString)
     result.unOp = if node.unOp == ukNot: irNot else: irNeg
     result.unExpr = lowerExpr(node.unOperand)
+    if node.unOp == ukNeg and result.unExpr != nil:
+      result.valueKind = result.unExpr.valueKind
   of nkFuncCall:
     case node.funcName.toLower()
     of "count", "sum", "avg", "min", "max", "array_agg", "string_agg":
       result = IRExpr(kind: irekAggregate)
       case node.funcName.toLower()
-      of "count": result.aggOp = irCount
-      of "sum": result.aggOp = irSum
-      of "avg": result.aggOp = irAvg
+      of "count": result.aggOp = irCount; result.valueKind = vkInt64
+      of "sum": result.aggOp = irSum; result.valueKind = vkFloat64
+      of "avg": result.aggOp = irAvg; result.valueKind = vkFloat64
       of "min": result.aggOp = irMin
       of "max": result.aggOp = irMax
       of "array_agg": result.aggOp = irArrayAgg
@@ -1492,27 +1626,27 @@ proc lowerExpr*(node: Node): IRExpr =
       if node.funcFilter != nil:
         result.aggFilter = lowerExpr(node.funcFilter)
     else:
-      result = IRExpr(kind: irekFuncCall)
+      result = IRExpr(kind: irekFuncCall, valueKind: vkString)
       result.irFunc = node.funcName
       result.irFuncArgs = @[]
       for arg in node.funcArgs: result.irFuncArgs.add(lowerExpr(arg))
   of nkIsExpr:
-    result = IRExpr(kind: irekUnary)
+    result = IRExpr(kind: irekUnary, valueKind: vkBool)
     result.unOp = if node.isNegated: irIsNotNull else: irIsNull
     result.unExpr = lowerExpr(node.isExpr)
   of nkLikeExpr:
-    result = IRExpr(kind: irekBinary)
+    result = IRExpr(kind: irekBinary, valueKind: vkBool)
     result.binOp = if node.likeCaseInsensitive: irILike else: irLike
     result.binLeft = lowerExpr(node.likeExpr)
     result.binRight = lowerExpr(node.likePattern)
   of nkBetweenExpr:
-    result = IRExpr(kind: irekBinary)
+    result = IRExpr(kind: irekBinary, valueKind: vkBool)
     result.binOp = irAnd
-    let leftCmp = IRExpr(kind: irekBinary)
+    let leftCmp = IRExpr(kind: irekBinary, valueKind: vkBool)
     leftCmp.binOp = irGte
     leftCmp.binLeft = lowerExpr(node.betweenExpr)
     leftCmp.binRight = lowerExpr(node.betweenLow)
-    let rightCmp = IRExpr(kind: irekBinary)
+    let rightCmp = IRExpr(kind: irekBinary, valueKind: vkBool)
     rightCmp.binOp = irLte
     rightCmp.binLeft = lowerExpr(node.betweenExpr)
     rightCmp.binRight = lowerExpr(node.betweenHigh)

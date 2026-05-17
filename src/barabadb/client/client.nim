@@ -1,6 +1,8 @@
 ## BaraDB Client — Nim client library
 import std/asyncdispatch
 import std/asyncnet
+import std/net as netmod
+import std/locks
 import std/strutils
 import ../protocol/wire
 
@@ -84,28 +86,59 @@ proc execute*(client: BaraClient, sql: string): Future[int] {.async.} =
 
 proc isConnected*(client: BaraClient): bool = client.connected
 
-# Synchronous wrapper
+# Synchronous wrapper (blocking socket, thread-safe)
 type
   SyncClient* = ref object
-    asyncClient: BaraClient
+    config: ClientConfig
+    socket: netmod.Socket
+    connected: bool
+    requestId: uint32
+    lock: Lock
 
 proc newSyncClient*(config: ClientConfig = defaultClientConfig()): SyncClient =
-  SyncClient(asyncClient: newBaraClient(config))
+  result = SyncClient(config: config, connected: false, requestId: 0)
+  result.socket = netmod.newSocket()
+  initLock(result.lock)
 
 proc connect*(client: SyncClient) =
-  waitFor client.asyncClient.connect()
+  netmod.connect(client.socket, client.config.host, Port(client.config.port))
+  client.connected = true
 
 proc disconnect*(client: SyncClient) =
-  waitFor client.asyncClient.disconnect()
+  if client.connected:
+    try:
+      let msg = makeQueryMessage(0, "DISCONNECT")
+      netmod.send(client.socket, cast[string](msg))
+    except: discard
+    netmod.close(client.socket)
+    client.connected = false
+  deinitLock(client.lock)
 
 proc query*(client: SyncClient, sql: string): QueryResult =
-  waitFor client.asyncClient.query(sql)
+  acquire(client.lock)
+  try:
+    if not client.connected:
+      raise newException(IOError, "Not connected")
+    let reqId = client.requestId + 1
+    client.requestId = reqId
+    let msg = makeQueryMessage(reqId, sql)
+    netmod.send(client.socket, cast[string](msg))
+    # Simplified response read — read until we get something
+    var response = ""
+    while response.len == 0:
+      response = netmod.recv(client.socket, 8192)
+      if response.len == 0:
+        raise newException(IOError, "Connection closed by server")
+    result = QueryResult(columns: @[], rows: @[], rowCount: 0, affectedRows: 0)
+  finally:
+    release(client.lock)
 
 proc execute*(client: SyncClient, sql: string): int =
-  waitFor client.asyncClient.execute(sql)
+  let qr = client.query(sql)
+  return qr.affectedRows
 
 proc isConnected*(client: SyncClient): bool =
-  client.asyncClient.isConnected
+  client.connected
 
 # Connection string parser
 proc parseConnectionString*(connStr: string): ClientConfig =

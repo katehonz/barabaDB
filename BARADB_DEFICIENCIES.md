@@ -89,7 +89,7 @@ For queries with zero matching rows (e.g. `WHERE id IN (SELECT ...)` with no sub
 
 ## 5. GROUP BY Returns Empty Values for Non-Aggregated Columns
 
-**Problem:** Unlike SQLite, BaraDB does not automatically pick an arbitrary row value for columns that are neither in `GROUP BY` nor inside an aggregate function.
+**Problem:** Unlike SQLite, BaraDB did not automatically pick an arbitrary row value for columns that are neither in `GROUP BY` nor inside an aggregate function.
 
 ```sql
 SELECT u.id, u.name, count(*)
@@ -98,30 +98,40 @@ WHERE p.author = u.id AND p.thread = ?
 GROUP BY name
 ```
 
-**Result:** `u.id`, `u.email`, `u.usrStatus`, etc. return empty strings, while `name` and `count(*)` are correct.
+**Result:** `u.id`, `u.email`, `u.usrStatus`, etc. returned empty strings, while `name` and `count(*)` were correct.
 
-**Fix:** (Workaround in forum code) Replaced `GROUP BY` queries with `DISTINCT` + separate subqueries where ordering by count is not critical:
+**Fix:** Modified `query/executor.nim` — the `irpkGroupBy` execution path now populates non-aggregated columns from the first row in each group (SQLite behavior). The forum workaround using `DISTINCT` is no longer necessary.
 
-```sql
-SELECT DISTINCT u.id, u.name, u.email, ...
-FROM person u, post p
-WHERE p.author = u.id AND p.thread = ?
-LIMIT 5
+```nim
+# Populate non-aggregated columns from first row in group
+if groupRows.len > 0:
+  for k, v in groupRows[0]:
+    if not k.startsWith("$") and k notin aggRow:
+      aggRow[k] = v
 ```
 
 ---
 
 ## 6. Inconsistent Aggregate Column Names
 
-**Problem:** Aggregate functions produce column names that omit the argument expression:
+**Problem:** Aggregate functions produced column names that omitted the argument expression:
 
 - `SELECT count(*)` → column name `count()`
 - `SELECT max(id)` → column name `max()`
 - `SELECT min(creation)` → column name `min()`
 
-Code that relies on exact column names (e.g. `getValue` looking up `count(*)`) can be confused.
+Code that relies on exact column names (e.g. `getValue` looking up `count(*)`) could be confused.
 
-**Fix:** (Workaround in forum code) Avoided name-dependent lookup and rewrote queries to use positional access via `getRow()` / `getAllRows()`.
+**Fix:** Modified `query/executor.nim` — `lowerSelect()` now builds aliases using `exprToSql(arg)` for function arguments:
+
+```nim
+elif e.kind == nkFuncCall:
+  var aliasArgs: seq[string] = @[]
+  for arg in e.funcArgs: aliasArgs.add(exprToSql(arg))
+  projectPlan.projectAliases.add(e.funcName & "(" & aliasArgs.join(", ") & ")")
+```
+
+Result: `SELECT count(*)` now produces column name `count(*)`, matching user expectations.
 
 ---
 
@@ -131,12 +141,13 @@ Code that relies on exact column names (e.g. `getValue` looking up `count(*)`) c
 
 **Result:** Login and other routes crashed intermittently with 502 Bad Gateway.
 
-**Fix:** Built a new synchronous client (`forum/src/baradb_sync_client.nim`) using blocking `net.Socket` from Nim's standard library. This eliminates all async event loop interactions.
+**Fix:** Rewrote `SyncClient` in both `clients/nim/src/baradb/client.nim` and `src/barabadb/client/client.nim` to use blocking `net.Socket` from Nim's standard library. This eliminates all async event loop interactions.
 
-Key differences from the async client:
-- Uses `net.Socket` instead of `asyncnet.AsyncSocket`
-- Uses blocking `recv()` with an explicit `recvExact()` helper
-- No dependency on `asyncdispatch` or `waitFor`
+Key changes:
+- `SyncClient.socket` is now `net.Socket` instead of `AsyncSocket`
+- `connect()` uses blocking `net.connect()` instead of `waitFor asyncClient.connect()`
+- `query()` uses blocking `recv()` via a `recvExact()` helper instead of `waitFor`
+- No dependency on `asyncdispatch` or `waitFor` in sync path
 - Fully compatible with the existing wire protocol
 
 ---
@@ -145,19 +156,26 @@ Key differences from the async client:
 
 **Problem:** A single `SyncClient` instance was shared across all HTTP requests. NimForum runs on Jester's async event loop, which can interleave request handlers in the same thread. Without synchronization, two handlers could send queries over the same socket simultaneously, corrupting the wire protocol stream.
 
-**Fix:** Added a global `Lock` and `withDbLock` template in `forum/src/baradb_sqlite.nim`:
+**Fix:** Integrated a `Lock` directly into `SyncClient` in both client libraries. Every public operation (`query`, `exec`, `auth`, `ping`, `close`) acquires the lock before touching the socket:
 
 ```nim
-var dbLock: Lock
-initLock(dbLock)
+type
+  SyncClient* = ref object
+    config: ClientConfig
+    socket: net.Socket
+    connected: bool
+    requestId: uint32
+    lock: Lock
 
-template withDbLock(body: untyped) =
-  acquire(dbLock)
-  try: body
-  finally: release(dbLock)
+proc query*(client: SyncClient, sql: string): QueryResult =
+  acquire(client.lock)
+  try:
+    ... socket I/O ...
+  finally:
+    release(client.lock)
 ```
 
-All DB operations (`query`, `getRow`, `exec`, etc.) are wrapped in this lock.
+The external `withDbLock` workaround in the forum adapter is no longer necessary because the client itself is now thread-safe.
 
 ---
 
@@ -219,10 +237,10 @@ This allows empty strings to be stored in NOT NULL columns while still properly 
 | 2 | DEFAULT not evaluated | `query/executor.nim` | Schema bug |
 | 3 | Duplicate column overwrite | `query/executor.nim` | Data structure bug |
 | 4 | Empty result = no columns | `core/server.nim` | Protocol bug |
-| 5 | GROUP BY empty values | N/A (engine behavior) | Semantic difference |
-| 6 | Inconsistent agg names | N/A (engine behavior) | Naming convention |
-| 7 | Async client unstable | `forum/src/baradb_client.nim` | Client design |
-| 8 | No thread safety | `forum/src/baradb_sqlite.nim` | Adapter design |
+| 5 | GROUP BY empty values | `query/executor.nim` | Semantic difference |
+| 6 | Inconsistent agg names | `query/executor.nim` | Naming convention |
+| 7 | Async client unstable | `clients/nim/src/baradb/client.nim` | Client design |
+| 8 | No thread safety | `clients/nim/src/baradb/client.nim` | Adapter design |
 | 9 | `key` reserved keyword | `query/lexer.nim` | Parser limitation |
 | 10 | Empty string = NULL | `query/executor.nim` | Data handling bug |
 

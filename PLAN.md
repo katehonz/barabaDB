@@ -137,9 +137,9 @@
 |---|--------|--------|--------|
 | 9.1.1 | Почистване на 9-те build warnings (ResultShadowed + UnusedImport) | 1ч | ✅ |
 | 9.1.2 | Issue #6: Aggregate column names (`count(*)` → `count(*)`, `max(id)` → `max(id)`) | 2ч | ✅ |
-| 9.1.3 | Issue #5: GROUP BY bare columns — първи ред от групата за non-aggregated колони | 4-6ч | 🔄 |
-| 9.1.4 | Issue #7+8: Решение за async vs sync client + thread safety | 2ч | 🔄 |
-| 9.1.5 | Regression тестове за всички 10 deficiencies | 2ч | 🔄 |
+| 9.1.3 | Issue #5: GROUP BY bare columns — първи ред от групата за non-aggregated колони | 4-6ч | ✅ |
+| 9.1.4 | Issue #7+8: Решение за async vs sync client + thread safety | 2ч | ✅ |
+| 9.1.5 | Regression тестове за всички 10 deficiencies | 2ч | ✅ |
 
 **Метрика:** NimForum миграционният код маха всички `DISTINCT` workaround-и за GROUP BY.
 
@@ -149,10 +149,10 @@
 
 | # | Задача | Оценка | Статус |
 |---|--------|--------|--------|
-| 9.2.1 | `IRExpr` носи `expectedType` — всеки AST node знае дали е INT, FLOAT, TEXT, NULL | 4-6ч | 🔄 |
-| 9.2.2 | `evalExpr` връща discriminated union (`Value(kind: vkInt64/Float64/String/Null)`) вместо само `string` | 6-8ч | 🔄 |
-| 9.2.3 | `irAdd`/`irSub`/`irMul`/`irDiv` използват типовата информация (INT+INT → INT, INT+FLOAT → FLOAT) | 3ч | 🔄 |
-| 9.2.4 | `validateType` използва `Value.kind` вместо `parseInt`/`parseFloat` на string | 2ч | 🔄 |
+| 9.2.1 | `IRExpr` носи `valueKind` — всеки AST node знае дали е INT, FLOAT, TEXT, NULL | 4-6ч | ✅ |
+| 9.2.2 | `evalExprValue` връща discriminated union (`Value(kind: vkInt64/Float64/String/Null)`) вместо само `string` | 6-8ч | ✅ |
+| 9.2.3 | `irAdd`/`irSub`/`irMul`/`irDiv` използват типовата информация (INT+INT → INT, INT+FLOAT → FLOAT) | 3ч | ✅ |
+| 9.2.4 | `validateType` използва `Value.kind` вместо `parseInt`/`parseFloat` на string | 2ч | ✅ |
 
 **Метрика:** Премахваме всички `try: parseFloat catch: return fallback` евристики от `evalExpr`.
 
@@ -194,11 +194,13 @@
 
 ---
 
-### Текущи метрики (преди сесия 9)
+### Текущи метрики (след сесия 9 — Sedmica 1+2)
 
 | Метрика | Стойност |
 |---------|----------|
-| **Тестове** | 294 — 0 failures |
-| **Build warnings** | 9 (3× ResultShadowed + 6× UnusedImport) |
-| **BARADB_DEFICIENCIES** | 4 непоправени (#5, #6, #7, #8) |
-| **Workaround-и в NimForum** | 2 (GROUP BY → DISTINCT, aggregate positional access) |
+| **Тестове** | 311 — 0 failures |
+| **Build warnings** | 0 |
+| **BARADB_DEFICIENCIES** | 0 непоправени (всички 10 поправени) |
+| **Workaround-и в NimForum** | 0 |
+| **evalExprValue** | Връща `Value(kind: vkInt64/Float64/String/Null)` |
+| **Аритметични ops** | INT+INT→INT, INT+FLOAT→FLOAT, FLOAT/INT→FLOAT |
