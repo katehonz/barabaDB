@@ -480,6 +480,55 @@ proc parseRowData(valStr: string): Table[string, string] =
 
 proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row]
 
+proc extractJoinEquality*(expr: IRExpr): (string, string) =
+  ## Extract (leftCol, rightCol) from an equality join condition.
+  ## Both operands must be simple field references.
+  if expr == nil or expr.kind != irekBinary or expr.binOp != irEq:
+    return ("", "")
+  if expr.binLeft.kind == irekField and expr.binRight.kind == irekField:
+    if expr.binLeft.fieldPath.len > 0 and expr.binRight.fieldPath.len > 0:
+      return (expr.binLeft.fieldPath[^1], expr.binRight.fieldPath[^1])
+  return ("", "")
+
+proc chooseJoinStrategy(ctx: ExecutionContext, plan: IRPlan) =
+  ## Analyze join condition and pick the best execution strategy.
+  if plan == nil or plan.kind != irpkJoin:
+    return
+  if plan.joinCond == nil:
+    plan.joinStrategy = irjsNestedLoop
+    return
+  let (leftCol, rightCol) = extractJoinEquality(plan.joinCond)
+  if leftCol.len == 0 or rightCol.len == 0:
+    plan.joinStrategy = irjsNestedLoop
+    return
+  # Check if either side has a B-Tree index on the join column
+  proc isPkIndex(tableName, colName: string): bool =
+    if tableName in ctx.tables:
+      for col in ctx.tables[tableName].columns:
+        if col.name == colName and col.isPk:
+          return true
+    return false
+
+  var hasLeftIndex = false
+  var hasRightIndex = false
+  if plan.joinLeft != nil and plan.joinLeft.kind == irpkScan:
+    let idxName = plan.joinLeft.scanTable & "." & leftCol
+    if idxName in ctx.btrees and not isPkIndex(plan.joinLeft.scanTable, leftCol):
+      hasLeftIndex = true
+  if plan.joinRight != nil and plan.joinRight.kind == irpkScan:
+    let idxName = plan.joinRight.scanTable & "." & rightCol
+    if idxName in ctx.btrees and not isPkIndex(plan.joinRight.scanTable, rightCol):
+      hasRightIndex = true
+  if hasRightIndex:
+    plan.joinStrategy = irjsIndexNestedLoop
+    plan.joinHashCol = rightCol
+  elif hasLeftIndex:
+    plan.joinStrategy = irjsIndexNestedLoop
+    plan.joinHashCol = leftCol
+  else:
+    plan.joinStrategy = irjsHash
+    plan.joinHashCol = rightCol
+
 proc parseVectorString*(value: string): seq[float32] =
   ## Parse a vector string like "[1.0, 2.0, 3.0]" into seq[float32]
   result = @[]
@@ -2479,7 +2528,12 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           result.add(padded)
       return result
 
-    # Non-LATERAL: standard join execution
+    # Non-LATERAL: choose join strategy
+    chooseJoinStrategy(ctx, plan)
+    # Hash join and index nested loop are only safe for INNER JOIN
+    # (padding logic for outer joins is complex)
+    if plan.joinKind != irjkInner and plan.joinStrategy in {irjsHash, irjsIndexNestedLoop}:
+      plan.joinStrategy = irjsNestedLoop
     let rightRows = executePlan(ctx, plan.joinRight)
 
     # Collect all unique column names from each side (excluding internal $ keys)
@@ -2502,52 +2556,252 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           result.add(mergeRow(l, r, leftAlias, rightAlias))
       return result
 
-    for l in leftRows:
-      var matched = false
-      for r in rightRows:
-        let merged = mergeRow(l, r, leftAlias, rightAlias)
-        if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
-          result.add(merged)
-          matched = true
-      if not matched and (plan.joinKind == irjkLeft or plan.joinKind == irjkFull):
-        var padded = initTable[string, string]()
-        for k, v in l:
-          if not k.startsWith("$"):
-            padded[k] = v
-        for col in rightCols:
-          if col notin padded: padded[col] = "\\N"
-        if leftAlias.len > 0:
-          for k, v in l:
-            if not k.startsWith("$"):
-              padded[leftAlias & "." & k] = v
-        if rightAlias.len > 0:
-          for col in rightCols:
-            padded[rightAlias & "." & col] = "\\N"
-        result.add(padded)
+    case plan.joinStrategy
+    of irjsHash:
+      # Hash Join: build hash table on the smaller side
+      let (leftCol, rightCol) = extractJoinEquality(plan.joinCond)
+      var buildRows, probeRows: seq[Row]
+      var buildCol, probeCol: string
+      var buildAlias, probeAlias: string
+      var buildIsLeft: bool
 
-    if plan.joinKind == irjkRight or plan.joinKind == irjkFull:
-      for r in rightRows:
-        var found = false
-        for l in leftRows:
+      if leftRows.len <= rightRows.len:
+        buildRows = leftRows
+        buildCol = leftCol
+        buildAlias = leftAlias
+        probeRows = rightRows
+        probeCol = rightCol
+        probeAlias = rightAlias
+        buildIsLeft = true
+      else:
+        buildRows = rightRows
+        buildCol = rightCol
+        buildAlias = rightAlias
+        probeRows = leftRows
+        probeCol = leftCol
+        probeAlias = leftAlias
+        buildIsLeft = false
+
+      var hashTable = initTable[string, seq[Row]]()
+      for row in buildRows:
+        let key = if buildAlias.len > 0 and buildCol in row: row[buildCol]
+                  elif buildCol in row: row[buildCol]
+                  else: ""
+        if key.len > 0 and key != "\\N":
+          if key notin hashTable: hashTable[key] = @[]
+          hashTable[key].add(row)
+
+      var matchedProbe = initTable[int, bool]()
+      for i, prow in probeRows:
+        let key = if probeAlias.len > 0 and probeCol in prow: prow[probeCol]
+                  elif probeCol in prow: prow[probeCol]
+                  else: ""
+        if key in hashTable:
+          matchedProbe[i] = true
+          for brow in hashTable[key]:
+            if buildIsLeft:
+              result.add(mergeRow(brow, prow, leftAlias, rightAlias))
+            else:
+              result.add(mergeRow(prow, brow, leftAlias, rightAlias))
+
+      # LEFT / RIGHT / FULL padding for non-matching probe rows
+      if plan.joinKind == irjkLeft or plan.joinKind == irjkFull or plan.joinKind == irjkRight:
+        for i, prow in probeRows:
+          if not matchedProbe.getOrDefault(i, false):
+            var padded = initTable[string, string]()
+            for k, v in prow:
+              if not k.startsWith("$"):
+                padded[k] = v
+            if buildIsLeft:
+              # probe is right side
+              for col in leftCols:
+                if col notin padded: padded[col] = "\\N"
+              if probeAlias.len > 0:
+                for k, v in prow:
+                  if not k.startsWith("$"):
+                    padded[probeAlias & "." & k] = v
+              if leftAlias.len > 0:
+                for col in leftCols:
+                  padded[leftAlias & "." & col] = "\\N"
+            else:
+              # probe is left side
+              for col in rightCols:
+                if col notin padded: padded[col] = "\\N"
+              if probeAlias.len > 0:
+                for k, v in prow:
+                  if not k.startsWith("$"):
+                    padded[probeAlias & "." & k] = v
+              if rightAlias.len > 0:
+                for col in rightCols:
+                  padded[rightAlias & "." & col] = "\\N"
+            result.add(padded)
+
+      # RIGHT / FULL padding for non-matching build rows
+      if plan.joinKind == irjkRight or plan.joinKind == irjkFull:
+        for i, brow in buildRows:
+          var found = false
+          for j, prow in probeRows:
+            let pkey = if probeAlias.len > 0 and probeCol in prow: prow[probeCol]
+                       elif probeCol in prow: prow[probeCol]
+                       else: ""
+            let bkey = if buildAlias.len > 0 and buildCol in brow: brow[buildCol]
+                       elif buildCol in brow: brow[buildCol]
+                       else: ""
+            if pkey == bkey and bkey.len > 0:
+              found = true
+              break
+          if not found:
+            var padded = initTable[string, string]()
+            for k, v in brow:
+              if not k.startsWith("$"):
+                padded[k] = v
+            if buildIsLeft:
+              for col in rightCols:
+                if col notin padded: padded[col] = "\\N"
+              if leftAlias.len > 0:
+                for k, v in brow:
+                  if not k.startsWith("$"):
+                    padded[leftAlias & "." & k] = v
+              if rightAlias.len > 0:
+                for col in rightCols:
+                  padded[rightAlias & "." & col] = "\\N"
+            else:
+              for col in leftCols:
+                if col notin padded: padded[col] = "\\N"
+              if rightAlias.len > 0:
+                for k, v in brow:
+                  if not k.startsWith("$"):
+                    padded[rightAlias & "." & k] = v
+              if leftAlias.len > 0:
+                for col in leftCols:
+                  padded[leftAlias & "." & col] = "\\N"
+            result.add(padded)
+
+    of irjsIndexNestedLoop:
+      let (leftCol, rightCol) = extractJoinEquality(plan.joinCond)
+      var outerRows: seq[Row]
+      var outerAlias, innerAlias: string
+      var outerCol, innerCol: string
+      var idxName: string
+      var outerIsLeft: bool
+
+      if plan.joinHashCol == rightCol:
+        outerRows = leftRows
+        outerAlias = leftAlias
+        innerAlias = rightAlias
+        outerCol = leftCol
+        innerCol = rightCol
+        idxName = (if plan.joinRight != nil and plan.joinRight.kind == irpkScan: plan.joinRight.scanTable else: "") & "." & rightCol
+        outerIsLeft = true
+      else:
+        outerRows = rightRows
+        outerAlias = rightAlias
+        innerAlias = leftAlias
+        outerCol = rightCol
+        innerCol = leftCol
+        idxName = (if plan.joinLeft != nil and plan.joinLeft.kind == irpkScan: plan.joinLeft.scanTable else: "") & "." & leftCol
+        outerIsLeft = false
+
+      if idxName notin ctx.btrees:
+        # Fallback to nested loop if index disappeared
+        plan.joinStrategy = irjsNestedLoop
+        # Fall through to nested loop below
+      else:
+        let btree = ctx.btrees[idxName]
+        var matchedOuter = initTable[int, bool]()
+        for i, orow in outerRows:
+          let key = if orow.hasKey(outerCol): orow[outerCol] else: ""
+          if key.len > 0 and key != "\\N":
+            let entries = btree.get(key)
+            if entries.len > 0:
+              matchedOuter[i] = true
+            for entry in entries:
+              let parsed = parseRowData(entry.rowValue)
+              if outerIsLeft:
+                result.add(mergeRow(orow, parsed, leftAlias, rightAlias))
+              else:
+                result.add(mergeRow(parsed, orow, leftAlias, rightAlias))
+          elif plan.joinKind == irjkLeft or plan.joinKind == irjkRight or plan.joinKind == irjkFull:
+            matchedOuter[i] = false
+
+        # Padding for non-matching outer rows
+        if plan.joinKind == irjkLeft or plan.joinKind == irjkRight or plan.joinKind == irjkFull:
+          for i, orow in outerRows:
+            if not matchedOuter.getOrDefault(i, false):
+              var padded = initTable[string, string]()
+              for k, v in orow:
+                if not k.startsWith("$"):
+                  padded[k] = v
+              if outerIsLeft:
+                for col in rightCols:
+                  if col notin padded: padded[col] = "\\N"
+                if leftAlias.len > 0:
+                  for k, v in orow:
+                    if not k.startsWith("$"):
+                      padded[leftAlias & "." & k] = v
+                if rightAlias.len > 0:
+                  for col in rightCols:
+                    padded[rightAlias & "." & col] = "\\N"
+              else:
+                for col in leftCols:
+                  if col notin padded: padded[col] = "\\N"
+                if rightAlias.len > 0:
+                  for k, v in orow:
+                    if not k.startsWith("$"):
+                      padded[rightAlias & "." & k] = v
+                if leftAlias.len > 0:
+                  for col in leftCols:
+                    padded[leftAlias & "." & col] = "\\N"
+              result.add(padded)
+        return result
+
+    of irjsNestedLoop:
+      for l in leftRows:
+        var matched = false
+        for r in rightRows:
           let merged = mergeRow(l, r, leftAlias, rightAlias)
           if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
-            found = true
-            break
-        if not found:
+            result.add(merged)
+            matched = true
+        if not matched and (plan.joinKind == irjkLeft or plan.joinKind == irjkFull):
           var padded = initTable[string, string]()
-          for k, v in r:
+          for k, v in l:
             if not k.startsWith("$"):
               padded[k] = v
-          for col in leftCols:
+          for col in rightCols:
             if col notin padded: padded[col] = "\\N"
+          if leftAlias.len > 0:
+            for k, v in l:
+              if not k.startsWith("$"):
+                padded[leftAlias & "." & k] = v
           if rightAlias.len > 0:
+            for col in rightCols:
+              padded[rightAlias & "." & col] = "\\N"
+          result.add(padded)
+
+      if plan.joinKind == irjkRight or plan.joinKind == irjkFull:
+        for r in rightRows:
+          var found = false
+          for l in leftRows:
+            let merged = mergeRow(l, r, leftAlias, rightAlias)
+            if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
+              found = true
+              break
+          if not found:
+            var padded = initTable[string, string]()
             for k, v in r:
               if not k.startsWith("$"):
-                padded[rightAlias & "." & k] = v
-          if leftAlias.len > 0:
+                padded[k] = v
             for col in leftCols:
-              padded[leftAlias & "." & col] = "\\N"
-          result.add(padded)
+              if col notin padded: padded[col] = "\\N"
+            if rightAlias.len > 0:
+              for k, v in r:
+                if not k.startsWith("$"):
+                  padded[rightAlias & "." & k] = v
+            if leftAlias.len > 0:
+              for col in leftCols:
+                padded[leftAlias & "." & col] = "\\N"
+            result.add(padded)
 
     return result
 

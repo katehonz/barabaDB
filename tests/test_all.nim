@@ -3654,3 +3654,77 @@ suite "Type Safety — evalExprValue":
     let v = evalExprValue(lit, initTable[string, string](), nil)
     check v.kind == vkFloat64
     check v.float64Val == 3.14
+
+
+suite "Join Performance — Hash Join & Index Nested Loop":
+  setup:
+    var testDir = getTempDir() / "baradb_join_perf_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
+    createDir(testDir)
+    var db = newLSMTree(testDir)
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE users (id INT PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE orders (id INT PRIMARY KEY, user_id INT, total FLOAT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO users VALUES (1, 'Alice'), (2, 'Bob'), (3, 'Carol')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO orders VALUES (10, 1, 99.5), (20, 1, 45.0), (30, 2, 150.0)"))
+
+  teardown:
+    removeDir(testDir)
+
+  test "Hash Join produces correct INNER JOIN results":
+    let r = qexec.executeQuery(ctx, parse("SELECT * FROM users u JOIN orders o ON u.id = o.user_id"))
+    check r.success
+    check r.rows.len == 3
+    check r.rows[0]["name"] == "Alice"
+    check r.rows[1]["name"] == "Alice"
+    check r.rows[2]["name"] == "Bob"
+
+  test "Index Nested Loop produces correct INNER JOIN results":
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_orders_user ON orders(user_id)"))
+    let r = qexec.executeQuery(ctx, parse("SELECT * FROM users u JOIN orders o ON u.id = o.user_id"))
+    check r.success
+    check r.rows.len == 3
+    check r.rows[0]["name"] == "Alice"
+    check r.rows[2]["name"] == "Bob"
+
+  test "Planner chooses Index Nested Loop when index exists":
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_orders_user2 ON orders(user_id)"))
+    let ast = parse("SELECT * FROM users u JOIN orders o ON u.id = o.user_id")
+    let plan = qexec.lowerSelect(ast.stmts[0])
+    # Walk to join node
+    var jp = plan
+    while jp != nil and jp.kind != irpkJoin:
+      case jp.kind
+      of irpkFilter: jp = jp.filterSource
+      of irpkProject: jp = jp.projectSource
+      else: break
+    # Execute to trigger strategy selection
+    discard qexec.executePlan(ctx, plan)
+    if jp != nil and jp.kind == irpkJoin:
+      check jp.joinStrategy == irjsIndexNestedLoop
+    else:
+      check false
+
+  test "Planner chooses Hash Join when no index exists":
+    let ast = parse("SELECT * FROM users u JOIN orders o ON u.id = o.user_id")
+    let plan = qexec.lowerSelect(ast.stmts[0])
+    var jp = plan
+    while jp != nil and jp.kind != irpkJoin:
+      case jp.kind
+      of irpkFilter: jp = jp.filterSource
+      of irpkProject: jp = jp.projectSource
+      else: break
+    discard qexec.executePlan(ctx, plan)
+    if jp != nil and jp.kind == irpkJoin:
+      check jp.joinStrategy == irjsHash
+    else:
+      check false
+    let r = qexec.executeQuery(ctx, parse("SELECT * FROM users u JOIN orders o ON u.id = o.user_id"))
+    check r.rows.len == 3
+
+  test "LEFT JOIN with Hash Join fallback to Nested Loop":
+    let r = qexec.executeQuery(ctx, parse("SELECT * FROM users u LEFT JOIN orders o ON u.id = o.user_id"))
+    check r.success
+    check r.rows.len == 4
+    check r.rows[0]["name"] == "Alice"
+    check r.rows[3]["name"] == "Carol"
+    check r.rows[3]["total"] == "\\N"

@@ -69,6 +69,11 @@ type
     irjkFull
     irjkCross
 
+  IRJoinStrategy* = enum
+    irjsNestedLoop
+    irjsHash
+    irjsIndexNestedLoop
+
   IRPlanKind* = enum
     irpkScan
     irpkFilter
@@ -123,6 +128,8 @@ type
       joinCond*: IRExpr
       joinAlias*: string
       joinLateral*: bool
+      joinStrategy*: IRJoinStrategy
+      joinHashCol*: string
     of irpkSort:
       sortSource*: IRPlan
       sortExprs*: seq[IRExpr]

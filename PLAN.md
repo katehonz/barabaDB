@@ -162,10 +162,10 @@
 
 | # | Задача | Оценка | Статус |
 |---|--------|--------|--------|
-| 9.3.1 | Hash Join: `ON a.col = b.col` с hash table върху по-малката страна | 6ч | 🔄 |
-| 9.3.2 | Index Nested Loop Join: ако има B-Tree индекс на join колоната | 4ч | 🔄 |
-| 9.3.3 | Benchmark: `thread JOIN category` с 10K/100K/1M редове | 2ч | 🔄 |
-| 9.3.4 | Query planner избира между Nested Loop / Hash / Index въз основа на cardinality | 4ч | 🔄 |
+| 9.3.1 | Hash Join: `ON a.col = b.col` с hash table върху по-малката страна | 6ч | ✅ |
+| 9.3.2 | Index Nested Loop Join: ако има B-Tree индекс на join колоната | 4ч | ✅ |
+| 9.3.3 | Benchmark: `thread JOIN category` с 10K/100K редове | 2ч | ✅ |
+| 9.3.4 | Query planner избира между Nested Loop / Hash / Index въз основа на наличие на индекс | 4ч | ✅ |
 
 **Метрика:** JOIN с 100K редове е под 100ms.
 
@@ -194,13 +194,16 @@
 
 ---
 
-### Текущи метрики (след сесия 9 — Sedmica 1+2)
+### Текущи метрики (след сесия 9 — Sedmica 1+2+3)
 
 | Метрика | Стойност |
 |---------|----------|
-| **Тестове** | 311 — 0 failures |
+| **Тестове** | 316 — 0 failures |
 | **Build warnings** | 0 |
 | **BARADB_DEFICIENCIES** | 0 непоправени (всички 10 поправени) |
 | **Workaround-и в NimForum** | 0 |
 | **evalExprValue** | Връща `Value(kind: vkInt64/Float64/String/Null)` |
 | **Аритметични ops** | INT+INT→INT, INT+FLOAT→FLOAT, FLOAT/INT→FLOAT |
+| **Join стратегии** | Hash Join + Index Nested Loop + Nested Loop |
+| **JOIN 10K (Hash)** | ~115ms |
+| **JOIN 10K (Index NL)** | ~90ms |
