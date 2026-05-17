@@ -57,6 +57,9 @@ type
     usingExpr*: Node   # parsed USING expression
     withCheckExpr*: Node  # parsed WITH CHECK expression
 
+  SharedLock* = ref object
+    lock*: Lock
+
   ExecutionContext* = ref object
     db*: LSMTree
     tables*: Table[string, TableDef]
@@ -72,10 +75,10 @@ type
     policies*: Table[string, seq[PolicyDef]]  # table name -> policies
     currentUser*: string
     currentRole*: string
-    sessionVars*: Table[string, string]  # session-scoped key/value variables
-    autoIncCounters*: Table[string, int64]  # table.col -> next auto-increment value
-    sequences*: Table[string, int64]  # sequence name -> current value
-    ctxLock*: Lock  # protects tables, views, btrees, ftsIndexes, users, policies, autoIncCounters, sequences
+    sessionVars*: Table[string, string]
+    autoIncCounters*: Table[string, int64]
+    sequences*: Table[string, int64]
+    sharedLock*: SharedLock  # shared across cloned contexts — protects tables, views, btrees, ftsIndexes, users, policies, autoIncCounters, sequences
 
   MigrationRecord* = object
     name*: string
@@ -160,9 +163,10 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
                    currentUser: "", currentRole: "",
                    sessionVars: initTable[string, string](),
                    autoIncCounters: initTable[string, int64](),
-                   sequences: initTable[string, int64](),
-                   onChange: nil)
-  initLock(result.ctxLock)
+                    sequences: initTable[string, int64](),
+                    onChange: nil)
+  result.sharedLock = SharedLock()
+  initLock(result.sharedLock.lock)
   restoreSchema(result)
 
 # ----------------------------------------------------------------------
@@ -348,9 +352,9 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
                    currentUser: ctx.currentUser, currentRole: ctx.currentRole,
                    sessionVars: svCopy,
                    autoIncCounters: ctx.autoIncCounters,
-                   sequences: ctx.sequences,
-                   pendingTxn: nil, onChange: ctx.onChange)
-  initLock(result.ctxLock)
+                    sequences: ctx.sequences,
+                    pendingTxn: nil, onChange: ctx.onChange)
+  result.sharedLock = ctx.sharedLock
 
 # ----------------------------------------------------------------------
 # Migration Helpers
@@ -1066,26 +1070,26 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if ctx == nil: return "0"
       let seqName = evalExpr(expr.irFuncArgs[0], row, ctx)
       var val: int64 = 0
-      acquire(ctx.ctxLock)
+      acquire(ctx.sharedLock.lock)
       try:
         if seqName in ctx.sequences:
           val = ctx.sequences[seqName]
         val += 1
         ctx.sequences[seqName] = val
       finally:
-        release(ctx.ctxLock)
+        release(ctx.sharedLock.lock)
       return $val
     of "currval":
       if expr.irFuncArgs.len < 1:
         return "0"
       if ctx == nil: return "0"
       let seqName = evalExpr(expr.irFuncArgs[0], row, ctx)
-      acquire(ctx.ctxLock)
+      acquire(ctx.sharedLock.lock)
       try:
         if seqName in ctx.sequences:
           return $ctx.sequences[seqName]
       finally:
-        release(ctx.ctxLock)
+        release(ctx.sharedLock.lock)
       return "0"
       return "0"
     of "snowflake_id":
@@ -3524,13 +3528,13 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       if col.autoIncrement and col.name notin mutableFields:
         let counterKey = stmt.insTarget & "." & col.name
         var nextVal: int64 = 1
-        acquire(ctx.ctxLock)
+        acquire(ctx.sharedLock.lock)
         try:
           if counterKey in ctx.autoIncCounters:
             nextVal = ctx.autoIncCounters[counterKey]
           ctx.autoIncCounters[counterKey] = nextVal + int64(mutableValues.len)
         finally:
-          release(ctx.ctxLock)
+          release(ctx.sharedLock.lock)
         # Insert at position 0 so it becomes the primary storage key
         mutableFields.insert(col.name, 0)
         for i in 0..<mutableValues.len:
@@ -3545,12 +3549,12 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               try:
                 let intVal = parseInt(providedVal)
                 let counterKey = stmt.insTarget & "." & col.name
-                acquire(ctx.ctxLock)
+                acquire(ctx.sharedLock.lock)
                 try:
                   if counterKey notin ctx.autoIncCounters or intVal >= ctx.autoIncCounters[counterKey]:
                     ctx.autoIncCounters[counterKey] = intVal + 1
                 finally:
-                  release(ctx.ctxLock)
+                  release(ctx.sharedLock.lock)
               except: discard
 
     applyDefaultValues(tbl, mutableFields, mutableValues)
@@ -4280,11 +4284,11 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     return okResult()
   let stmt = astNode.stmts[0]
   if isDDL(stmt):
-    acquire(ctx.ctxLock)
+    acquire(ctx.sharedLock.lock)
     try:
       result = executeQueryImpl(ctx, astNode, params)
     finally:
-      release(ctx.ctxLock)
+      release(ctx.sharedLock.lock)
   else:
     result = executeQueryImpl(ctx, astNode, params)
 
