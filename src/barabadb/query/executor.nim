@@ -29,6 +29,7 @@ import ../graph/engine as gengine
 import ../graph/community as gcomm
 import ../ai/chunk as chunkmod
 import ../ai/embed as embedmod
+import ../ai/llm as llmmod
 
 type
   IndexEntry* = ref object
@@ -74,6 +75,7 @@ type
     vectorIndexes*: Table[string, vengine.HNSWIndex]  # table.col -> HNSW index
     graphs*: Table[string, gengine.Graph]  # graph name -> Graph object
     embedder*: embedmod.Embedder  # optional embedding service client
+    llmClient*: llmmod.LLMClient  # optional LLM client for NL->SQL
     txnManager*: TxnManager
     pendingTxn*: Transaction
     onChange*: proc(ev: ChangeEvent) {.closure.}
@@ -573,6 +575,7 @@ proc parseVectorString*(value: string): seq[float32] =
 # ----------------------------------------------------------------------
 
 proc execScan(ctx: ExecutionContext, table: string): seq[Row]
+proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
 
 # ----------------------------------------------------------------------
 # Hybrid Search Helpers
@@ -1296,6 +1299,116 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       let vec = embedmod.embed(ctx.embedder, text)
       if vec.len == 0: return "[]"
       return embedmod.vectorToJson(vec)
+    of "nl_to_sql":
+      if expr.irFuncArgs.len < 1: return ""
+      let question = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let table = if expr.irFuncArgs.len >= 2: evalExpr(expr.irFuncArgs[1], row, ctx) else: ""
+      if ctx.llmClient == nil or not ctx.llmClient.config.enabled:
+        return ""
+
+      var schemaInfo = ""
+      if table.len > 0 and table in ctx.tables:
+        let tbl = ctx.tables[table]
+        schemaInfo = "Table: " & table & "\nColumns:\n"
+        for col in tbl.columns:
+          var colInfo = "  - " & col.name & " " & col.colType
+          if col.isPk: colInfo.add(" PRIMARY KEY")
+          if col.isNotNull: colInfo.add(" NOT NULL")
+          if col.fkTable.len > 0:
+            colInfo.add(" REFERENCES " & col.fkTable & "(" & col.fkColumn & ")")
+          schemaInfo.add(colInfo & "\n")
+      elif table.len > 0:
+        return "Table '" & table & "' not found"
+      else:
+        schemaInfo = "Available tables:\n"
+        for tblName in ctx.tables.keys:
+          schemaInfo.add("  - " & tblName & "\n")
+
+      let systemPrompt = "You are a SQL expert. Given a schema and a natural language question, generate ONLY a valid SQL query for BaraDB. Return ONLY the SQL, no explanations. Use BaraQL syntax."
+      let prompt = "Schema:\n" & schemaInfo & "\nQuestion: " & question & "\n\nSQL:"
+
+      var llmResponse = llmmod.generate(ctx.llmClient, prompt, systemPrompt)
+      var sql = llmmod.extractSQL(llmResponse)
+
+      if sql.len == 0:
+        return ""
+
+      # Validate by trying EXPLAIN or LIMIT-wrapped query
+      var validateSql = sql
+      if validateSql.toLower().startsWith("select"):
+        validateSql = "SELECT * FROM (" & sql & ") LIMIT 0"
+      let tokens = qlex.tokenize(validateSql)
+      let astNode = qpar.parse(tokens)
+      if astNode.stmts.len > 0:
+        let validateRes = executeQuery(ctx, astNode)
+        if not validateRes.success:
+          # Self-correction: send error back to LLM
+          let correctionPrompt = "Schema:\n" & schemaInfo & "\nQuestion: " & question & "\n\nPrevious SQL: " & sql & "\n\nError: " & validateRes.message & "\n\nGenerate corrected SQL:"
+          var correctedResponse = llmmod.generate(ctx.llmClient, correctionPrompt, systemPrompt)
+          var correctedSql = llmmod.extractSQL(correctedResponse)
+          if correctedSql.len > 0:
+            return correctedSql
+
+      return sql
+    of "schema_prompt":
+      if expr.irFuncArgs.len < 1: return ""
+      let table = evalExpr(expr.irFuncArgs[0], row, ctx)
+      if table notin ctx.tables:
+        return "Table '" & table & "' not found"
+
+      let tbl = ctx.tables[table]
+      var result = ""
+      result.add("CREATE TABLE " & table & " (\n")
+      for i, col in tbl.columns:
+        result.add("  " & col.name & " " & col.colType)
+        if col.isPk: result.add(" PRIMARY KEY")
+        if col.isNotNull: result.add(" NOT NULL")
+        if col.autoIncrement: result.add(" AUTO_INCREMENT")
+        if col.fkTable.len > 0:
+          result.add(" REFERENCES " & col.fkTable & "(" & col.fkColumn & ")")
+        if i < tbl.columns.len - 1: result.add(",")
+        result.add("\n")
+
+      # Sample data
+      var kvPairs: seq[(string, seq[byte])] = @[]
+      let rows = execScan(ctx, table)
+      let sampleLimit = min(5, rows.len)
+      if sampleLimit > 0:
+        result.add(");\n\n-- Sample data:\n")
+        for i in 0..<sampleLimit:
+          result.add("-- ")
+          var parts: seq[string] = @[]
+          for col in tbl.columns:
+            parts.add(col.name & "=" & rows[i].getOrDefault(col.name, ""))
+          result.add(parts.join(", "))
+          result.add("\n")
+      else:
+        result.add(");")
+
+      # Indexes
+      var idxList: seq[string] = @[]
+      for idxKey in ctx.btrees.keys:
+        if idxKey.startsWith(table & "."):
+          idxList.add(idxKey)
+      for idxKey in ctx.vectorIndexes.keys:
+        if idxKey.startsWith(table & "."):
+          idxList.add("HNSW: " & idxKey)
+      if idxList.len > 0:
+        result.add("\n-- Indexes: " & idxList.join(", "))
+
+      # RLS policies
+      if table in ctx.policies and ctx.policies[table].len > 0:
+        result.add("\n-- RLS Policies:\n")
+        for pol in ctx.policies[table]:
+          result.add("-- CREATE POLICY " & pol.name & " FOR " & pol.command & "\n")
+
+      # Foreign keys
+      if tbl.foreignKeys.len > 0:
+        result.add("\n-- Foreign Keys:\n")
+        for fk in tbl.foreignKeys:
+          result.add("-- " & fk.refTable & "(" & fk.refColumn & ") ON DELETE " & fk.onDelete & "\n")
+
+      return result
     of "datetime":
       if expr.irFuncArgs.len > 0:
         let arg = evalExpr(expr.irFuncArgs[0], row, ctx).toLower()
@@ -1914,7 +2027,6 @@ proc validateType*(colType: string, value: string): (bool, string) =
   return (true, "")
 
 proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
-proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
 proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult
 
 proc fireTriggers*(ctx: ExecutionContext, tableName: string, timing: string, event: string, row: Table[string, string]) =
