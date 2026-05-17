@@ -92,6 +92,7 @@ type
     refTable*: string
     refColumn*: string
     onDelete*: string  # CASCADE, SET NULL, RESTRICT
+    onUpdate*: string  # CASCADE, SET NULL, RESTRICT
 
   CheckDef* = object
     name*: string
@@ -121,6 +122,8 @@ type
     defaultVal*: string
     fkTable*: string
     fkColumn*: string
+    fkOnDelete*: string
+    fkOnUpdate*: string
     autoIncrement*: bool
 
   Row* = Table[string, string]
@@ -314,6 +317,8 @@ proc restoreSchema(ctx: ExecutionContext) =
                 of "fkey":
                   colDef.fkTable = cst.cstRefTable
                   colDef.fkColumn = if cst.cstRefColumns.len > 0: cst.cstRefColumns[0] else: ""
+                  colDef.fkOnDelete = cst.cstOnDelete
+                  colDef.fkOnUpdate = cst.cstOnUpdate
                 else: discard
             tbl.columns.add(colDef)
         ctx.tables[stmt.crtName] = tbl
@@ -1435,6 +1440,96 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
           meta["key"] = fullKey
           vengine.insert(vecIdx, docId, vec, meta)
   return 1
+
+# ----------------------------------------------------------------------
+# Foreign Key Enforcement
+# ----------------------------------------------------------------------
+
+proc findReferencingRows(ctx: ExecutionContext, childTable: string, fkCol: string, fkValue: string): seq[Row] =
+  result = @[]
+  for row in execScan(ctx, childTable):
+    if fkCol in row and row[fkCol] == fkValue:
+      result.add(row)
+
+proc enforceFkOnDelete(ctx: ExecutionContext, parentTable: string, parentCol: string, parentVal: string): (bool, string) =
+  for childTblName, childTbl in ctx.tables:
+    for col in childTbl.columns:
+      if col.fkTable == parentTable and col.fkColumn == parentCol:
+        let action = if col.fkOnDelete.len > 0: col.fkOnDelete else: "RESTRICT"
+        let refs = findReferencingRows(ctx, childTblName, col.name, parentVal)
+        if refs.len > 0:
+          case action
+          of "CASCADE":
+            for refRow in refs:
+              if "$key" in refRow:
+                var dummy: seq[(string, seq[byte])] = @[]
+                discard execDelete(ctx, childTblName, refRow["$key"], dummy)
+          of "SET NULL":
+            for refRow in refs:
+              if "$key" in refRow:
+                var sets = initTable[string, string]()
+                sets[col.name] = "\\N"
+                var dummy: seq[(string, seq[byte])] = @[]
+                discard execUpdateRow(ctx, childTblName, refRow["$key"], sets, dummy)
+          of "RESTRICT", "NO ACTION":
+            return (false, "FOREIGN KEY violation: row is referenced by " & childTblName & "." & col.name)
+  return (true, "")
+
+proc enforceFkOnUpdate(ctx: ExecutionContext, parentTable: string, parentCol: string, oldVal: string, newVal: string): (bool, string) =
+  for childTblName, childTbl in ctx.tables:
+    for col in childTbl.columns:
+      if col.fkTable == parentTable and col.fkColumn == parentCol:
+        let action = if col.fkOnUpdate.len > 0: col.fkOnUpdate else: "RESTRICT"
+        let refs = findReferencingRows(ctx, childTblName, col.name, oldVal)
+        if refs.len > 0:
+          case action
+          of "CASCADE":
+            for refRow in refs:
+              if "$key" in refRow:
+                var sets = initTable[string, string]()
+                sets[col.name] = newVal
+                var dummy: seq[(string, seq[byte])] = @[]
+                discard execUpdateRow(ctx, childTblName, refRow["$key"], sets, dummy)
+          of "SET NULL":
+            for refRow in refs:
+              if "$key" in refRow:
+                var sets = initTable[string, string]()
+                sets[col.name] = "\\N"
+                var dummy: seq[(string, seq[byte])] = @[]
+                discard execUpdateRow(ctx, childTblName, refRow["$key"], sets, dummy)
+          of "RESTRICT", "NO ACTION":
+            return (false, "FOREIGN KEY violation: row is referenced by " & childTblName & "." & col.name)
+  return (true, "")
+
+proc enforceFkOnChildUpdate(ctx: ExecutionContext, childTable: string, fkCol: string, newVal: string): (bool, string) =
+  let tbl = ctx.getTableDef(childTable)
+  var parentTable = ""
+  var parentCol = ""
+  for col in tbl.columns:
+    if col.name == fkCol:
+      parentTable = col.fkTable
+      parentCol = col.fkColumn
+      break
+  if parentTable.len == 0 or parentCol.len == 0:
+    return (true, "")
+  if isNull(newVal):
+    return (true, "")
+  let fkKey = parentTable & "." & parentCol & "=" & newVal
+  let (fkExists, _) = ctx.db.get(fkKey)
+  if fkExists:
+    return (true, "")
+  var found = false
+  let prefix = parentTable & "."
+  for entry in ctx.db.scanMemTable():
+    if entry.deleted: continue
+    if entry.key.startsWith(prefix):
+      let rest = entry.key[prefix.len..^1]
+      if rest.startsWith(parentCol & "=") and rest[parentCol.len+1..^1] == newVal:
+        found = true
+        break
+  if not found:
+    return (false, "FOREIGN KEY violation: '" & newVal & "' not found in " & parentTable & "." & parentCol)
+  return (true, "")
 
 # ----------------------------------------------------------------------
 # Constraint Validation
@@ -3656,6 +3751,22 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
             updValues.add("\\N")
         let (valid, errMsg) = validateConstraints(ctx, stmt.updTarget, updFields, @[updValues], skipPkCheck = true)
         if not valid: return errResult(errMsg)
+        # FK ON UPDATE enforcement (parent side)
+        var refCols: seq[string] = @[]
+        for _, childTbl in ctx.tables:
+          for col in childTbl.columns:
+            if col.fkTable == stmt.updTarget and col.fkColumn notin refCols:
+              refCols.add(col.fkColumn)
+        for refCol in refCols:
+          if refCol in sets and refCol in row:
+            let (fkOk, fkErr) = enforceFkOnUpdate(ctx, stmt.updTarget, refCol, row[refCol], sets[refCol])
+            if not fkOk:
+              return errResult(fkErr)
+        # FK ON UPDATE enforcement (child side — validate new FK values)
+        for colName, newVal in sets:
+          let (fkOk, fkErr) = enforceFkOnChildUpdate(ctx, stmt.updTarget, colName, newVal)
+          if not fkOk:
+            return errResult(fkErr)
         # Fire BEFORE UPDATE triggers
         var oldRow = row
         var newRow = row
@@ -3685,6 +3796,18 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         let old = row["$key"]
         # Fire BEFORE DELETE triggers
         fireTriggers(ctx, stmt.delTarget, "before", "delete", row)
+
+        # FK ON DELETE enforcement
+        var refCols: seq[string] = @[]
+        for _, childTbl in ctx.tables:
+          for col in childTbl.columns:
+            if col.fkTable == stmt.delTarget and col.fkColumn notin refCols:
+              refCols.add(col.fkColumn)
+        for refCol in refCols:
+          if refCol in row:
+            let (fkOk, fkErr) = enforceFkOnDelete(ctx, stmt.delTarget, refCol, row[refCol])
+            if not fkOk:
+              return errResult(fkErr)
 
         count += execDelete(ctx, stmt.delTarget, row["$key"], kvPairs)
 
@@ -3781,12 +3904,15 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
           tbl.foreignKeys.add(ForeignKeyDef(
             refTable: cstNode.cstRefTable,
             refColumn: if cstNode.cstRefColumns.len > 0: cstNode.cstRefColumns[0] else: "",
-            onDelete: cstNode.cstOnDelete))
+            onDelete: cstNode.cstOnDelete,
+            onUpdate: cstNode.cstOnUpdate))
           if cstNode.cstColumns.len > 0:
             for i, c in tbl.columns:
               if c.name in cstNode.cstColumns:
                 tbl.columns[i].fkTable = cstNode.cstRefTable
                 tbl.columns[i].fkColumn = if cstNode.cstRefColumns.len > 0: cstNode.cstRefColumns[0] else: ""
+                tbl.columns[i].fkOnDelete = cstNode.cstOnDelete
+                tbl.columns[i].fkOnUpdate = cstNode.cstOnUpdate
         elif cstNode.cstType == "check":
           tbl.checks.add(CheckDef(name: "check_" & $tbl.checks.len, checkNode: cstNode.cstCheck))
 
@@ -3815,10 +3941,27 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
             of "fkey":
               colDef.fkTable = cst.cstRefTable
               colDef.fkColumn = if cst.cstRefColumns.len > 0: cst.cstRefColumns[0] else: ""
+              colDef.fkOnDelete = cst.cstOnDelete
+              colDef.fkOnUpdate = cst.cstOnUpdate
             of "check":
               tbl.checks.add(CheckDef(name: "check_" & col.cdName, checkNode: cst.cstCheck))
             else: discard
         tbl.columns.add(colDef)
+    # Third pass: apply table-level constraints to columns
+    for cstNode in stmt.crtConstraints:
+      if cstNode.kind == nkConstraintDef:
+        if cstNode.cstType == "pkey":
+          for i, c in tbl.columns:
+            if c.name in cstNode.cstColumns:
+              tbl.columns[i].isPk = true
+        elif cstNode.cstType == "fkey":
+          if cstNode.cstColumns.len > 0:
+            for i, c in tbl.columns:
+              if c.name in cstNode.cstColumns:
+                tbl.columns[i].fkTable = cstNode.cstRefTable
+                tbl.columns[i].fkColumn = if cstNode.cstRefColumns.len > 0: cstNode.cstRefColumns[0] else: ""
+                tbl.columns[i].fkOnDelete = cstNode.cstOnDelete
+                tbl.columns[i].fkOnUpdate = cstNode.cstOnUpdate
     ctx.tables[stmt.crtName] = tbl
 
     # Persist schema

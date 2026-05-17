@@ -984,6 +984,40 @@ proc parseCreateTable(p: var Parser): Node =
               discard p.advance()
               discard p.match(tkNull)
               cst.cstOnDelete = "SET NULL"
+            elif p.peek().kind == tkRestrict:
+              discard p.advance()
+              cst.cstOnDelete = "RESTRICT"
+          elif p.peek().kind == tkUpdate:
+            discard p.advance()
+            if p.peek().kind == tkCascade:
+              discard p.advance()
+              cst.cstOnUpdate = "CASCADE"
+            elif p.peek().kind == tkSet:
+              discard p.advance()
+              discard p.match(tkNull)
+              cst.cstOnUpdate = "SET NULL"
+            elif p.peek().kind == tkRestrict:
+              discard p.advance()
+              cst.cstOnUpdate = "RESTRICT"
+            elif p.peek().kind == tkSet:
+              discard p.advance()
+              discard p.match(tkNull)
+              cst.cstOnDelete = "SET NULL"
+            elif p.peek().kind == tkRestrict:
+              discard p.advance()
+              cst.cstOnDelete = "RESTRICT"
+          elif p.peek().kind == tkUpdate:
+            discard p.advance()
+            if p.peek().kind == tkCascade:
+              discard p.advance()
+              cst.cstOnUpdate = "CASCADE"
+            elif p.peek().kind == tkSet:
+              discard p.advance()
+              discard p.match(tkNull)
+              cst.cstOnUpdate = "SET NULL"
+            elif p.peek().kind == tkRestrict:
+              discard p.advance()
+              cst.cstOnUpdate = "RESTRICT"
       elif p.match(tkUnique):
         cst.cstType = "unique"
         if p.peek().kind == tkLParen:
@@ -1031,7 +1065,7 @@ proc parseCreateTable(p: var Parser): Node =
         colDef.cdType = "BIGINT"
 
     # Parse column constraints
-    while p.peek().kind in {tkPrimary, tkNot, tkNull, tkUnique, tkCheck, tkDefault, tkReferences, tkAutoIncrement}:
+    while p.peek().kind in {tkPrimary, tkNot, tkNull, tkUnique, tkCheck, tkDefault, tkReferences, tkAutoIncrement, tkOn}:
       let cst = Node(kind: nkConstraintDef)
       cst.cstColumns = @[colName]; cst.cstRefColumns = @[]
       if p.match(tkPrimary):
@@ -1071,6 +1105,25 @@ proc parseCreateTable(p: var Parser): Node =
             if p.peek().kind == tkCascade:
               discard p.advance()
               cst.cstOnDelete = "CASCADE"
+            elif p.peek().kind == tkSet:
+              discard p.advance()
+              discard p.match(tkNull)
+              cst.cstOnDelete = "SET NULL"
+            elif p.peek().kind == tkRestrict:
+              discard p.advance()
+              cst.cstOnDelete = "RESTRICT"
+          elif p.peek().kind == tkUpdate:
+            discard p.advance()
+            if p.peek().kind == tkCascade:
+              discard p.advance()
+              cst.cstOnUpdate = "CASCADE"
+            elif p.peek().kind == tkSet:
+              discard p.advance()
+              discard p.match(tkNull)
+              cst.cstOnUpdate = "SET NULL"
+            elif p.peek().kind == tkRestrict:
+              discard p.advance()
+              cst.cstOnUpdate = "RESTRICT"
       colDef.cdConstraints.add(cst)
     result.crtColumns.add(colDef)
 

@@ -85,6 +85,7 @@ type
     tkForeign
     tkReferences
     tkCascade
+    tkRestrict
     tkUnique
     tkCheck
     tkDefault
@@ -308,6 +309,7 @@ const keywords*: Table[string, TokenKind] = {
   "foreign": tkForeign,
   "references": tkReferences,
   "cascade": tkCascade,
+  "restrict": tkRestrict,
   "unique": tkUnique,
   "check": tkCheck,
   "default": tkDefault,

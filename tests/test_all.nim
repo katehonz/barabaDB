@@ -3731,3 +3731,115 @@ suite "Join Performance — Hash Join & Index Nested Loop":
     check r.rows[3]["total"] == "\\N"
 
 
+
+suite "Foreign Key Enforcement":
+  var db: LSMTree
+  var ctx: qexec.ExecutionContext
+  var tmpDir: string
+
+  setup:
+    tmpDir = getTempDir() / "baradb_fk_test_" & $getMonoTime().ticks
+    db = newLSMTree(tmpDir)
+    ctx = qexec.newExecutionContext(db)
+
+  teardown:
+    removeDir(tmpDir)
+
+  test "ON DELETE CASCADE removes child rows":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent(id) ON DELETE CASCADE)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child (id, parent_id) VALUES (10, 1)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child (id, parent_id) VALUES (20, 1)"))
+    let del = qexec.executeQuery(ctx, parse("DELETE FROM parent WHERE id = 1"))
+    check del.success
+    let childSel = qexec.executeQuery(ctx, parse("SELECT * FROM child"))
+    check childSel.success
+    check childSel.rows.len == 0
+
+  test "ON DELETE SET NULL sets FK to NULL":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent2 (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child2 (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent2(id) ON DELETE SET NULL)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent2 (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child2 (id, parent_id) VALUES (10, 1)"))
+    let del = qexec.executeQuery(ctx, parse("DELETE FROM parent2 WHERE id = 1"))
+    check del.success
+    let childSel = qexec.executeQuery(ctx, parse("SELECT * FROM child2"))
+    check childSel.success
+    check childSel.rows.len == 1
+    check childSel.rows[0]["parent_id"] == "\\N"
+
+  test "ON DELETE RESTRICT blocks delete when referenced":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent3 (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child3 (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent3(id) ON DELETE RESTRICT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent3 (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child3 (id, parent_id) VALUES (10, 1)"))
+    let del = qexec.executeQuery(ctx, parse("DELETE FROM parent3 WHERE id = 1"))
+    check not del.success
+    check del.message.contains("FOREIGN KEY violation")
+    let parentSel = qexec.executeQuery(ctx, parse("SELECT * FROM parent3"))
+    check parentSel.rows.len == 1
+
+  test "ON UPDATE CASCADE updates child rows":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent4 (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child4 (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent4(id) ON UPDATE CASCADE)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent4 (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child4 (id, parent_id) VALUES (10, 1)"))
+    let upd = qexec.executeQuery(ctx, parse("UPDATE parent4 SET id = 99 WHERE id = 1"))
+    check upd.success
+    let childSel = qexec.executeQuery(ctx, parse("SELECT * FROM child4"))
+    check childSel.success
+    check childSel.rows.len == 1
+    check childSel.rows[0]["parent_id"] == "99"
+
+  test "ON UPDATE SET NULL sets FK to NULL":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent5 (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child5 (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent5(id) ON UPDATE SET NULL)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent5 (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child5 (id, parent_id) VALUES (10, 1)"))
+    let upd = qexec.executeQuery(ctx, parse("UPDATE parent5 SET id = 99 WHERE id = 1"))
+    check upd.success
+    let childSel = qexec.executeQuery(ctx, parse("SELECT * FROM child5"))
+    check childSel.success
+    check childSel.rows.len == 1
+    check childSel.rows[0]["parent_id"] == "\\N"
+
+  test "ON UPDATE RESTRICT blocks update when referenced":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent6 (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child6 (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent6(id) ON UPDATE RESTRICT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent6 (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child6 (id, parent_id) VALUES (10, 1)"))
+    let upd = qexec.executeQuery(ctx, parse("UPDATE parent6 SET id = 99 WHERE id = 1"))
+    check not upd.success
+    check upd.message.contains("FOREIGN KEY violation")
+
+  test "UPDATE child with valid FK value succeeds":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent7 (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child7 (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent7(id))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent7 (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent7 (id, name) VALUES (2, 'Bob')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child7 (id, parent_id) VALUES (10, 1)"))
+    let upd = qexec.executeQuery(ctx, parse("UPDATE child7 SET parent_id = 2 WHERE id = 10"))
+    check upd.success
+    let childSel = qexec.executeQuery(ctx, parse("SELECT * FROM child7"))
+    check childSel.rows[0]["parent_id"] == "2"
+
+  test "UPDATE child with invalid FK value fails":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent8 (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child8 (id INTEGER PRIMARY KEY, parent_id INTEGER REFERENCES parent8(id))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent8 (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child8 (id, parent_id) VALUES (10, 1)"))
+    let upd = qexec.executeQuery(ctx, parse("UPDATE child8 SET parent_id = 999 WHERE id = 10"))
+    check not upd.success
+    check upd.message.contains("FOREIGN KEY violation")
+
+  test "Table-level FK with ON DELETE CASCADE":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE parent9 (id INTEGER PRIMARY KEY, name TEXT)"))
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE child9 (id INTEGER PRIMARY KEY, parent_id INTEGER, FOREIGN KEY (parent_id) REFERENCES parent9(id) ON DELETE CASCADE)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO parent9 (id, name) VALUES (1, 'Alice')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO child9 (id, parent_id) VALUES (10, 1)"))
+    let del = qexec.executeQuery(ctx, parse("DELETE FROM parent9 WHERE id = 1"))
+    check del.success
+    let childSel = qexec.executeQuery(ctx, parse("SELECT * FROM child9"))
+    check childSel.rows.len == 0
+
