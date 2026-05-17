@@ -22,6 +22,7 @@
 | MCP Server | ✅ STDIO JSON-RPC, 3 tools (query, vector_search, schema_inspect), multi-tenant |
 | AI Pipeline | ✅ chunk(), embed_text(), auto-embed on INSERT, configurable embedder |
 | RAG Pipeline | ✅ ChatMessageHistory, end-to-end Python RAG example |
+| AI Agents & NL→SQL | ✅ nl_to_sql(), schema_prompt(), query validation, self-correction loop, multi-tenant |
 
 ---
 
@@ -106,20 +107,20 @@
 
 ### Фаза 12.1: NL → SQL Agent
 
-| # | Задача | Описание | Оценка |
-|---|--------|----------|--------|
-| 12.1.1 | Schema-aware prompt template | Prompt който вкарва `CREATE TABLE` дефиниции + sample data + RLS policies. | 2ч |
-| 12.1.2 | `nl_to_sql()` SQL функция | `SELECT nl_to_sql('Show me top 5 customers by revenue')` → generated SQL string. | 4ч |
-| 12.1.3 | Query validation layer | Генерираният SQL минава през sandbox execution с `LIMIT 1` + explain plan. | 3ч |
-| 12.1.4 | Self-correction loop | Ако SQL-ът фейлва, агентът получава error message и генерира fix. | 3ч |
+| # | Задача | Описание | Оценка | Статус |
+|---|--------|----------|--------|--------|
+| 12.1.1 | Schema-aware prompt template | Prompt който вкарва `CREATE TABLE` дефиниции + sample data + RLS policies. | 2ч | ✅ |
+| 12.1.2 | `nl_to_sql()` SQL функция | `SELECT nl_to_sql('Show me top 5 customers by revenue')` → generated SQL string. | 4ч | ✅ |
+| 12.1.3 | Query validation layer | Генерираният SQL минава през sandbox execution с `LIMIT 1` + explain plan. | 3ч | ✅ |
+| 12.1.4 | Self-correction loop | Ако SQL-ът фейлва, агентът получава error message и генерира fix. | 3ч | ✅ |
 
-### Фаза 12.2: Multi-Tenant AI Agent
+### Фаза 12.2: Multi-Tenant AI Agent ✅
 
-| # | Задача | Описание | Оценка |
-|---|--------|----------|--------|
-| 12.2.1 | Per-tenant schema views | AI агентът вижда само таблици/колони, достъпни за текущия tenant. | 2ч |
-| 12.2.2 | Tenant-aware NL → SQL | `app.tenant_id` се инжектира автоматично в генерирания SQL. | 2ч |
-| 12.2.3 | Agent memory per tenant | Conversation history се изолира по tenant_id + user_id. | 2ч |
+| # | Задача | Описание | Оценка | Статус |
+|---|--------|----------|--------|--------|
+| 12.2.1 | Per-tenant schema views | AI агентът вижда само таблици/колони, достъпни за текущия tenant. | 2ч | ✅ |
+| 12.2.2 | Tenant-aware NL → SQL | `app.tenant_id` се инжектира автоматично в генерирания SQL. | 2ч | ✅ |
+| 12.2.3 | Agent memory per tenant | Conversation history се изолира по tenant_id + user_id. | 2ч | ✅ |
 
 ---
 
