@@ -23,6 +23,8 @@
 | AI Pipeline | ✅ chunk(), embed_text(), auto-embed on INSERT, configurable embedder |
 | RAG Pipeline | ✅ ChatMessageHistory, end-to-end Python RAG example |
 | AI Agents & NL→SQL | ✅ nl_to_sql(), schema_prompt(), query validation, self-correction loop, multi-tenant |
+| Graph Similarity & Embeddings | ✅ similarity_nodes(), node2vec_embed() |
+| Cypher Layer | ✅ cypher() — MATCH (a)-[r]->(b) RETURN ... → GRAPH_TABLE |
 
 ---
 
@@ -82,20 +84,20 @@
 
 ### Фаза 11.2: Advanced Graph Algorithms
 
-| # | Задача | Описание | Оценка |
-|---|--------|----------|--------|
-| 11.2.1 | `shortest_path()` SQL функция | Dijkstra/A* между два node-а, връща path като JSON array. | 3ч |
-| 11.2.2 | `community_detection()` SQL функция | Louvain algorithm, връща community ID за всеки node. | 6ч |
-| 11.2.3 | `similarity_nodes()` SQL функция | Jaccard/Adamic-Adar similarity между neighbors. | 3ч |
-| 11.2.4 | Vector + Graph hybrid | Node embeddings + graph structure: `node2vec` или `graph neural network` inference. | 8ч |
+| # | Задача | Описание | Оценка | Статус |
+|---|--------|----------|--------|--------|
+| 11.2.1 | `shortest_path()` SQL функция | Dijkstra/A* между два node-а, връща path като JSON array. | 3ч | ✅ |
+| 11.2.2 | `community_detection()` SQL функция | Louvain algorithm, връща community ID за всеки node. | 6ч | ✅ |
+| 11.2.3 | `similarity_nodes()` SQL функция | Jaccard/Adamic-Adar similarity между neighbors. | 3ч | ✅ |
+| 11.2.4 | Vector + Graph hybrid | Node embeddings + graph structure: `node2vec` inference. | 8ч | ✅ |
 
 ### Фаза 11.3: Cypher Compatibility Layer
 
-| # | Задача | Описание | Оценка |
-|---|--------|----------|--------|
-| 11.3.1 | Cypher parser (subset) | `MATCH (a)-[r]->(b) WHERE a.name = 'X' RETURN b` → BaraQL AST. | 6ч |
-| 11.3.2 | Cypher → SQL/PGQ translation | `MATCH` → `GRAPH_TABLE(... MATCH ...)` за съвместимост със съществуващ executor. | 4ч |
-| 11.3.3 | APOC-style functions | `apoc.path.expand()`, `apoc.coll.*` — полезни utility функции. | 4ч |
+| # | Задача | Описание | Оценка | Статус |
+|---|--------|----------|--------|--------|
+| 11.3.1 | Cypher parser (subset) | `MATCH (a)-[r]->(b) WHERE a.name = 'X' RETURN b` → BaraQL AST. | 6ч | ✅ |
+| 11.3.2 | Cypher → SQL/PGQ translation | `MATCH` → `GRAPH_TABLE(... MATCH ...)` за съвместимост със съществуващ executor. | 4ч | ✅ |
+| 11.3.3 | APOC-style functions | `apoc.path.expand()`, `apoc.coll.*` — полезни utility функции. | 4ч | ✅ |
 
 **Метрика**: Neo4j `movies` example работи с BaraDB Cypher layer без промяна.
 
@@ -152,6 +154,7 @@
 | `PLAN_old_3.md` — Stabilization Sprint (сесия 9) | ✅ Завършен |
 | `PLAN_SQL_ADVANCED.md` — Window Functions, MERGE, etc. | ✅ Завършен |
 | `PLAN_ID_GENERATORS.md` — AUTO_INCREMENT, Sequences, FK | ✅ Завършен |
+| **Този план** — Сесии 10, 11, 12 | ✅ Завършен |
 
 ---
 
