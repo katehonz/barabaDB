@@ -1,5 +1,6 @@
 ## B-Tree Index — ordered key-value index
 import std/tables
+import std/locks
 
 const
   DefaultBTreeOrder* = 32
@@ -16,6 +17,7 @@ type
     root: BTreeNode[K, V]
     order: int
     size: int
+    lock*: Lock
 
 proc newBTreeNode[K, V](isLeaf: bool = true): BTreeNode[K, V] =
   BTreeNode[K, V](
@@ -24,7 +26,8 @@ proc newBTreeNode[K, V](isLeaf: bool = true): BTreeNode[K, V] =
   )
 
 proc newBTreeIndex*[K, V](order: int = DefaultBTreeOrder): BTreeIndex[K, V] =
-  BTreeIndex[K, V](root: newBTreeNode[K, V](), order: order, size: 0)
+  result = BTreeIndex[K, V](root: newBTreeNode[K, V](), order: order, size: 0)
+  initLock(result.lock)
 
 proc search[K, V](node: BTreeNode[K, V], key: K): seq[V] =
   var i = 0
@@ -84,66 +87,91 @@ proc insertNonFull[K, V](node: BTreeNode[K, V], key: K, value: V, order: int) =
     insertNonFull(node.children[i], key, value, order)
 
 proc insert*[K, V](btree: var BTreeIndex[K, V], key: K, value: V) =
-  if btree.root.keys.len == btree.order - 1:
-    var newRoot = newBTreeNode[K, V](isLeaf = false)
-    newRoot.children.add(btree.root)
-    splitChild(newRoot, 0, btree.order)
-    btree.root = newRoot
-    insertNonFull(btree.root, key, value, btree.order)
-  else:
-    insertNonFull(btree.root, key, value, btree.order)
-  inc btree.size
+  acquire(btree.lock)
+  try:
+    if btree.root.keys.len == btree.order - 1:
+      var newRoot = newBTreeNode[K, V](isLeaf = false)
+      newRoot.children.add(btree.root)
+      splitChild(newRoot, 0, btree.order)
+      btree.root = newRoot
+      insertNonFull(btree.root, key, value, btree.order)
+    else:
+      insertNonFull(btree.root, key, value, btree.order)
+    inc btree.size
+  finally:
+    release(btree.lock)
 
 proc get*[K, V](btree: BTreeIndex[K, V], key: K): seq[V] =
-  search(btree.root, key)
+  acquire(btree.lock)
+  try:
+    result = search(btree.root, key)
+  finally:
+    release(btree.lock)
 
 proc contains*[K, V](btree: BTreeIndex[K, V], key: K): bool =
-  return btree.get(key).len > 0
+  acquire(btree.lock)
+  try:
+    result = search(btree.root, key).len > 0
+  finally:
+    release(btree.lock)
 
 proc scan*[K, V](btree: BTreeIndex[K, V], startKey, endKey: K): seq[(K, seq[V])] =
-  result = @[]
-  var node = btree.root
-  while not node.isLeaf:
-    var i = 0
-    while i < node.keys.len and startKey > node.keys[i]:
-      inc i
-    node = node.children[i]
+  acquire(btree.lock)
+  try:
+    result = @[]
+    var node = btree.root
+    while not node.isLeaf:
+      var i = 0
+      while i < node.keys.len and startKey > node.keys[i]:
+        inc i
+      node = node.children[i]
 
-  while node != nil:
-    for i in 0..<node.keys.len:
-      if node.keys[i] >= startKey:
-        if node.keys[i] <= endKey:
-          result.add((node.keys[i], node.values[i]))
-        else:
-          return
-    node = node.next
+    while node != nil:
+      for i in 0..<node.keys.len:
+        if node.keys[i] >= startKey:
+          if node.keys[i] <= endKey:
+            result.add((node.keys[i], node.values[i]))
+          else:
+            return
+      node = node.next
+  finally:
+    release(btree.lock)
 
-proc len*[K, V](btree: BTreeIndex[K, V]): int = btree.size
+proc len*[K, V](btree: BTreeIndex[K, V]): int =
+  acquire(btree.lock)
+  try:
+    result = btree.size
+  finally:
+    release(btree.lock)
 
 proc remove*[K, V](btree: var BTreeIndex[K, V], key: K, value: V) =
-  proc removeRec(node: BTreeNode[K, V]): bool =
-    var i = 0
-    while i < node.keys.len and key > node.keys[i]:
-      inc i
-    if node.isLeaf:
-      if i < node.keys.len and key == node.keys[i]:
-        var vals = node.values[i]
-        var idx = -1
-        for j in 0..<vals.len:
-          if vals[j] == value:
-            idx = j
-            break
-        if idx >= 0:
-          vals.del(idx)
-          if vals.len == 0:
-            node.keys.del(i)
-            node.values.del(i)
-          else:
-            node.values[i] = vals
-          return true
-      return false
-    else:
-      return removeRec(node.children[i])
+  acquire(btree.lock)
+  try:
+    proc removeRec(node: BTreeNode[K, V]): bool =
+      var i = 0
+      while i < node.keys.len and key > node.keys[i]:
+        inc i
+      if node.isLeaf:
+        if i < node.keys.len and key == node.keys[i]:
+          var vals = node.values[i]
+          var idx = -1
+          for j in 0..<vals.len:
+            if vals[j] == value:
+              idx = j
+              break
+          if idx >= 0:
+            vals.del(idx)
+            if vals.len == 0:
+              node.keys.del(i)
+              node.values.del(i)
+            else:
+              node.values[i] = vals
+            return true
+        return false
+      else:
+        return removeRec(node.children[i])
 
-  if removeRec(btree.root):
-    dec btree.size
+    if removeRec(btree.root):
+      dec btree.size
+  finally:
+    release(btree.lock)

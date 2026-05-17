@@ -6,6 +6,7 @@ import std/os
 import std/asyncdispatch
 import std/monotimes
 import std/base64
+import std/random
 
 import barabadb/core/types
 import barabadb/core/mvcc
@@ -3728,3 +3729,5 @@ suite "Join Performance — Hash Join & Index Nested Loop":
     check r.rows[0]["name"] == "Alice"
     check r.rows[3]["name"] == "Carol"
     check r.rows[3]["total"] == "\\N"
+
+

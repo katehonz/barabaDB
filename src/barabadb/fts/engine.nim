@@ -4,6 +4,7 @@ import std/strutils
 import std/unicode
 import std/math
 import std/algorithm
+import std/locks
 
 type
   TermFreq* = Table[string, int]
@@ -20,6 +21,7 @@ type
     docCount*: int
     avgDocLen*: float64
     totalTerms*: int
+    lock*: Lock
 
   SearchResult* = object
     docId*: uint64
@@ -111,59 +113,68 @@ proc tokenize*(text: string, config: TokenizerConfig = defaultTokenizerConfig())
         result.add(token)
 
 proc newInvertedIndex*(): InvertedIndex =
-  InvertedIndex(
+  result = InvertedIndex(
     postings: initTable[string, seq[PostingEntry]](),
     docLengths: initTable[uint64, int](),
     docCount: 0,
     avgDocLen: 0.0,
     totalTerms: 0,
   )
+  initLock(result.lock)
 
 proc addDocument*(idx: InvertedIndex, docId: uint64, text: string,
                   config: TokenizerConfig = defaultTokenizerConfig()) =
-  let tokens = tokenize(text, config)
-  var termFreqs = initTable[string, int]()
-  var positions = initTable[string, seq[int]]()
+  acquire(idx.lock)
+  try:
+    let tokens = tokenize(text, config)
+    var termFreqs = initTable[string, int]()
+    var positions = initTable[string, seq[int]]()
 
-  for i, token in tokens:
-    if token notin termFreqs:
-      termFreqs[token] = 0
-      positions[token] = @[]
-    inc termFreqs[token]
-    positions[token].add(i)
+    for i, token in tokens:
+      if token notin termFreqs:
+        termFreqs[token] = 0
+        positions[token] = @[]
+      inc termFreqs[token]
+      positions[token].add(i)
 
-  for term, freq in termFreqs:
-    if term notin idx.postings:
-      idx.postings[term] = @[]
-    idx.postings[term].add(PostingEntry(
-      docId: docId,
-      termFreq: freq,
-      positions: positions[term],
-    ))
+    for term, freq in termFreqs:
+      if term notin idx.postings:
+        idx.postings[term] = @[]
+      idx.postings[term].add(PostingEntry(
+        docId: docId,
+        termFreq: freq,
+        positions: positions[term],
+      ))
 
-  idx.docLengths[docId] = tokens.len
-  inc idx.docCount
-  idx.totalTerms += tokens.len
-  idx.avgDocLen = float64(idx.totalTerms) / float64(idx.docCount)
+    idx.docLengths[docId] = tokens.len
+    inc idx.docCount
+    idx.totalTerms += tokens.len
+    idx.avgDocLen = float64(idx.totalTerms) / float64(idx.docCount)
+  finally:
+    release(idx.lock)
 
 proc removeDocument*(idx: InvertedIndex, docId: uint64) =
-  if docId notin idx.docLengths:
-    return
-  let docLen = idx.docLengths[docId]
-  idx.docLengths.del(docId)
-  dec idx.docCount
-  idx.totalTerms -= docLen
-  if idx.docCount > 0:
-    idx.avgDocLen = float64(idx.totalTerms) / float64(idx.docCount)
+  acquire(idx.lock)
+  try:
+    if docId notin idx.docLengths:
+      return
+    let docLen = idx.docLengths[docId]
+    idx.docLengths.del(docId)
+    dec idx.docCount
+    idx.totalTerms -= docLen
+    if idx.docCount > 0:
+      idx.avgDocLen = float64(idx.totalTerms) / float64(idx.docCount)
 
-  for term, postings in idx.postings.mpairs:
-    var newPostings: seq[PostingEntry] = @[]
-    for entry in postings:
-      if entry.docId != docId:
-        newPostings.add(entry)
-    postings = newPostings
+    for term, postings in idx.postings.mpairs:
+      var newPostings: seq[PostingEntry] = @[]
+      for entry in postings:
+        if entry.docId != docId:
+          newPostings.add(entry)
+      postings = newPostings
+  finally:
+    release(idx.lock)
 
-proc bm25Score*(idx: InvertedIndex, term: string, docId: uint64,
+proc bm25ScoreUnsafe(idx: InvertedIndex, term: string, docId: uint64,
                 k1: float64 = 1.2, b: float64 = 0.75): float64 =
   if term notin idx.postings:
     return 0.0
@@ -190,49 +201,72 @@ proc bm25Score*(idx: InvertedIndex, term: string, docId: uint64,
                (float64(tf) + k1 * (1.0 - b + b * docLen / idx.avgDocLen))
   return idf * tfNorm
 
+proc bm25Score*(idx: InvertedIndex, term: string, docId: uint64,
+                k1: float64 = 1.2, b: float64 = 0.75): float64 =
+  acquire(idx.lock)
+  try:
+    result = bm25ScoreUnsafe(idx, term, docId, k1, b)
+  finally:
+    release(idx.lock)
+
 proc search*(idx: InvertedIndex, query: string, limit: int = 10,
              config: TokenizerConfig = defaultTokenizerConfig()): seq[SearchResult] =
-  let queryTokens = tokenize(query, config)
-  if queryTokens.len == 0:
-    return @[]
+  acquire(idx.lock)
+  try:
+    let queryTokens = tokenize(query, config)
+    if queryTokens.len == 0:
+      return @[]
 
-  var docScores = initTable[uint64, float64]()
-  var docHighlights = initTable[uint64, seq[(int, int)]]()
+    var docScores = initTable[uint64, float64]()
+    var docHighlights = initTable[uint64, seq[(int, int)]]()
 
-  for token in queryTokens:
-    if token notin idx.postings:
-      continue
-    for entry in idx.postings[token]:
-      let score = bm25Score(idx, token, entry.docId)
-      if entry.docId notin docScores:
-        docScores[entry.docId] = 0.0
-        docHighlights[entry.docId] = @[]
-      docScores[entry.docId] += score
-      for pos in entry.positions:
-        let start = pos
-        let stop = pos + token.len
-        docHighlights[entry.docId].add((start, stop))
+    for token in queryTokens:
+      if token notin idx.postings:
+        continue
+      for entry in idx.postings[token]:
+        let score = bm25ScoreUnsafe(idx, token, entry.docId)
+        if entry.docId notin docScores:
+          docScores[entry.docId] = 0.0
+          docHighlights[entry.docId] = @[]
+        docScores[entry.docId] += score
+        for pos in entry.positions:
+          let start = pos
+          let stop = pos + token.len
+          docHighlights[entry.docId].add((start, stop))
 
-  var results: seq[SearchResult] = @[]
-  for docId, score in docScores:
-    results.add(SearchResult(
-      docId: docId,
-      score: score,
-      highlights: docHighlights.getOrDefault(docId, @[]),
-    ))
+    var results: seq[SearchResult] = @[]
+    for docId, score in docScores:
+      results.add(SearchResult(
+        docId: docId,
+        score: score,
+        highlights: docHighlights.getOrDefault(docId, @[]),
+      ))
 
-  results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
+    results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
 
-  if results.len > limit:
-    results = results[0..<limit]
+    if results.len > limit:
+      results = results[0..<limit]
 
-  return results
+    return results
+  finally:
+    release(idx.lock)
 
-proc termCount*(idx: InvertedIndex): int = idx.postings.len
-proc documentCount*(idx: InvertedIndex): int = idx.docCount
+proc termCount*(idx: InvertedIndex): int =
+  acquire(idx.lock)
+  try:
+    result = idx.postings.len
+  finally:
+    release(idx.lock)
+
+proc documentCount*(idx: InvertedIndex): int =
+  acquire(idx.lock)
+  try:
+    result = idx.docCount
+  finally:
+    release(idx.lock)
 
 # TF-IDF ranking
-proc tfidfScore*(idx: InvertedIndex, term: string, docId: uint64): float64 =
+proc tfidfScoreUnsafe(idx: InvertedIndex, term: string, docId: uint64): float64 =
   if term notin idx.postings:
     return 0.0
   let df = idx.postings[term].len
@@ -249,31 +283,42 @@ proc tfidfScore*(idx: InvertedIndex, term: string, docId: uint64): float64 =
   let idf = ln(float64(n) / float64(df))
   return float64(tf) * idf
 
+proc tfidfScore*(idx: InvertedIndex, term: string, docId: uint64): float64 =
+  acquire(idx.lock)
+  try:
+    result = tfidfScoreUnsafe(idx, term, docId)
+  finally:
+    release(idx.lock)
+
 proc searchTfidf*(idx: InvertedIndex, query: string, limit: int = 10,
                   config: TokenizerConfig = defaultTokenizerConfig()): seq[SearchResult] =
-  let queryTokens = tokenize(query, config)
-  if queryTokens.len == 0:
-    return @[]
+  acquire(idx.lock)
+  try:
+    let queryTokens = tokenize(query, config)
+    if queryTokens.len == 0:
+      return @[]
 
-  var docScores = initTable[uint64, float64]()
+    var docScores = initTable[uint64, float64]()
 
-  for token in queryTokens:
-    if token notin idx.postings:
-      continue
-    for entry in idx.postings[token]:
-      let score = idx.tfidfScore(token, entry.docId)
-      if entry.docId notin docScores:
-        docScores[entry.docId] = 0.0
-      docScores[entry.docId] += score
+    for token in queryTokens:
+      if token notin idx.postings:
+        continue
+      for entry in idx.postings[token]:
+        let score = tfidfScoreUnsafe(idx, token, entry.docId)
+        if entry.docId notin docScores:
+          docScores[entry.docId] = 0.0
+        docScores[entry.docId] += score
 
-  var results: seq[SearchResult] = @[]
-  for docId, score in docScores:
-    results.add(SearchResult(docId: docId, score: score, highlights: @[]))
+    var results: seq[SearchResult] = @[]
+    for docId, score in docScores:
+      results.add(SearchResult(docId: docId, score: score, highlights: @[]))
 
-  results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
-  if results.len > limit:
-    results = results[0..<limit]
-  return results
+    results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
+    if results.len > limit:
+      results = results[0..<limit]
+    return results
+  finally:
+    release(idx.lock)
 
 # Levenshtein distance for fuzzy matching
 proc levenshtein*(a, b: string): int =
@@ -295,68 +340,76 @@ proc levenshtein*(a, b: string): int =
 
 proc fuzzySearch*(idx: InvertedIndex, query: string, maxDistance: int = 2,
                   limit: int = 10, config: TokenizerConfig = defaultTokenizerConfig()): seq[SearchResult] =
-  let queryTokens = tokenize(query, config)
-  if queryTokens.len == 0:
-    return @[]
+  acquire(idx.lock)
+  try:
+    let queryTokens = tokenize(query, config)
+    if queryTokens.len == 0:
+      return @[]
 
-  var docScores = initTable[uint64, float64]()
+    var docScores = initTable[uint64, float64]()
 
-  for term in idx.postings.keys:
-    for queryToken in queryTokens:
-      let dist = levenshtein(term, queryToken)
-      if dist <= maxDistance:
-        let simScore = 1.0 - float64(dist) / float64(max(queryToken.len, term.len))
-        for entry in idx.postings[term]:
-          if entry.docId notin docScores:
-            docScores[entry.docId] = 0.0
-          docScores[entry.docId] += simScore * float64(entry.termFreq)
+    for term in idx.postings.keys:
+      for queryToken in queryTokens:
+        let dist = levenshtein(term, queryToken)
+        if dist <= maxDistance:
+          let simScore = 1.0 - float64(dist) / float64(max(queryToken.len, term.len))
+          for entry in idx.postings[term]:
+            if entry.docId notin docScores:
+              docScores[entry.docId] = 0.0
+            docScores[entry.docId] += simScore * float64(entry.termFreq)
 
-  var results: seq[SearchResult] = @[]
-  for docId, score in docScores:
-    results.add(SearchResult(docId: docId, score: score, highlights: @[]))
+    var results: seq[SearchResult] = @[]
+    for docId, score in docScores:
+      results.add(SearchResult(docId: docId, score: score, highlights: @[]))
 
-  results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
-  if results.len > limit:
-    results = results[0..<limit]
-  return results
+    results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
+    if results.len > limit:
+      results = results[0..<limit]
+    return results
+  finally:
+    release(idx.lock)
 
 # Regex search
 proc regexSearch*(idx: InvertedIndex, pattern: string,
                   limit: int = 10): seq[SearchResult] =
-  var docScores = initTable[uint64, float64]()
+  acquire(idx.lock)
+  try:
+    var docScores = initTable[uint64, float64]()
 
-  for term in idx.postings.keys:
-    # Simple pattern matching: check if pattern is substring
-    if pattern.len > 0:
-      var match = false
-      # Check if pattern starts with/ends with or contains
-      if pattern.startsWith("*") and pattern.endsWith("*"):
-        let inner = pattern[1..^2]
-        if term.find(inner) >= 0:
-          match = true
-      elif pattern.startsWith("*"):
-        let suffix = pattern[1..^1]
-        if term.endsWith(suffix):
-          match = true
-      elif pattern.endsWith("*"):
-        let prefix = pattern[0..^2]
-        if term.startsWith(prefix):
-          match = true
-      else:
-        if term == pattern:
-          match = true
+    for term in idx.postings.keys:
+      # Simple pattern matching: check if pattern is substring
+      if pattern.len > 0:
+        var match = false
+        # Check if pattern starts with/ends with or contains
+        if pattern.startsWith("*") and pattern.endsWith("*"):
+          let inner = pattern[1..^2]
+          if term.find(inner) >= 0:
+            match = true
+        elif pattern.startsWith("*"):
+          let suffix = pattern[1..^1]
+          if term.endsWith(suffix):
+            match = true
+        elif pattern.endsWith("*"):
+          let prefix = pattern[0..^2]
+          if term.startsWith(prefix):
+            match = true
+        else:
+          if term == pattern:
+            match = true
 
-      if match:
-        for entry in idx.postings[term]:
-          if entry.docId notin docScores:
-            docScores[entry.docId] = 0.0
-          docScores[entry.docId] += float64(entry.termFreq)
+        if match:
+          for entry in idx.postings[term]:
+            if entry.docId notin docScores:
+              docScores[entry.docId] = 0.0
+            docScores[entry.docId] += float64(entry.termFreq)
 
-  var results: seq[SearchResult] = @[]
-  for docId, score in docScores:
-    results.add(SearchResult(docId: docId, score: score, highlights: @[]))
+    var results: seq[SearchResult] = @[]
+    for docId, score in docScores:
+      results.add(SearchResult(docId: docId, score: score, highlights: @[]))
 
-  results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
-  if results.len > limit:
-    results = results[0..<limit]
-  return results
+    results.sort(proc(a, b: SearchResult): int = cmp(b.score, a.score))
+    if results.len > limit:
+      results = results[0..<limit]
+    return results
+  finally:
+    release(idx.lock)

@@ -7,6 +7,7 @@ import std/tables
 import std/os
 import std/endians
 import std/monotimes
+import std/locks
 import config
 import logging
 import ../protocol/wire
@@ -37,6 +38,7 @@ type
     gossipProtocol*: GossipProtocol
     tls*: TLSContext
     activeConnections*: int
+    activeConnectionsLock*: Lock
 
 proc newServer*(config: BaraConfig): Server =
   let dataDir = config.dataDir / "server"
@@ -83,13 +85,14 @@ proc newServer*(config: BaraConfig): Server =
   gp.onSuspect = proc(nodeId: string) {.gcsafe.} =
     cm.onNodeSuspect(nodeId)
 
-  Server(config: config, running: false, db: db, ctx: ctx,
+  result = Server(config: config, running: false, db: db, ctx: ctx,
          txnManager: ctx.txnManager, distTxnManager: newDistTxnManager(),
          replicationManager: newReplicationManager(),
          shardRouter: shardRouter,
          clusterMembership: cm,
          gossipProtocol: gp,
          tls: tls)
+  initLock(result.activeConnectionsLock)
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
@@ -105,9 +108,13 @@ proc parseHeader(data: string): (bool, MessageHeader) =
   if data.len < 12:
     return (false, MessageHeader())
   let rawKind = readUint32BE(data, 0)
-  {.push warning[HoleEnumConv]: off.}
-  let kind = MsgKind(rawKind)
-  {.pop.}
+  let kind = cast[MsgKind](rawKind)
+  case kind
+  of mkClientHandshake, mkQuery, mkQueryParams, mkExecute, mkBatch, mkTransaction, mkClose, mkPing, mkAuth,
+     mkServerHandshake, mkReady, mkData, mkComplete, mkError, mkAuthChallenge, mkAuthOk, mkSchemaChange, mkPong, mkTransactionState:
+    discard
+  else:
+    return (false, MessageHeader())
   let length = readUint32BE(data, 4)
   let requestId = readUint32BE(data, 8)
   return (true, MessageHeader(kind: kind, length: length, requestId: requestId))
@@ -523,8 +530,12 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
   except Exception as e:
     errorMsg("Client " & $clientId & " error: " & e.msg)
   finally:
-    if server.activeConnections > 0:
-      dec server.activeConnections
+    acquire(server.activeConnectionsLock)
+    try:
+      if server.activeConnections > 0:
+        dec server.activeConnections
+    finally:
+      release(server.activeConnectionsLock)
     info("Client " & $clientId & " disconnected")
     client.close()
 
@@ -547,7 +558,16 @@ proc run*(server: Server) {.async.} =
     info("BaraDB listening on " & server.config.address & ":" & $server.config.port)
   while server.running:
     let client = await sock.accept()
-    if server.config.maxConnections > 0 and server.activeConnections >= server.config.maxConnections:
+    acquire(server.activeConnectionsLock)
+    var shouldAccept = true
+    try:
+      if server.config.maxConnections > 0 and server.activeConnections >= server.config.maxConnections:
+        shouldAccept = false
+      else:
+        inc server.activeConnections
+    finally:
+      release(server.activeConnectionsLock)
+    if not shouldAccept:
       client.close()
       continue
     if server.tls != nil:
@@ -555,10 +575,15 @@ proc run*(server: Server) {.async.} =
         server.tls.wrapServer(client)
       except Exception as e:
         errorMsg("TLS handshake failed: " & e.msg)
+        acquire(server.activeConnectionsLock)
+        try:
+          if server.activeConnections > 0:
+            dec server.activeConnections
+        finally:
+          release(server.activeConnectionsLock)
         client.close()
         continue
     inc clientId
-    inc server.activeConnections
     asyncCheck server.handleClient(client, clientId)
 
 proc stop*(server: Server) =

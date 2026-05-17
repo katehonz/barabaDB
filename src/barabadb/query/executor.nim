@@ -11,6 +11,7 @@ import std/times
 import std/json
 import std/random
 import std/monotimes
+import std/locks
 import lexer as qlex
 import parser as qpar
 import ast
@@ -74,6 +75,7 @@ type
     sessionVars*: Table[string, string]  # session-scoped key/value variables
     autoIncCounters*: Table[string, int64]  # table.col -> next auto-increment value
     sequences*: Table[string, int64]  # sequence name -> current value
+    ctxLock*: Lock  # protects tables, views, btrees, ftsIndexes, users, policies, autoIncCounters, sequences
 
   MigrationRecord* = object
     name*: string
@@ -160,6 +162,7 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
                    autoIncCounters: initTable[string, int64](),
                    sequences: initTable[string, int64](),
                    onChange: nil)
+  initLock(result.ctxLock)
   restoreSchema(result)
 
 # ----------------------------------------------------------------------
@@ -332,7 +335,10 @@ proc restoreSchema(ctx: ExecutionContext) =
       else: discard
 
 proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
-  ExecutionContext(db: ctx.db, tables: ctx.tables,
+  var svCopy = initTable[string, string]()
+  for k, v in ctx.sessionVars:
+    svCopy[k] = v
+  result = ExecutionContext(db: ctx.db, tables: ctx.tables,
                    btrees: ctx.btrees, views: ctx.views,
                    cteTables: initTable[string, seq[Row]](),
                    ftsIndexes: ctx.ftsIndexes,
@@ -340,10 +346,11 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
                    users: ctx.users, policies: ctx.policies,
                    txnManager: ctx.txnManager,
                    currentUser: ctx.currentUser, currentRole: ctx.currentRole,
-                   sessionVars: ctx.sessionVars,
+                   sessionVars: svCopy,
                    autoIncCounters: ctx.autoIncCounters,
                    sequences: ctx.sequences,
                    pendingTxn: nil, onChange: ctx.onChange)
+  initLock(result.ctxLock)
 
 # ----------------------------------------------------------------------
 # Migration Helpers
@@ -1059,18 +1066,27 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if ctx == nil: return "0"
       let seqName = evalExpr(expr.irFuncArgs[0], row, ctx)
       var val: int64 = 0
-      if seqName in ctx.sequences:
-        val = ctx.sequences[seqName]
-      val += 1
-      ctx.sequences[seqName] = val
+      acquire(ctx.ctxLock)
+      try:
+        if seqName in ctx.sequences:
+          val = ctx.sequences[seqName]
+        val += 1
+        ctx.sequences[seqName] = val
+      finally:
+        release(ctx.ctxLock)
       return $val
     of "currval":
       if expr.irFuncArgs.len < 1:
         return "0"
       if ctx == nil: return "0"
       let seqName = evalExpr(expr.irFuncArgs[0], row, ctx)
-      if seqName in ctx.sequences:
-        return $ctx.sequences[seqName]
+      acquire(ctx.ctxLock)
+      try:
+        if seqName in ctx.sequences:
+          return $ctx.sequences[seqName]
+      finally:
+        release(ctx.ctxLock)
+      return "0"
       return "0"
     of "snowflake_id":
       # Snowflake ID: timestamp_ms(41 bits) | node_id(10 bits) | sequence(12 bits)
@@ -1457,6 +1473,7 @@ proc validateType*(colType: string, value: string): (bool, string) =
       return (false, "Vector dimension mismatch: expected " & $expectedDim & " but got " & $vec.len)
   return (true, "")
 
+proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
 proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
 proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult
 
@@ -1468,7 +1485,7 @@ proc fireTriggers*(ctx: ExecutionContext, tableName: string, timing: string, eve
         let tokens = qlex.tokenize(trig.action.strVal)
         let astNode = qpar.parse(tokens)
         if astNode.stmts.len > 0:
-          discard executeQuery(ctx, astNode)
+          discard executeQueryImpl(ctx, astNode)
 
 proc validateConstraints*(ctx: ExecutionContext, tableName: string,
     fields: seq[string], values: seq[seq[string]], skipPkCheck: bool = false): (bool, string) =
@@ -3075,7 +3092,21 @@ proc getSelectColumns(stmt: Node): seq[string] =
     else:
       result.add("col" & $i)
 
-proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult =
+proc isDDL(stmt: Node): bool =
+  case stmt.kind
+  of nkCreateTable, nkDropTable, nkAlterTable,
+     nkCreateView, nkDropView,
+     nkCreateIndex, nkDropIndex,
+     nkCreateTrigger, nkDropTrigger,
+     nkCreateUser, nkDropUser,
+     nkCreatePolicy, nkDropPolicy,
+     nkGrant, nkRevoke,
+     nkEnableRLS, nkDisableRLS:
+    result = true
+  else:
+    result = false
+
+proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult =
   if astNode == nil or astNode.stmts.len == 0:
     return okResult()
 
@@ -3109,7 +3140,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
             # Step 1: Execute the non-recursive anchor (left side of UNION)
             var innerLeft = Node(kind: nkStatementList, stmts: @[])
             innerLeft.stmts.add(cteQuery.setOpLeft)
-            let anchorRes = executeQuery(ctx, innerLeft)
+            let anchorRes = executeQueryImpl(ctx, innerLeft)
             for row in anchorRes.rows:
               allRows.add(row)
 
@@ -3125,7 +3156,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
 
               var innerRight = Node(kind: nkStatementList, stmts: @[])
               innerRight.stmts.add(cteQuery.setOpRight)
-              let rightRes = executeQuery(ctx, innerRight)
+              let rightRes = executeQueryImpl(ctx, innerRight)
 
               ctx.cteTables = savedCte
 
@@ -3159,7 +3190,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
             # Recursive CTE without UNION — treat as non-recursive fallback
             var inner = Node(kind: nkStatementList, stmts: @[])
             inner.stmts.add(cteQuery)
-            let cteRes = executeQuery(ctx, inner)
+            let cteRes = executeQueryImpl(ctx, inner)
             var cteRows: seq[Row] = @[]
             for row in cteRes.rows:
               cteRows.add(row)
@@ -3167,7 +3198,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         else:
           var inner = Node(kind: nkStatementList, stmts: @[])
           inner.stmts.add(cteQuery)
-          let cteRes = executeQuery(ctx, inner)
+          let cteRes = executeQueryImpl(ctx, inner)
           var cteRows: seq[Row] = @[]
           for row in cteRes.rows:
             cteRows.add(row)
@@ -3180,7 +3211,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
         # Execute the view's underlying query
         var inner = Node(kind: nkStatementList, stmts: @[])
         inner.stmts.add(viewQuery)
-        let innerResult = executeQuery(ctx, inner)
+        let innerResult = executeQueryImpl(ctx, inner)
         # Now filter and project with outer query constraints
         var filteredRows = innerResult.rows
         var cols = innerResult.columns
@@ -3405,11 +3436,11 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     # Execute left and right queries
     var innerLeft = Node(kind: nkStatementList, stmts: @[])
     innerLeft.stmts.add(stmt.setOpLeft)
-    let leftRes = executeQuery(ctx, innerLeft)
+    let leftRes = executeQueryImpl(ctx, innerLeft)
 
     var innerRight = Node(kind: nkStatementList, stmts: @[])
     innerRight.stmts.add(stmt.setOpRight)
-    let rightRes = executeQuery(ctx, innerRight)
+    let rightRes = executeQueryImpl(ctx, innerRight)
 
     # Derive columns from left side
     var cols = leftRes.columns
@@ -3493,9 +3524,13 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
       if col.autoIncrement and col.name notin mutableFields:
         let counterKey = stmt.insTarget & "." & col.name
         var nextVal: int64 = 1
-        if counterKey in ctx.autoIncCounters:
-          nextVal = ctx.autoIncCounters[counterKey]
-        ctx.autoIncCounters[counterKey] = nextVal + int64(mutableValues.len)
+        acquire(ctx.ctxLock)
+        try:
+          if counterKey in ctx.autoIncCounters:
+            nextVal = ctx.autoIncCounters[counterKey]
+          ctx.autoIncCounters[counterKey] = nextVal + int64(mutableValues.len)
+        finally:
+          release(ctx.ctxLock)
         # Insert at position 0 so it becomes the primary storage key
         mutableFields.insert(col.name, 0)
         for i in 0..<mutableValues.len:
@@ -3510,8 +3545,12 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
               try:
                 let intVal = parseInt(providedVal)
                 let counterKey = stmt.insTarget & "." & col.name
-                if counterKey notin ctx.autoIncCounters or intVal >= ctx.autoIncCounters[counterKey]:
-                  ctx.autoIncCounters[counterKey] = intVal + 1
+                acquire(ctx.ctxLock)
+                try:
+                  if counterKey notin ctx.autoIncCounters or intVal >= ctx.autoIncCounters[counterKey]:
+                    ctx.autoIncCounters[counterKey] = intVal + 1
+                finally:
+                  release(ctx.ctxLock)
               except: discard
 
     applyDefaultValues(tbl, mutableFields, mutableValues)
@@ -3657,7 +3696,7 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     var sourceRows: seq[Row] = @[]
     if stmt.mergeSource != nil:
       if stmt.mergeSource.kind == nkSelect:
-        let srcRes = executeQuery(ctx, Node(kind: nkStatementList, stmts: @[stmt.mergeSource]))
+        let srcRes = executeQueryImpl(ctx, Node(kind: nkStatementList, stmts: @[stmt.mergeSource]))
         sourceRows = srcRes.rows
       elif stmt.mergeSource.kind == nkIdent:
         sourceRows = execScan(ctx, stmt.mergeSource.identName)
@@ -4236,9 +4275,22 @@ proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] 
     return errResult("Unsupported statement type: " & $stmt.kind)
 
 
+proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult =
+  if astNode == nil or astNode.stmts.len == 0:
+    return okResult()
+  let stmt = astNode.stmts[0]
+  if isDDL(stmt):
+    acquire(ctx.ctxLock)
+    try:
+      result = executeQueryImpl(ctx, astNode, params)
+    finally:
+      release(ctx.ctxLock)
+  else:
+    result = executeQueryImpl(ctx, astNode, params)
+
 proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult =
   let tokens = qlex.tokenize(sql)
   let astNode = qpar.parse(tokens)
   if astNode.stmts.len > 0:
-    return executeQuery(ctx, astNode)
+    return executeQueryImpl(ctx, astNode)
   return okResult(msg="Empty migration body")

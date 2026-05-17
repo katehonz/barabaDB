@@ -205,7 +205,10 @@ proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): Wire
     raise newException(ValueError, "Wire protocol: max deserialization depth exceeded")
   if pos >= buf.len:
     raise newException(ValueError, "Wire protocol: unexpected end of buffer")
-  let kind = FieldKind(buf[pos])
+  let kindByte = buf[pos]
+  if kindByte > byte(high(FieldKind)):
+    raise newException(ValueError, "Wire protocol: invalid field kind")
+  let kind = FieldKind(kindByte)
   inc pos
   case kind
   of fkNull: result = WireValue(kind: fkNull)
@@ -223,26 +226,18 @@ proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): Wire
     pos += 2
     result = WireValue(kind: fkInt16, int16Val: val)
   of fkInt32:
-    result = WireValue(kind: fkInt32, int32Val: int32(readUint32(buf, pos)))
+    result = WireValue(kind: fkInt32, int32Val: cast[int32](readUint32(buf, pos)))
   of fkInt64:
-    result = WireValue(kind: fkInt64, int64Val: int64(readUint64(buf, pos)))
+    result = WireValue(kind: fkInt64, int64Val: cast[int64](readUint64(buf, pos)))
   of fkFloat32:
     var fl: float32
-    var bytes: array[4, byte]
-    for i in 0..3: bytes[i] = buf[pos + i]
-    var i32: int32
-    bigEndian32(addr i32, unsafeAddr bytes)
-    fl = cast[float32](i32)
-    pos += 4
+    let raw = readUint32(buf, pos)
+    fl = cast[float32](raw)
     result = WireValue(kind: fkFloat32, float32Val: fl)
   of fkFloat64:
     var fl: float64
-    var bytes: array[8, byte]
-    for i in 0..7: bytes[i] = buf[pos + i]
-    var i64: int64
-    bigEndian64(addr i64, unsafeAddr bytes)
-    fl = cast[float64](i64)
-    pos += 8
+    let raw = readUint64(buf, pos)
+    fl = cast[float64](raw)
     result = WireValue(kind: fkFloat64, float64Val: fl)
   of fkString:
     result = WireValue(kind: fkString, strVal: readString(buf, pos))
