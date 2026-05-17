@@ -136,19 +136,19 @@ proc analyze*(rec: CrashRecovery): RecoveryResult =
   return rec.result
 
 proc recover*(rec: CrashRecovery, db: LSMTree = nil): RecoveryResult =
-  let result = rec.analyze()
+  let analysis = rec.analyze()
 
-  if not result.applied:
-    return result
+  if not analysis.applied:
+    return analysis
 
   if db == nil:
-    return result
+    return analysis
 
   # REDO: apply committed entries (txnId < lastCommitted) to LSM-Tree
   var redoCount = 0
   var undoCount = 0
   for entry in rec.entries:
-    if entry.txnId < result.lastTxn:
+    if entry.txnId < analysis.lastTxn:
       # Committed — redo
       if entry.isDelete:
         db.delete(entry.key)

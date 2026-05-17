@@ -1,13 +1,10 @@
 import std/unittest
 import std/os
 import std/strutils
-import std/times
 import std/monotimes
 import std/tables
-import barabadb/core/types
 import barabadb/query/executor as qexec
 import barabadb/query/parser
-import barabadb/query/ast
 import barabadb/storage/lsm
 
 proc execSql(ctx: qexec.ExecutionContext, sql: string): qexec.ExecResult =

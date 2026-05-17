@@ -212,7 +212,6 @@ proc executeCypher*(g: Graph, query: CypherQuery): CypherResult =
 
 proc toCypher*(query: string): string =
   ## Convert basic BaraQL to Cypher-like syntax for graph queries
-  var result = ""
   let upper = query.toUpper()
   if upper.startsWith("SELECT") and upper.contains("MATCH"):
     # Already Cypher-like

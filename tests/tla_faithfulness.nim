@@ -4,7 +4,6 @@
 
 import std/unittest
 import std/tables
-import std/sets
 import std/sequtils
 import std/strformat
 

@@ -164,10 +164,10 @@ proc processCommand*(state: var CliState, input: string): string =
   of "history", "\\history":
     if state.history.len == 0:
       return "(no history)"
-    var result = ""
+    var res = ""
     for i, h in state.history:
-      result &= "  " & $(i + 1) & ": " & h & "\n"
-    return result
+      res &= "  " & $(i + 1) & ": " & h & "\n"
+    return res
   of "verbose":
     state.verbose = not state.verbose
     return "Verbose mode: " & (if state.verbose: "ON" else: "OFF")
