@@ -20,6 +20,8 @@
 | Foreign Keys | ✅ CASCADE/SET NULL/RESTRICT за ON DELETE и ON UPDATE |
 | Formal Verification | ✅ 10 TLA+ спецификации |
 | MCP Server | ✅ STDIO JSON-RPC, 3 tools (query, vector_search, schema_inspect), multi-tenant |
+| AI Pipeline | ✅ chunk(), embed_text(), auto-embed on INSERT, configurable embedder |
+| RAG Pipeline | ✅ ChatMessageHistory, end-to-end Python RAG example |
 
 ---
 
@@ -29,23 +31,23 @@
 
 ### Фаза 10.1: Hybrid RAG Search
 
-| # | Задача | Описание | Оценка |
-|---|--------|----------|--------|
-| 10.1.1 | `hybrid_search()` SQL функция | Комбинира vector similarity + BM25 FTS + релационни филтри в една заявка. Reranking с RRF (Reciprocal Rank Fusion). | 6-8ч |
-| 10.1.2 | `rerank()` SQL функция | Cross-encoder reranking — приема query text + резултати, връща преподредени по relevance. | 4ч |
-| 10.1.3 | Metadata filtering в vector search | `WHERE` клауза върху JSONB/релационни колони ДО vector index scan-а (pre-filtering). | 6ч |
-| 10.1.4 | Chunking + embedding pipeline | `INSERT INTO docs (text)` → автоматично chunk-ване + embedding generation чрез външен embedder. | 8ч |
+| # | Задача | Описание | Оценка | Статус |
+|---|--------|----------|--------|--------|
+| 10.1.1 | `hybrid_search()` SQL функция | Комбинира vector similarity + BM25 FTS + релационни филтри в една заявка. Reranking с RRF. | 6-8ч | ✅ |
+| 10.1.2 | `rerank()` SQL функция | Cross-encoder reranking — приема query text + резултати, връща преподредени по relevance. | 4ч | ✅ |
+| 10.1.3 | Metadata filtering в vector search | `WHERE` клауза върху JSONB/релационни колони ДО vector index scan-а (pre-filtering). | 6ч | ✅ |
+| 10.1.4 | Chunking + embedding pipeline | `INSERT INTO docs (text)` → автоматично chunk-ване + embedding generation чрез външен embedder. | 8ч | ✅ |
 
 **Метрика**: `SELECT hybrid_search('AI query', embedding, content, k => 10)` връща релевантни резултати за under 50ms с 1M vectors.
 
 ### Фаза 10.2: LangChain Vector Store Interface
 
-| # | Задача | Описание | Оценка |
-|---|--------|----------|--------|
-| 10.2.1 | `BaraDBStore` за Python LangChain | Имплементира `VectorStore` интерфейса — `add_texts()`, `similarity_search()`, `max_marginal_relevance_search()`. | 4ч |
-| 10.2.2 | `BaraDBStore` за JS LangChain | Същото за LangChain.js. | 4ч |
-| 10.2.3 | Conversation buffer в BaraDB | `ChatMessageHistory` имплементация — съхранява message threads в релационна таблица с RLS. | 3ч |
-| 10.2.4 | RAG pipeline example | End-to-end пример: ingest PDF → chunks → embeddings → hybrid search → LLM context. | 3ч |
+| # | Задача | Описание | Оценка | Статус |
+|---|--------|----------|--------|--------|
+| 10.2.1 | `BaraDBStore` за Python LangChain | Имплементира `VectorStore` интерфейса — `add_texts()`, `similarity_search()`, `max_marginal_relevance_search()`. | 4ч | ✅ |
+| 10.2.2 | `BaraDBStore` за JS LangChain | Същото за LangChain.js. | 4ч | ✅ |
+| 10.2.3 | Conversation buffer в BaraDB | `ChatMessageHistory` имплементация — съхранява message threads в релационна таблица с RLS. | 3ч | ✅ |
+| 10.2.4 | RAG pipeline example | End-to-end пример: ingest PDF → chunks → embeddings → hybrid search → LLM context. | 3ч | ✅ |
 
 **Метрика**: LangChain RAG tutorial работи с BaraDB без промяна на кода (swap-in replacement за PostgreSQL/pgvector).
 
