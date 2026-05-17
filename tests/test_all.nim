@@ -3920,3 +3920,30 @@ suite "Hybrid RAG Search":
     check r.success
     check r.rows[0]["res"] == "[]"
 
+
+  test "hybrid_search_filtered excludes non-matching rows":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE docs5 (id INT PRIMARY KEY, embedding VECTOR(3), content TEXT, tenant_id TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs5 (id, embedding, content, tenant_id) VALUES (1, '[1.0, 0.0, 0.0]', 'quick brown fox', 'tenant-a')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs5 (id, embedding, content, tenant_id) VALUES (2, '[1.0, 0.0, 0.0]', 'quick brown fox', 'tenant-b')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs5 (id, embedding, content, tenant_id) VALUES (3, '[0.0, 1.0, 0.0]', 'lazy dog sleeps', 'tenant-a')"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_vec5 ON docs5(embedding) USING hnsw"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts5 ON docs5(content) USING FTS"))
+    let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search_filtered('docs5', 'embedding', 'content', 'quick brown fox', '[1.0, 0.0, 0.0]', 10, 'tenant_id', 'tenant-a') AS res"))
+    check r.success
+    let arr = parseJson(r.rows[0]["res"])
+    # Doc 1 (tenant-a) should be first and highest scored; Doc 2 (tenant-b) must be excluded
+    check arr[0]["id"].getStr() == "1"
+    for elem in arr:
+      check elem["id"].getStr() != "2"
+
+  test "hybrid_search_filtered with empty filter behaves like hybrid_search":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE docs6 (id INT PRIMARY KEY, embedding VECTOR(3), content TEXT, tenant_id TEXT)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs6 (id, embedding, content, tenant_id) VALUES (1, '[1.0, 0.0, 0.0]', 'quick brown fox', 'tenant-a')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO docs6 (id, embedding, content, tenant_id) VALUES (2, '[1.0, 0.0, 0.0]', 'quick brown fox', 'tenant-b')"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_vec6 ON docs6(embedding) USING hnsw"))
+    discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts6 ON docs6(content) USING FTS"))
+    let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search_filtered('docs6', 'embedding', 'content', 'quick brown fox', '[1.0, 0.0, 0.0]', 10, '', '') AS res"))
+    check r.success
+    let arr = parseJson(r.rows[0]["res"])
+    check arr.len == 2
+

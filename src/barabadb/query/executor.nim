@@ -649,6 +649,67 @@ proc doHybridSearch(ctx: ExecutionContext, table: string, vecCol: string, textCo
     if a[1] > b[1]: return -1
     elif a[1] < b[1]: return 1
     else: return 0)
+  if sorted.len > k:
+    sorted = sorted[0..<k]
+  return sorted
+
+proc doHybridSearchFiltered(ctx: ExecutionContext, table: string, vecCol: string, textCol: string,
+                            queryText: string, queryVectorStr: string, k: int,
+                            filterCol: string, filterVal: string): seq[(string, float64)] =
+  result = @[]
+  if ctx == nil: return
+  let vecKey = table & "." & vecCol
+  let textKey = table & "." & textCol
+  if vecKey notin ctx.vectorIndexes or textKey notin ctx.ftsIndexes:
+    return
+  let vecIdx = ctx.vectorIndexes[vecKey]
+  let ftsIdx = ctx.ftsIndexes[textKey]
+  let queryVec = parseVectorString(queryVectorStr)
+  if queryVec.len == 0: return
+
+  var vecIdScores = initTable[string, float64]()
+
+  # Vector search with metadata filter (pre-filtering)
+  let vecFilteredResults = vengine.searchWithFilter(vecIdx, queryVec, k,
+    proc(meta: Table[string, string]): bool {.gcsafe.} =
+      if filterCol.len == 0: return true
+      if filterCol in meta: return meta[filterCol] == filterVal
+      return false
+  )
+  for rank, (docId, dist) in vecFilteredResults:
+    let realId = findRealIdByDocId(ctx, table, docId)
+    if realId.len > 0:
+      let rrfScore = 1.0 / (60.0 + float64(rank + 1))
+      vecIdScores[realId] = vecIdScores.getOrDefault(realId, 0.0) + rrfScore
+
+  # FTS search (post-filtering by docId lookup)
+  let ftsResults = fts.search(ftsIdx, queryText, k * 3)
+  for rank, res in ftsResults:
+    let realId = findRealIdByDocId(ctx, table, res.docId)
+    if realId.len > 0:
+      # Verify filter on actual row data
+      var passesFilter = true
+      if filterCol.len > 0:
+        passesFilter = false
+        for row in execScan(ctx, table):
+          if realIdFromKey(row.getOrDefault("$key", "")) == realId:
+            if filterCol in row and row[filterCol] == filterVal:
+              passesFilter = true
+            break
+      if passesFilter:
+        let rrfScore = 1.0 / (60.0 + float64(rank + 1))
+        vecIdScores[realId] = vecIdScores.getOrDefault(realId, 0.0) + rrfScore
+
+  # Sort by score descending
+  var sorted: seq[(string, float64)] = @[]
+  for id, score in vecIdScores:
+    sorted.add((id, score))
+  sorted.sort(proc(a, b: (string, float64)): int =
+    if a[1] > b[1]: return -1
+    elif a[1] < b[1]: return 1
+    else: return 0)
+  if sorted.len > k:
+    sorted = sorted[0..<k]
   return sorted
 
 proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string
@@ -1162,6 +1223,21 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       for (id, score) in results:
         ids.add($id)
       return ids.join(",")
+    of "hybrid_search_filtered":
+      if expr.irFuncArgs.len < 8: return "[]"
+      let table = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let vecCol = evalExpr(expr.irFuncArgs[1], row, ctx)
+      let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
+      let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
+      let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
+      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except: 10
+      let filterCol = evalExpr(expr.irFuncArgs[6], row, ctx)
+      let filterVal = evalExpr(expr.irFuncArgs[7], row, ctx)
+      let results = doHybridSearchFiltered(ctx, table, vecCol, textCol, queryText, queryVec, k, filterCol, filterVal)
+      var parts: seq[string] = @[]
+      for (id, score) in results:
+        parts.add("{\"id\":\"" & id & "\",\"score\":\"" & $score & "\"}")
+      return "[" & parts.join(",") & "]"
     of "rerank":
       if expr.irFuncArgs.len < 2: return "[]"
       let queryText = evalExpr(expr.irFuncArgs[0], row, ctx)
@@ -1458,6 +1534,9 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
             docId = docId * 31 + uint64(ord(ch))
           var meta = initTable[string, string]()
           meta["key"] = fullKey
+          for col, val in row:
+            if col.len > 0 and col != "$key" and col != "$value":
+              meta[col] = val
           vengine.insert(vecIdx, docId, vec, meta)
 
     inc count
@@ -4449,6 +4528,9 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               var meta = initTable[string, string]()
               if "$key" in row:
                 meta["key"] = row["$key"]
+              for col, val in row:
+                if col.len > 0 and col != "$key" and col != "$value":
+                  meta[col] = val
               let fullKey = stmt.ciTarget & "." & row["$key"]
               var docId: uint64 = 0
               for ch in fullKey:
