@@ -5,12 +5,13 @@
 ## Documentation Languages
 
 - [English](en/)
-- [Български (Bulgarian)](bg/)
-- [Русский (Russian)](ru/)
-- [فارسی (Farsi)](fa/)
-- [中文 (Chinese)](zh/)
-- [Türkçe (Turkish)](tr/)
 - [العربية (Arabic)](ar/)
+- [Български (Bulgarian)](bg/)
+- [Deutsch (German)](de/)
+- [فارسی (Farsi)](fa/)
+- [Русский (Russian)](ru/)
+- [Türkçe (Turkish)](tr/)
+- [中文 (Chinese)](zh/)
 
 ---
 

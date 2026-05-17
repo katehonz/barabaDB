@@ -640,23 +640,66 @@ SELECT * FROM invoices;  -- only company-a rows
 - **JSONB documents** — schema-flexible storage, easy to add fields per tenant
 - **RLS guarantees isolation** — the database enforces tenant boundaries, not just the application
 
+## AI & Cross-Modal Functions
+
+### Vector / RAG
+
+```sql
+-- Hybrid search (vector + FTS + RRF reranking)
+SELECT hybrid_search('query text', embedding, content, 10) AS result;
+SELECT hybrid_search_ids('query', embedding, content, 5) AS result;
+SELECT hybrid_search_filtered('query', embedding, content, 10, 'category', 'news') AS result;
+
+-- Rerank
+SELECT rerank('query text', results_json) AS result;
+```
+
+### Graph Traversal
+
+```sql
+-- BFS, DFS, PageRank, ShortestPath, Dijkstra, Louvain
+SELECT * FROM GRAPH_TABLE(g MATCH (n)-[r]->(m)
+    ALGORITHM bfs START 1 MAXDEPTH 2
+    COLUMNS (id, node_label));
+
+SELECT similarity_nodes('graph_name', 'jaccard') AS result;
+SELECT node2vec_embed('graph_name', 64) AS result;
+SELECT cypher('MATCH (a)-[r]->(b) RETURN a.label') AS result;
+```
+
+### AI / LLM
+
+```sql
+-- Text chunking
+SELECT chunk('long text...', 1024, 128) AS result;
+
+-- Embedding generation (external service)
+SELECT embed_text('query text') AS result;
+
+-- Natural Language → SQL (external LLM)
+SELECT nl_to_sql('Show users over 25', 'users') AS result;
+
+-- Schema prompt for LLM context
+SELECT schema_prompt('users') AS result;
+```
+
 ## Supported Keywords
 
 | Category | Keywords |
 |----------|----------|
 | DQL | SELECT, FROM, WHERE, ORDER BY, GROUP BY, HAVING, LIMIT, OFFSET, DISTINCT |
 | DML | INSERT, UPDATE, DELETE, SET, VALUES |
-| DDL | CREATE TYPE, DROP TYPE, CREATE INDEX, DROP INDEX, ALTER TYPE |
+| DDL | CREATE TYPE, DROP TYPE, CREATE INDEX, DROP INDEX, ALTER TYPE, CREATE GRAPH, DROP GRAPH |
 | Join | INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL JOIN, CROSS JOIN, ON |
 | Set | UNION, UNION ALL, INTERSECT, EXCEPT |
 | CTEs | WITH, RECURSIVE, AS |
 | Case | CASE, WHEN, THEN, ELSE, END |
 | Transaction | BEGIN, COMMIT, ROLLBACK, SAVEPOINT |
-| Graph | MATCH, RETURN, WHERE, shortestPath, type |
+| Graph | MATCH, RETURN, WHERE, shortestPath, type, GRAPH_TABLE, ALGORITHM, bfs, dfs, pagerank |
 | FTS | MATCH, AGAINST, relevance, IN BOOLEAN MODE, WITH FUZZINESS |
 | Vector | cosine_distance, euclidean_distance, inner_product, l1_distance, l2_distance, <-> |
+| AI | hybrid_search, rerank, chunk, embed_text, nl_to_sql, schema_prompt, similarity_nodes, node2vec_embed, cypher |
 | JSON | ->, ->> |
-| FTS | @@ (BM25 match) |
 | Recovery | RECOVER TO TIMESTAMP |
 | Functions | count, sum, avg, min, max, stddev, variance, abs, sqrt, lower, upper, len, trim, substr, now, last_insert_id, current_setting |
 | Session | SET, current_setting, current_user, current_role |

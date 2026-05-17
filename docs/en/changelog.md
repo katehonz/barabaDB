@@ -2,25 +2,49 @@
 
 All notable changes to BaraDB are documented in this file.
 
-## [Unreleased] — SQL:2023 Stabilization
-
-### Fixed
-
-- **GROUPING SETS execution** — `lowerSelect` now creates `irpkGroupBy` when `selGroupingSetsKind != gskNone`, even if `selGroupBy` is empty. Previously, queries like `GROUP BY GROUPING SETS ((dept), ())` bypassed the grouping executor entirely.
-- **FTS CREATE INDEX docId mismatch** — `CREATE INDEX ... USING FTS` now computes `docId` as a hash of `tableName.$key`, consistent with DML operations (`INSERT`/`UPDATE`/`DELETE`). Previously, index creation used sequential IDs (0, 1, 2...), causing `@@` queries to never match indexed documents.
-- **Test isolation (all suites)** — All `newLSMTree("")` calls replaced with unique temporary directories per suite. Eliminates WAL accumulation issues and flaky tests caused by shared database state between test runs.
-- **Window frame parser** — `parseFrameBoundary` no longer consumes `tkRow` after `tkCurrent` incorrectly (was using `tkRows`). Also fixed `tkRow` keyword conflict with `ENABLE ROW LEVEL SECURITY` parsing.
-- **ORDER BY + SELECT projection** — `lowerSelect` now places `irpkSort` before `irpkProject`, enabling `ORDER BY` on columns not present in the `SELECT` list.
-- **UNPIVOT execution** — Verified and fixed missing test coverage for UNPIVOT transformation.
+## [Unreleased] — AI-Native Platform
 
 ### Added
 
-- **JSON operators** — `@>` (contains), `<@` (contained by), `?` (has key), `?|` (has any), `?&` (has all) now supported in lexer, parser, and executor.
-- **Window frame execution** — `ROWS BETWEEN X PRECEDING AND Y FOLLOWING` / `CURRENT ROW` frame boundaries now respected by `FIRST_VALUE` and `LAST_VALUE`.
-- **Session variables** — `SET var_name = value` and `current_setting('var_name')` for connection-scoped key/value storage.
-- **Current user/role** — `current_user` and `current_role` SQL keywords evaluate to the authenticated session's user and role.
-- **Auth-executor bridge** — Wire server and HTTP server now populate `ExecutionContext.currentUser` and `ExecutionContext.currentRole` after JWT/SCRAM authentication.
-- **Multi-tenant RLS** — Row-Level Security policies can now reference `current_user`, `current_role`, and `current_setting('app.tenant_id')` for per-tenant data isolation.
+- **MCP Server (Model Context Protocol)** — STDIO JSON-RPC 2.0 server with 3 AI tools:
+  - `query` — SQL execution with parameterized queries + multi-tenant session vars
+  - `vector_search` — Semantic HNSW vector search with tenant isolation
+  - `schema_inspect` — Table/column/index/RLS policy exploration
+  - Standalone binary: `build/baramcp`
+- **Graph Engine Deep Integration** — `CREATE GRAPH` / `DROP GRAPH` DDL with native adjacency list storage
+  - `GRAPH_TABLE()` SQL function with 7 algorithms: BFS, DFS, PageRank, ShortestPath, Dijkstra, Louvain, Community
+  - INSERT into `_nodes`/`_edges` tables auto-syncs with native Graph objects
+  - Optional `MATCH`, `ALGORITHM`, `START`, `END`, `MAXDEPTH` in GRAPH_TABLE syntax
+- **Chunking + Embedding Pipeline** — Server-side AI data processing:
+  - `chunk()` SQL function — text splitting with configurable size/overlap
+  - `embed_text()` SQL function — calls external embedding API (OpenAI/Ollama compatible)
+  - Auto-embedding on INSERT — when VECTOR column is null, generates from TEXT column
+  - Configurable via env vars: `BARADB_EMBED_ENDPOINT`, `BARADB_EMBED_MODEL`, `BARADB_EMBED_API_KEY`
+- **LangChain ChatMessageHistory** — Python `BaraDBChatHistory` class:
+  - Stores conversation threads in relational table with RLS
+  - Multi-tenant isolation via `tenant_id` + `user_id`
+- **RAG Pipeline Example** — End-to-end Python script (`examples/rag_pipeline.py`):
+  - PDF/text ingestion → chunking → embedding → BaraDB storage → hybrid search → LLM generation
+  - Supports OpenAI and Ollama APIs
+- **AI Agents & NL→SQL** — Server-side LLM integration:
+  - `nl_to_sql()` SQL function — natural language → SQL generation
+  - `schema_prompt()` — generates DDL + sample data for LLM context
+  - Query validation layer — sandbox execution with LIMIT 0 + EXPLAIN
+  - Self-correction loop — error feedback to LLM for fix
+  - Configurable via env vars: `BARADB_LLM_ENDPOINT`, `BARADB_LLM_MODEL`, `BARADB_LLM_API_KEY`
+- **Graph Similarity & Embeddings**:
+  - `similarity_nodes()` — Jaccard/Adamic-Adar similarity between node pairs
+  - `node2vec_embed()` — Random-walk based graph embeddings
+- **Cypher Compatibility Layer**:
+  - `cypher()` SQL function — translates `MATCH (a)-[r]->(b) RETURN ...` to GRAPH_TABLE
+  - Automatic Cypher → BaraQL conversion
+- **German Documentation** — Full documentation set in German (`docs/de/`)
+
+### Changed
+
+- Graph executor upgraded from stub to real BFS/DFS/PageRank/Dijkstra/Louvain execution
+- ExecutionContext extended with `graphs`, `embedder`, `llmClient` fields
+- Graph engine extended with `addNodeWithId`, `addEdgeWithId`, Jaccard, Adamic-Adar, node2vec
 
 ## [1.1.0] — 2026-05-13
 
