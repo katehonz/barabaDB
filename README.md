@@ -30,8 +30,13 @@ single 3.3MB binary with no runtime dependencies.
 | Core language | Python + Cython + Rust | **100% Nim** |
 | Storage backend | PostgreSQL only | **Native multi-engine** |
 | Vector search | pgvector extension | **Built-in HNSW/IVF-PQ** |
-| Graph algorithms | None | **BFS, DFS, Dijkstra, PageRank, Louvain** |
+| Hybrid RAG search | None | **Vector + FTS + RRF reranking** |
+| Graph algorithms | None | **BFS, DFS, Dijkstra, PageRank, Louvain + Cypher** |
+| Graph SQL integration | None | **CREATE GRAPH, GRAPH_TABLE(), SQL-native** |
 | Full-text search | PG FTS extension | **Built-in BM25 + TF-IDF** |
+| AI Agents / NL→SQL | None | **Built-in `nl_to_sql()`, `schema_prompt()`** |
+| MCP Server | None | **STDIO JSON-RPC for AI tools** |
+| LangChain integration | External adapters | **Native Vector Store (Python + JS)** |
 | Embedded mode | No | **Yes (SQLite-like)** |
 | Binary size | ~50MB+ | **3.3MB** |
 | Dependencies | PostgreSQL, Python, many libs | **Zero** |
@@ -328,6 +333,29 @@ Features:
 - **Quantization** — scalar 8-bit/4-bit, product, binary
 - **Metadata filtering** — filter results by key-value pairs
 
+### Hybrid RAG Search
+
+Combine vector similarity with full-text search and reciprocal rank fusion (RRF):
+
+```sql
+-- Hybrid search: vector + FTS reranked with RRF
+SELECT hybrid_search('articles', 'embedding', 'body',
+                     'machine learning', '[0.1, 0.2, ...]', 10) AS results;
+
+-- With metadata pre-filtering (tenant isolation)
+SELECT hybrid_search_filtered('articles', 'embedding', 'body',
+                              'AI trends', '[0.1, 0.2, ...]', 10,
+                              'tenant_id', 'company-a') AS results;
+
+-- Re-rank existing results
+SELECT rerank('machine learning', '[{"id":"1","score":"0.9"}, ...]') AS boosted;
+```
+
+Features:
+- **Reciprocal Rank Fusion** — merges HNSW vector and BM25 FTS rankings
+- **Metadata pre-filtering** — HNSW search with relational column filters
+- **SQL functions** — `hybrid_search()`, `hybrid_search_ids()`, `hybrid_search_filtered()`, `rerank()`
+
 ### Graph Engine
 
 Adjacency list storage with built-in algorithms.
@@ -353,6 +381,158 @@ Algorithms:
 - **PageRank** — node importance ranking
 - **Louvain** — community detection
 - **Pattern matching** — subgraph isomorphism search
+- **Similarity** — Jaccard / Adamic-Adar node similarity
+- **node2vec** — random-walk graph embeddings
+
+### Graph SQL Integration
+
+Graph data is queryable directly through BaraQL with `CREATE GRAPH`, `GRAPH_TABLE()`, and Cypher translation:
+
+```sql
+-- Create a native graph
+CREATE GRAPH social_network;
+
+-- Query via GRAPH_TABLE with algorithms
+SELECT * FROM GRAPH_TABLE(
+  social_network,
+  MATCH (u:User)-[:KNOWS]->(f:User)
+  ALGORITHM BFS
+  START u.id = 1
+  MAXDEPTH 3
+);
+
+-- Translate Cypher to BaraQL SQL
+SELECT cypher('MATCH (u:User)-[:KNOWS]->(f) RETURN f.name') AS result;
+```
+
+Features:
+- **Native graph DDL** — `CREATE GRAPH` / `DROP GRAPH`
+- **SQL GRAPH_TABLE** — `MATCH`, `ALGORITHM`, `START`, `END`, `MAXDEPTH`
+- **Auto-sync** — INSERT into `_nodes` / `_edges` syncs adjacency lists
+- **Cypher layer** — `cypher()` SQL function translates `MATCH...RETURN` to BaraQL
+
+## AI-Native Data Platform
+
+BaraDB is the first database engine with built-in AI primitives — not bolted-on, but native to the query engine. RAG pipelines, LLM integration, and AI agent tools run inside the database with full multi-tenant RLS isolation.
+
+### Natural Language → SQL
+
+Ask questions in plain English (or any language) and get executable BaraQL:
+
+```sql
+-- Generate SQL from natural language
+SELECT nl_to_sql('Show me the top 5 customers by total orders') AS query;
+
+-- Schema-aware prompt for LLM context
+SELECT schema_prompt('orders') AS context;
+```
+
+Features:
+- **Schema-aware** — includes table definitions, indexes, RLS policies in the prompt
+- **Validation layer** — wraps generated SQL in `LIMIT 0` to verify syntax before returning
+- **Self-correction** — on error, feeds the error back to the LLM for an automatic fix
+- **Tenant-aware** — respects `app.tenant_id` session variables
+- **OpenAI + Ollama** — configurable via `BARADB_LLM_ENDPOINT`, `BARADB_LLM_MODEL`, `BARADB_LLM_API_KEY`
+
+### Text Chunking & Auto-Embedding
+
+Built-in text chunking and embedding generation for RAG pipelines:
+
+```sql
+-- Chunk text into overlapping pieces
+SELECT chunk(long_article, 1024, 128) AS chunks;
+
+-- Generate embeddings via external API (OpenAI / Ollama)
+SELECT embed_text('Hello world') AS vector;
+```
+
+Features:
+- **chunk() SQL function** — recursive splitting by paragraph, sentence, or fixed size
+- **embed_text() SQL function** — HTTP embedding client with configurable endpoint
+- **Auto-embedding on INSERT** — when a `VECTOR` column is NULL but `TEXT` is present, embeddings generate automatically
+- **Configurable** via `BARADB_EMBED_ENDPOINT`, `BARADB_EMBED_MODEL`, `BARADB_EMBED_API_KEY`
+
+### MCP Server (Model Context Protocol)
+
+BaraDB exposes an MCP server over STDIO for AI agent integration:
+
+```bash
+./build/baramcp
+```
+
+Tools available to AI agents:
+- **query** — execute parameterized BaraQL with RLS isolation
+- **vector_search** — semantic HNSW search with metadata filtering
+- **schema_inspect** — explore tables, columns, indexes, and RLS policies
+
+```json
+{
+  "name": "vector_search",
+  "arguments": {
+    "table": "docs",
+    "column": "embedding",
+    "query_vector": [0.1, 0.2, ...],
+    "k": 10,
+    "tenant_id": "company-a"
+  }
+}
+```
+
+### LangChain Integration
+
+Native Vector Store implementations for Python and JavaScript:
+
+**Python:**
+```python
+from baradb.langchain_store import BaraDBStore
+
+store = BaraDBStore(
+    client=client,
+    table="docs",
+    embedding_function=OpenAIEmbeddings().embed_query,
+    tenant_id="company-a"
+)
+await store.add_texts(["hello world", "quick brown fox"])
+results = await store.similarity_search("hello", k=5)
+```
+
+**JavaScript:**
+```javascript
+const { BaraDBStore } = require('./baradb_langchain');
+
+const store = new BaraDBStore({
+  client,
+  table: 'docs',
+  embeddingFunction: async (text) => [...],
+  tenantId: 'company-a'
+});
+await store.addDocuments([{ pageContent: 'hello world' }]);
+const results = await store.similaritySearch('hello', 5);
+```
+
+Features:
+- **Hybrid search** — uses `hybrid_search()` / `hybrid_search_filtered()` under the hood
+- **MMR reranking** — `max_marginal_relevance_search()` for diverse results
+- **Multi-tenant** — respects `tenant_id` with RLS isolation
+- **Metadata filters** — pre-filter vector search by relational columns
+
+### Chat Message History
+
+Store conversation threads in BaraDB with RLS isolation:
+
+```python
+from baradb.chat_history import BaraDBChatHistory
+
+history = BaraDBChatHistory(
+    client=client,
+    session_id="session-123",
+    tenant_id="company-a",
+    user_id="user-42"
+)
+history.add_user_message("Hello, AI!")
+history.add_ai_message("Hello, how can I help?")
+messages = history.messages
+```
 
 ### Full-Text Search
 
@@ -1227,7 +1407,13 @@ src/barabadb/
 ├── graph/
 │   ├── engine.nim        # Adjacency-list graph + BFS/DFS/Dijkstra/PageRank
 │   ├── community.nim     # Louvain community detection
-│   └── cypher.nim        # Cypher-like graph query parser
+│   └── cypher.nim        # Cypher-to-SQL translator + query parser
+├── ai/
+│   ├── llm.nim           # LLM client for NL→SQL (OpenAI / Ollama)
+│   ├── chunk.nim         # Text chunking for RAG pipelines
+│   └── embed.nim         # HTTP embedding client (OpenAI / Ollama)
+├── mcp/
+│   └── server.nim        # MCP STDIO server (JSON-RPC 2.0 AI tools)
 ├── fts/
 │   ├── engine.nim        # Inverted index + BM25 + TF-IDF
 │   └── multilang.nim     # Tokenizers for EN, BG, DE, FR, RU
@@ -1278,6 +1464,13 @@ nim c -d:release -r benchmarks/bench_all.nim
 | Cross-modal queries | ✅ | 100% | v1.0.0 |
 | Backup & Recovery | ✅ | 100% | v1.0.0 |
 | Client SDKs (JS, Python, Nim, Rust) | ✅ | 100% | v1.0.0 |
+| Graph SQL Integration (CREATE GRAPH, GRAPH_TABLE, Cypher) | ✅ | 100% | v1.1.2 |
+| Hybrid RAG Search (vector + FTS + RRF reranking) | ✅ | 100% | v1.1.2 |
+| AI Chunking & Auto-Embedding (`chunk()`, `embed_text()`) | ✅ | 100% | v1.1.2 |
+| NL→SQL (`nl_to_sql()`, `schema_prompt()`) | ✅ | 100% | v1.1.2 |
+| MCP Server (STDIO JSON-RPC for AI agents) | ✅ | 100% | v1.1.2 |
+| LangChain Vector Store (Python + JS) | ✅ | 100% | v1.1.2 |
+| Production Hardening (prop tests, fuzz tests, thread safety) | ✅ | 100% | v1.1.2 |
 
 ## Current Limitations
 
