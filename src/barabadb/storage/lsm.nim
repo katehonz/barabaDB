@@ -59,6 +59,8 @@ proc len*(mt: MemTable): int = mt.entries.len
 
 proc put*(mt: var MemTable, key: string, value: seq[byte], timestamp: uint64, deleted: bool = false): bool =
   let entrySize = key.len + value.len + 16
+  if entrySize > mt.maxSize:
+    return false
   if mt.size + entrySize > mt.maxSize and mt.entries.len > 0:
     return false
   let entry = Entry(key: key, value: value, timestamp: timestamp, deleted: deleted)

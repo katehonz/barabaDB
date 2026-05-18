@@ -75,6 +75,9 @@ proc serialize*(msg: GossipMessage): seq[byte] =
   s.close()
 
 proc deserializeGossipMessage*(data: seq[byte]): GossipMessage =
+  const MaxGossipIdLen = 256
+  const MaxGossipNodeCount = 4096
+  const MaxGossipHostLen = 256
   let s = newStringStream(cast[string](data))
   let magic = s.readStr(4)
   if magic != GossipMagic:
@@ -83,16 +86,24 @@ proc deserializeGossipMessage*(data: seq[byte]): GossipMessage =
   if version != GossipProtoVersion:
     raise newException(ValueError, "Unsupported gossip protocol version")
   let senderIdLen = int(s.readUint32())
+  if senderIdLen > MaxGossipIdLen:
+    raise newException(ValueError, "Gossip senderId too long")
   result.senderId = if senderIdLen > 0: s.readStr(senderIdLen) else: ""
   result.senderIncarnation = s.readUint64()
   let nodeCount = int(s.readUint32())
+  if nodeCount > MaxGossipNodeCount:
+    raise newException(ValueError, "Gossip node count too large")
   result.nodes = newSeq[(string, NodeState, uint64, string, int)](nodeCount)
   for i in 0 ..< nodeCount:
     let idLen = int(s.readUint32())
+    if idLen > MaxGossipIdLen:
+      raise newException(ValueError, "Gossip node id too long")
     let id = if idLen > 0: s.readStr(idLen) else: ""
     let state = NodeState(s.readUint32())
     let incarnation = s.readUint64()
     let hostLen = int(s.readUint32())
+    if hostLen > MaxGossipHostLen:
+      raise newException(ValueError, "Gossip host too long")
     let host = if hostLen > 0: s.readStr(hostLen) else: ""
     let port = int(s.readUint32())
     result.nodes[i] = (id, state, incarnation, host, port)

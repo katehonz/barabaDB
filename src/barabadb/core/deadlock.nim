@@ -1,7 +1,6 @@
 ## Deadlock Detection — wait-for graph
 import std/tables
 import std/sets
-import std/algorithm
 import std/locks
 
 type
@@ -68,32 +67,25 @@ proc removeTxn*(dd: DeadlockDetector, txnId: uint64) =
 proc detectCycleUnsafe(dd: DeadlockDetector): seq[uint64] =
   var visited = initHashSet[uint64]()
   var inStack = initHashSet[uint64]()
-  var parent = initTable[uint64, uint64]()
 
-  proc dfs(node: uint64): seq[uint64] =
+  proc dfs(node: uint64, path: seq[uint64]): seq[uint64] =
     visited.incl(node)
     inStack.incl(node)
+    var newPath = path & @[node]
     for neighbor in dd.adjacency.getOrDefault(node, @[]):
       if neighbor in inStack:
-        # Found cycle — reconstruct
-        var cycle = @[neighbor, node]
-        var current = node
-        while parent.getOrDefault(current, 0'u64) != neighbor and
-              parent.getOrDefault(current, 0'u64) != 0:
-          current = parent[current]
-          if current == 0: break
-          cycle.add(current)
-        # Verify we actually closed the cycle back to neighbor
-        if cycle[^1] != neighbor and parent.getOrDefault(cycle[^1], 0'u64) == neighbor:
-          cycle.add(neighbor)
-        elif cycle[^1] != neighbor:
-          # Incomplete cycle — should not happen with valid parent chain
-          return @[]
-        cycle.reverse()
+        # Found cycle — reconstruct from path
+        var cycle: seq[uint64] = @[]
+        var found = false
+        for n in newPath:
+          if n == neighbor:
+            found = true
+          if found:
+            cycle.add(n)
+        cycle.add(neighbor)
         return cycle
       if neighbor notin visited:
-        parent[neighbor] = node
-        let cycle = dfs(neighbor)
+        let cycle = dfs(neighbor, newPath)
         if cycle.len > 0:
           return cycle
     inStack.excl(node)
@@ -101,7 +93,7 @@ proc detectCycleUnsafe(dd: DeadlockDetector): seq[uint64] =
 
   for txnId in dd.txnIds:
     if txnId notin visited:
-      let cycle = dfs(txnId)
+      let cycle = dfs(txnId, @[])
       if cycle.len > 0:
         return cycle
   return @[]

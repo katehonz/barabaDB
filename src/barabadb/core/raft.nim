@@ -115,13 +115,19 @@ proc loadState(node: RaftNode) =
     if votedForLen > 0:
       node.votedFor = s.readStr(votedForLen)
     let logLen = int(s.readUint32())
+    if logLen > 1_000_000:
+      raise newException(ValueError, "Raft log length too large")
     node.log = newSeq[LogEntry](logLen)
     for i in 0..<logLen:
       let term = s.readUint64()
       let index = s.readUint64()
       let cmdLen = int(s.readUint32())
+      if cmdLen > 1_000_000:
+        raise newException(ValueError, "Raft command length too large")
       let cmd = s.readStr(cmdLen)
       let dataLen = int(s.readUint32())
+      if dataLen > 10_000_000:
+        raise newException(ValueError, "Raft data length too large")
       var data = newSeq[byte](dataLen)
       if dataLen > 0:
         if s.readData(addr data[0], dataLen) != dataLen:

@@ -1241,10 +1241,13 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
       let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
       let results = doHybridSearch(ctx, table, vecCol, textCol, queryText, queryVec, k)
-      var parts: seq[string] = @[]
+      var jsonArr = newJArray()
       for (id, score) in results:
-        parts.add("{\"id\":\"" & $id & "\",\"score\":\"" & $score & "\"}")
-      return "[" & parts.join(",") & "]"
+        var obj = newJObject()
+        obj["id"] = %id
+        obj["score"] = %score
+        jsonArr.add(obj)
+      return $jsonArr
     of "hybrid_search_ids":
       if expr.irFuncArgs.len < 6: return ""
       let table = evalExpr(expr.irFuncArgs[0], row, ctx)
