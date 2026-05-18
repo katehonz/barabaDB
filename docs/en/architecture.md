@@ -45,15 +45,20 @@ The TCP and HTTP servers share a single LSMTree instance to ensure data consiste
 ├────────────────────────┬────────────────────────────────┤
 │   TCP Server           │   HTTP Server                  │
 │   (Binary Protocol)    │   (REST API)                   │
-│   Port: 9472           │   Port: 9912                   │
+│   Port: 9472           │   Port: 9912 (TCP + 440)       │
 │   TCP_NODELAY: ON      │   Multi-threaded               │
-└────────────────────────┴────────────────────────────────┘
+├────────────────────────┴────────────────────────────────┤
+│   WebSocket Server                                      │
+│   (Streaming/Pub-Sub)                                   │
+│   Port: 9913 (TCP + 441)                                │
+│   TCP_NODELAY: ON                                       │
+└─────────────────────────────────────────────────────────┘
 ```
 
 **Key optimizations:**
-- **Shared LSMTree** — Both servers operate on the same database instance, eliminating data inconsistency
-- **TCP_NODELAY** — Enabled on both listening and client sockets for lower latency on small messages
-- **Safe byte conversion** — Proper `bytesToString`/`stringToBytes` functions instead of unsafe `cast` operations
+- **Shared LSMTree** — All servers operate on the same database instance, eliminating data inconsistency
+- **TCP_NODELAY** — Enabled on listening and client sockets in TCP/WebSocket servers for lower latency on small messages. The HTTP server (via hunos) also handles `TCP_NODELAY` internally.
+- **Safe byte conversion** — Proper `bytesToString`/`stringToBytes` functions instead of unsafe `cast` operations in the wire protocol
 
 ### Connection Management
 

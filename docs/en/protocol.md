@@ -145,7 +145,7 @@ printf '\x00\x00\x00\x12\x01\x02\x00\x00\x00\x00\x08SELECT 1' > /dev/tcp/localho
 
 ## HTTP/REST API
 
-Base URL: `http://localhost:9470/api/v1`
+Base URL: `http://localhost:9912/api/v1` (HTTP port = TCP port + 440)
 
 ### Rate Limiting
 
@@ -321,7 +321,7 @@ POST /admin/check
 
 ## WebSocket Protocol
 
-URL: `ws://localhost:9471`
+URL: `ws://localhost:9913` (WebSocket port = TCP port + 441)
 
 ### Frame Format
 
@@ -351,7 +351,7 @@ WebSocket text frames contain JSON messages:
 ### Pub/Sub Example
 
 ```javascript
-const ws = new WebSocket('ws://localhost:9471');
+const ws = new WebSocket('ws://localhost:9913');
 
 ws.onopen = () => {
   // Subscribe to table changes
@@ -403,7 +403,7 @@ let error = makeErrorMessage(1, 42, "Syntax error")
 ```nim
 import barabadb/protocol/http
 
-var router = newHttpRouter(port = 9470)
+var router = newHttpRouter(port = 9912)
 
 router.get("/api/users", proc(req: Request): Future[JsonNode] {.async.} =
   return %*[
@@ -422,11 +422,15 @@ router.post("/api/users", proc(req: Request): Future[JsonNode] {.async.} =
 ```nim
 import barabadb/core/websocket
 
-var server = newWsServer(port = 9471)
-server.onMessage = proc(ws: WebSocket, data: seq[byte]) {.gcsafe.} =
-  echo "Received: ", cast[string](data)
-  asyncCheck ws.send(cast[string](data))  # Echo
-asyncCheck server.run()
+proc bytesToString(data: seq[byte]): string =
+  result = newString(data.len)
+  for i in 0..<data.len:
+    result[i] = char(data[i])
+
+var server = newWsServer(config, secretKey)
+server.onInsert = proc(table, key, value: string) =
+  echo "Insert in ", table, ": ", key
+asyncCheck server.run(9913)  # WS port = TCP port + 441
 ```
 
 ### Connection Pool
