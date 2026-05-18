@@ -7,6 +7,8 @@ import std/threadpool
 import std/locks
 import std/os
 import std/strutils
+import std/tables
+import std/algorithm
 import barabadb/core/server
 import barabadb/core/httpserver
 import barabadb/core/config
@@ -18,6 +20,8 @@ import barabadb/core/raft
 import barabadb/core/gossip
 import barabadb/core/replication
 import barabadb/core/disttxn
+import barabadb/tools/repair
+import barabadb/tools/migrate
 
 type
   CompactionManager* = ref object
@@ -43,7 +47,41 @@ proc compact*(cm: CompactionManager) =
   defer: release(cm.db.lock)
   for level in 0 ..< compaction.MaxLevel:
     if cm.strategy.needsCompaction(level):
-      discard cm.strategy.compact(level)
+      let result = cm.strategy.compact(level)
+      if result.outputTables.len == 0:
+        continue
+
+      # Remove compacted input SSTables from LSMTree
+      var newSSTables: seq[SSTable] = @[]
+      var removedPaths = initTable[string, bool]()
+      for t in result.inputTables:
+        removedPaths[t.path] = true
+      for sst in cm.db.sstables:
+        if sst.path notin removedPaths:
+          newSSTables.add(sst)
+
+      # Load and add output SSTables
+      for meta in result.outputTables:
+        try:
+          var sst = loadSSTable(meta.path)
+          let name = splitFile(meta.path).name
+          # Extract numeric id from filename if possible
+          sst.id = try: parseInt(name) except: cm.db.nextSSTableId
+          sst.level = meta.level
+          newSSTables.add(sst)
+          cm.db.nextSSTableId = max(cm.db.nextSSTableId, sst.id + 1)
+        except CatchableError as e:
+          warn("Compaction output SSTable failed to load: " & meta.path & " — " & e.msg)
+
+      newSSTables.sort(proc(a, b: SSTable): int = cmp(a.id, b.id))
+      cm.db.sstables = newSSTables
+
+      # Update MANIFEST
+      inc cm.db.manifestSequence
+      try:
+        writeManifest(cm.db)
+      except CatchableError as e:
+        warn("Failed to write MANIFEST after compaction: " & e.msg)
 
 proc startCompactionLoop*(cm: CompactionManager, intervalMs: int = 60000) {.async.} =
   while true:
@@ -82,6 +120,93 @@ proc wireReplicationDistTxn(rm: ReplicationManager, dtm: DistTxnManager) =
   discard
 
 proc main() =
+  # CLI command dispatch (before server startup)
+  if paramCount() >= 1:
+    let cmd = paramStr(1).toLowerAscii()
+    if cmd == "repair":
+      var dataDir = "data/server"
+      var dryRun = false
+      var quiet = false
+      var i = 2
+      while i <= paramCount():
+        let arg = paramStr(i)
+        if arg.startsWith("--data-dir="):
+          dataDir = arg[11..^1]
+        elif arg == "--dry-run":
+          dryRun = true
+        elif arg == "--quiet" or arg == "-q":
+          quiet = true
+        elif arg == "--help" or arg == "-h":
+          echo repair.HelpText
+          return
+        inc i
+      let rep = repair.runRepair(dataDir, dryRun, quiet)
+      repair.printReport(rep, quiet)
+      if rep.sstablesCorrupt > 0:
+        quit(1)
+      else:
+        quit(0)
+
+    elif cmd == "checkpoint":
+      var dataDir = "data/server"
+      var i = 2
+      while i <= paramCount():
+        let arg = paramStr(i)
+        if arg.startsWith("--data-dir="):
+          dataDir = arg[11..^1]
+        elif arg == "--help" or arg == "-h":
+          echo "BaraDB Checkpoint — Create a consistent storage checkpoint"
+          echo ""
+          echo "USAGE:"
+          echo "  checkpoint [options]"
+          echo ""
+          echo "OPTIONS:"
+          echo "  -d, --data-dir <DIR>  Path to data directory (default: data/server)"
+          echo "  -h, --help            Show this help message"
+          return
+        inc i
+      try:
+        var db = newLSMTree(dataDir)
+        db.checkpoint()
+        db.close()
+        var sstCount = 0
+        for kind, path in walkDir(dataDir / "sstables"):
+          if kind == pcFile: inc sstCount
+        echo "Checkpoint created successfully at: ", dataDir
+        echo "  SSTables: ", sstCount
+        echo "  MANIFEST: ", dataDir / "MANIFEST"
+        quit(0)
+      except CatchableError as e:
+        echo "ERROR: Checkpoint failed: ", e.msg
+        quit(1)
+
+    elif cmd == "migrate":
+      var dataDir = "data/server"
+      var dryRun = false
+      var i = 2
+      while i <= paramCount():
+        let arg = paramStr(i)
+        if arg.startsWith("--data-dir="):
+          dataDir = arg[11..^1]
+        elif arg == "--dry-run":
+          dryRun = true
+        elif arg == "--help" or arg == "-h":
+          echo migrate.HelpText
+          return
+        inc i
+      let result = migrate.runMigration(dataDir, dryRun)
+      echo ""
+      echo "Migration complete:"
+      echo "  Scanned:  ", result.scanned
+      echo "  Migrated: ", result.migrated
+      echo "  Errors:   ", result.errors.len
+      if result.errors.len > 0:
+        for e in result.errors:
+          echo "  ! ", e
+        quit(1)
+      else:
+        quit(0)
+
   var config = loadConfig()
   # Init structured logger from config
   let logLvl = parseEnum[LogLevel]("ll" & capitalizeAscii(config.logLevel))

@@ -26,6 +26,8 @@ import std/strutils
 import std/times
 import std/algorithm
 import std/parseopt
+import std/json
+import barabadb/storage/lsm
 
 type
   Backup* = object
@@ -47,8 +49,11 @@ USAGE:
   backup <command> [options]
 
 COMMANDS:
-  backup   Create a compressed tar.gz snapshot of the data directory.
-           By default archives are named backup_<unixtimestamp>.tar.gz.
+  backup       Create a compressed tar.gz snapshot of the data directory.
+               By default archives are named backup_<unixtimestamp>.tar.gz.
+
+  incremental  Create a consistent incremental backup including MANIFEST,
+               active SSTables, and all WAL segments (current + archive).
 
   restore  Replace the current data directory with contents from a snapshot.
            WARNING: This DESTROYS existing data. Use with care.
@@ -387,6 +392,94 @@ proc printHistory*() =
     echo entry
   echo repeat("-", 80)
 
+proc incrementalBackupDataDir*(dataDir: string, output: string, verbose: bool = false): bool =
+  ## Create incremental backup: MANIFEST + active SSTables + WAL segments.
+  let manifestPath = dataDir / "MANIFEST"
+  if not fileExists(manifestPath):
+    echo "ERROR: MANIFEST not found at ", manifestPath
+    echo "       Run a full backup first, or ensure the database has flushed data."
+    return false
+
+  var filesToInclude: seq[string] = @[manifestPath]
+
+  # Include SSTables from MANIFEST
+  try:
+    let manifest = parseJson(readFile(manifestPath))
+    for node in manifest{"sstables"}:
+      let sstPath = node{"path"}.getStr()
+      if fileExists(sstPath):
+        filesToInclude.add(sstPath)
+      else:
+        if verbose:
+          echo "WARNING: SSTable missing: ", sstPath
+  except CatchableError as e:
+    echo "ERROR: Failed to parse MANIFEST: ", e.msg
+    return false
+
+  # Include current WAL
+  let walPath = dataDir / "wal" / "wal.log"
+  if fileExists(walPath):
+    filesToInclude.add(walPath)
+
+  # Include WAL archive
+  let walArchiveDir = dataDir / "wal" / "wal_archive"
+  if dirExists(walArchiveDir):
+    for kind, path in walkDir(walArchiveDir):
+      if kind == pcFile and path.endsWith(".log"):
+        filesToInclude.add(path)
+
+  if filesToInclude.len == 0:
+    echo "ERROR: No files to backup"
+    return false
+
+  # Verify all SSTables before archiving
+  var verifyErrors = 0
+  for path in filesToInclude:
+    if path.endsWith(".sst"):
+      let (ok, msg) = verifySSTable(path)
+      if not ok:
+        echo "ERROR: SSTable verification failed: ", msg
+        inc verifyErrors
+      elif verbose:
+        echo "  ✓ ", extractFilename(path), " — CRC OK"
+  if verifyErrors > 0:
+    echo "ERROR: ", verifyErrors, " SSTable(s) failed verification. Backup aborted."
+    return false
+
+  # Write file list for tar -T
+  let fileListPath = output & ".files"
+  var f: File
+  if open(f, fileListPath, fmWrite):
+    for path in filesToInclude:
+      f.writeLine(path)
+    close(f)
+  else:
+    echo "ERROR: Cannot write file list: ", fileListPath
+    return false
+
+  let tarCmd = "tar -czf " & quoteShell(output) & " -T " & quoteShell(fileListPath)
+  if verbose:
+    echo "Running: ", tarCmd
+    echo "Including ", filesToInclude.len, " files"
+    for path in filesToInclude:
+      echo "  + ", path
+
+  let (outStr, exitCode) = execCmdEx(tarCmd)
+  removeFile(fileListPath)
+
+  if exitCode != 0:
+    echo "ERROR: tar failed with exit code ", exitCode
+    if outStr.len > 0:
+      echo outStr
+    return false
+
+  let size = getFileSize(output)
+  echo "Incremental backup created successfully:"
+  echo "  File:   ", output
+  echo "  Size:   ", formatBytes(size)
+  echo "  Files:  ", filesToInclude.len
+  return true
+
 # =============================================================================
 # CLI Entry Point
 # =============================================================================
@@ -401,6 +494,7 @@ when isMainModule:
     verbose = false
     dryRun = false
     force = false
+    online = false
 
   for kind, key, val in getopt():
     case kind
@@ -426,6 +520,7 @@ when isMainModule:
         except: quit("ERROR: --level must be a number", 1)
       of "dry-run": dryRun = true
       of "force", "f": force = true
+      of "online": online = true
       of "verbose", "v": verbose = true
       of "help", "h":
         echo HELP_TEXT
@@ -441,9 +536,31 @@ when isMainModule:
   case command
   of "backup":
     let outputFile = if target.len > 0: target else: "backup_" & $getTime().toUnix() & ".tar.gz"
-    let ok = backupDataDir(dataDir, outputFile, excludes, compression, verbose)
+    if online:
+      echo "Creating online backup with checkpoint..."
+      echo "  Data dir: ", dataDir
+      echo "  Output:   ", outputFile
+      try:
+        var db = newLSMTree(dataDir)
+        db.checkpoint()
+        db.close()
+        echo "Checkpoint complete."
+      except CatchableError as e:
+        echo "ERROR: Checkpoint failed: ", e.msg
+        quit(1)
+      let ok = incrementalBackupDataDir(dataDir, outputFile, verbose)
+      if not ok:
+        quit("Online backup failed", 1)
+    else:
+      let ok = backupDataDir(dataDir, outputFile, excludes, compression, verbose)
+      if not ok:
+        quit("Backup failed", 1)
+
+  of "incremental":
+    let outputFile = if target.len > 0: target else: "backup_inc_" & $getTime().toUnix() & ".tar.gz"
+    let ok = incrementalBackupDataDir(dataDir, outputFile, verbose)
     if not ok:
-      quit("Backup failed", 1)
+      quit("Incremental backup failed", 1)
 
   of "restore":
     if target.len == 0:

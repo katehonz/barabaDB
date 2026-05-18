@@ -1,199 +1,214 @@
 # Backup & Recovery
 
-## Online Snapshots
+BaraDB provides multiple backup strategies ranging from full snapshots to incremental and online consistent backups.
 
-BaraDB supports online snapshots without stopping the server. The snapshot
-captures a consistent point-in-time view using MVCC.
+## Architecture
 
-### Creating a Snapshot
-
-```nim
-import barabadb/core/backup
-
-var bm = newBackupManager()
-bm.createSnapshot("/backup/baradb_2025-01-15")
+```
+┌─────────────────────────────────────────┐
+│  Data Directory                         │
+│  ├── MANIFEST          (atomic catalog) │
+│  ├── sstables/         (SSTable v3 CRC) │
+│  │   ├── 1.sst                          │
+│  │   └── 2.sst                          │
+│  └── wal/                               │
+│      ├── wal.log       (active segment) │
+│      └── wal_archive/  (rotated segments│
+└─────────────────────────────────────────┘
 ```
 
-### Via CLI
+## SSTable Integrity (v3 CRC Footer)
 
-```bash
-./build/baradadb --snapshot --output=/backup/snapshot.db
+Every SSTable file written by BaraDB includes a CRC32 footer:
+
+```
+[Header] 36 bytes
+  magic, version(3), entryCount, level,
+  indexOffset, bloomOffset, footerOffset
+[Data Block]
+[Index Block]
+[Bloom Block]
+[Footer] 16 bytes
+  dataCrc32, indexCrc32, bloomCrc32, reserved
 ```
 
-### Via HTTP API
+This enables independent verification of each SSTable:
 
 ```bash
-curl -X POST http://localhost:9470/api/backup \
-  -H "Content-Type: application/json" \
-  -d '{"destination": "/backup/snapshot.db"}'
+# Via Nim API
+import barabadb/storage/lsm
+let (ok, msg) = verifySSTable("data/sstables/1.sst")
 ```
 
-### Automated Backups
+## Storage Repair (`baradb repair`)
 
-Use cron for scheduled backups:
+If corruption is suspected, run the repair tool:
 
 ```bash
-# Daily snapshot at 2 AM
-0 2 * * * /usr/local/bin/baradadb --snapshot --output=/backup/baradb_$(date +\%Y\%m\%d).db
+# Dry run — preview only
+./build/baradadb repair --data-dir=./data --dry-run
 
-# Keep last 7 days
-find /backup -name "baradb_*.db" -mtime +7 -delete
+# Full repair — verify, move corrupt files, replay WAL
+./build/baradadb repair --data-dir=./data
 ```
 
-## Point-in-Time Recovery (PITR)
+**What repair does:**
+1. Scans all `sstables/*.sst` and verifies CRC
+2. Moves corrupt SSTables to `data/corrupt/`
+3. Replays WAL to recover unflushed committed data
+4. Reports results
 
-BaraDB uses the Write-Ahead Log (WAL) for point-in-time recovery.
+## MANIFEST Catalog
 
-### WAL Archiving
+The `MANIFEST` file is the single source of truth for active SSTables. It is updated atomically on every flush and compaction.
 
-Enable continuous WAL archiving:
+```json
+{
+  "version": 1,
+  "sequence": 42,
+  "createdAt": 1779103266,
+  "sstables": [
+    {"id": 1, "path": "sstables/1.sst", "level": 0, "minKey": "a", "maxKey": "z", "entryCount": 100}
+  ]
+}
+```
+
+Benefits:
+- **Consistent view** — no orphan SSTables after crash
+- **Fast startup** — load from MANIFEST instead of directory scan
+- **Orphan detection** — `checkStorageConsistency()` reports extra/missing files
+
+## WAL Rotation
+
+The Write-Ahead Log rotates when it reaches 64MB:
+
+```
+wal/wal.log          → active segment
+wal/wal_archive/
+  ├── wal.000001.log
+  ├── wal.000002.log
+  └── wal.000003.log
+```
+
+Rotation happens:
+- Every 1000 WAL entries (lightweight size check)
+- On every `flush` / `checkpoint`
+
+## Checkpoint
+
+A checkpoint creates a consistent storage boundary without stopping the server:
 
 ```bash
-BARADB_WAL_ARCHIVE_DIR=/backup/wal \
-BARADB_WAL_ARCHIVE_INTERVAL_MS=60000 \
+./build/baradadb checkpoint --data-dir=./data
+```
+
+**How it works:**
+1. Freeze memtable (swap to immutable, new memtable for writes)
+2. Flush frozen memtable to SSTable
+3. Rotate WAL
+4. Write MANIFEST
+
+The freeze takes **< 1ms**; the flush proceeds concurrently with writes.
+
+## Backup Commands
+
+### Full Backup (tar.gz)
+
+```bash
+./build/backup backup --data-dir=./data --output=backup_$(date +%s).tar.gz
+```
+
+Archives the entire data directory.
+
+### Incremental Backup
+
+```bash
+./build/backup incremental --data-dir=./data --output=backup_inc_$(date +%s).tar.gz
+```
+
+Includes only:
+- `MANIFEST`
+- Active SSTables (from MANIFEST)
+- Current WAL (`wal/wal.log`)
+- WAL archive (`wal/wal_archive/*.log`)
+
+All SSTables are **CRC-verified** before archiving.
+
+### Online Consistent Backup
+
+```bash
+./build/baradadb backup --online --output=backup_online_$(date +%s).tar.gz
+```
+
+Equivalent to:
+1. `checkpoint`
+2. `incremental backup`
+
+**Safe to run while the server is stopped.** If the server is running, use `backup incremental` instead.
+
+## SSTable Version Migration
+
+If you have legacy v1/v2 SSTables, migrate them to v3:
+
+```bash
+# Preview
+./build/baradadb migrate --data-dir=./data --dry-run
+
+# Migrate
+./build/baradadb migrate --data-dir=./data
+```
+
+Migration rewrites each legacy SSTable with the current v3 format (CRC footer) and updates the MANIFEST.
+
+## Recovery Procedures
+
+### Scenario 1: Corrupt SSTable Detected
+
+```bash
+# Repair moves corrupt files and replays WAL
+./build/baradadb repair --data-dir=./data
+
+# Verify consistency
+./build/baradadb repair --data-dir=./data --dry-run
+```
+
+### Scenario 2: Restore from Backup
+
+```bash
+# Stop the server
+# Extract backup
+tar -xzf backup_1234567890.tar.gz -C ./data
+
+# Restart — LSMTree loads from MANIFEST
 ./build/baradadb
 ```
 
-### Recovery from Checkpoint + WAL
+### Scenario 3: Complete Data Loss
 
 ```bash
-# Restore from snapshot
-./build/baradadb --recover \
-  --checkpoint=/backup/snapshot.db \
-  --wal-dir=/backup/wal
+# 1. Extract latest backup
+tar -xzf backup_latest.tar.gz -C ./data
 
-# Recovery to specific LSN
-./build/baradadb --recover \
-  --checkpoint=/backup/snapshot.db \
-  --wal-dir=/backup/wal \
-  --target-lsn=15420
+# 2. Run repair to replay any available WAL
+./build/baradadb repair --data-dir=./data
 
-# Recovery to specific time
-./build/baradadb --recover \
-  --checkpoint=/backup/snapshot.db \
-  --wal-dir=/backup/wal \
-  --target-time="2025-01-15T10:30:00Z"
-```
-
-### Recovery via SQL
-
-You can also recover directly via BaraQL:
-
-```sql
-RECOVER TO TIMESTAMP '2026-05-07T12:00:00';
-```
-
-### Incremental Backups
-
-Incremental backups only copy changed SSTables:
-
-```bash
-./build/baradadb --backup-incremental \
-  --last-backup=/backup/previous \
-  --output=/backup/incremental_$(date +%Y%m%d)
-```
-
-## Replication as Backup
-
-For continuous protection, use streaming replication:
-
-### Primary
-
-```bash
-BARADB_REPLICATION_ENABLED=true \
-BARADB_REPLICATION_MODE=async \
+# 3. Start server
 ./build/baradadb
-```
-
-### Replica
-
-```bash
-BARADB_REPLICATION_ENABLED=true \
-BARADB_REPLICATION_PRIMARY=primary:9472 \
-./build/baradadb
-```
-
-## Disaster Recovery
-
-### Recovery Procedures
-
-#### Scenario 1: Single File Corruption
-
-```bash
-# Identify corrupted SSTable from logs
-# Restore specific SSTable from backup
-cp /backup/sstables/000012.sst ./data/sstables/
-
-# Rebuild index
-./build/baradadb --rebuild-index
-```
-
-#### Scenario 2: Complete Data Loss
-
-```bash
-# 1. Restore latest snapshot
-cp /backup/snapshot.db ./data/
-
-# 2. Replay WAL
-./build/baradadb --recover --wal-dir=/backup/wal
-
-# 3. Verify
-curl http://localhost:9470/health
-```
-
-#### Scenario 3: Cluster Node Failure
-
-```bash
-# For Raft clusters, simply start a new node
-BARADB_RAFT_NODE_ID=newnode \
-BARADB_RAFT_PEERS=node1:9001,node2:9001 \
-./build/baradadb
-
-# The new node will catch up via Raft log replication
-```
-
-## Backup Verification
-
-Always verify backups:
-
-```bash
-# Restore to temporary directory
-./build/baradadb --recover \
-  --checkpoint=/backup/snapshot.db \
-  --data-dir=/tmp/verify_data
-
-# Run consistency check
-curl http://localhost:9470/api/admin/check
 ```
 
 ## Storage Requirements
 
 | Backup Type | Size | Frequency | Retention |
 |-------------|------|-----------|-----------|
-| Full snapshot | ~1× data size | Daily | 7 days |
-| Incremental | ~0.1× data size | Hourly | 24 hours |
-| WAL archive | ~0.05× data size / day | Continuous | 30 days |
+| Full tar.gz | ~1× data size | Weekly | 4 weeks |
+| Incremental | ~0.05× data size | Hourly | 24 hours |
+| WAL archive | ~0.02× data size / day | Continuous | 7 days |
 
 ## Best Practices
 
-1. **Test restores regularly** — A backup you can't restore is useless
-2. **Store backups offsite** — Use S3, GCS, or Azure Blob
-3. **Encrypt backups** — Use `gpg` or OS-level encryption
-4. **Monitor backup jobs** — Alert on failed backups
-5. **Document RTO/RPO** — Know your recovery time and point objectives
-
-### Cloud Backup Upload
-
-```bash
-# Upload to S3
-aws s3 cp /backup/snapshot.db s3://my-bucket/baradb/
-
-# Upload to GCS
-gsutil cp /backup/snapshot.db gs://my-bucket/baradb/
-
-# Upload to Azure
-az storage blob upload \
-  --container-name backups \
-  --file /backup/snapshot.db \
-  --name baradb/snapshot.db
-```
+1. **Run repair after unclean shutdown** — `./build/baradadb repair`
+2. **Migrate legacy SSTables** — `./build/baradadb migrate`
+3. **Test restores regularly** — A backup you can't restore is useless
+4. **Use incremental + checkpoint** — For frequent consistent snapshots
+5. **Store backups offsite** — S3, GCS, or another server
+6. **Monitor MANIFEST sequence** — Should grow monotonically with flushes

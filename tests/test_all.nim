@@ -119,6 +119,84 @@ suite "LSM-Tree Storage":
     check db.contains(key)
     db.close()
 
+suite "SSTable Integrity":
+  test "SSTable v3 CRC verified on write and load":
+    let testDir = "/tmp/baradb_test_lsm_crc"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 1024)
+    db.put("key1", cast[seq[byte]]("value1"))
+    db.put("key2", cast[seq[byte]]("value2"))
+    db.flush()
+    let sstPath = testDir / "sstables" / "1.sst"
+    let (ok, msg) = verifySSTable(sstPath)
+    check ok == true
+    check msg.contains("v3 CRC verified")
+    db.close()
+    # Reopen and verify data survives
+    var db2 = newLSMTree(testDir, 1024)
+    let (found, val) = db2.get("key1")
+    check found
+    check cast[string](val) == "value1"
+    db2.close()
+
+  test "Corrupted SSTable is rejected by verifySSTable and loadSSTable":
+    let testDir = "/tmp/baradb_test_lsm_crc2"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 1024)
+    db.put("key1", cast[seq[byte]]("value1"))
+    db.flush()
+    db.close()
+    let sstPath = testDir / "sstables" / "1.sst"
+    var f = open(sstPath, fmReadWriteExisting)
+    setFilePos(f, 40)
+    var b: byte = 0
+    discard readBuffer(f, addr b, 1)
+    b = b xor 0xFF
+    setFilePos(f, 40)
+    discard writeBuffer(f, addr b, 1)
+    close(f)
+    let (ok, msg) = verifySSTable(sstPath)
+    check ok == false
+    check msg.contains("CRC mismatch")
+    expect ValueError:
+      discard loadSSTable(sstPath)
+
+suite "MANIFEST Catalog":
+  test "MANIFEST written and loaded on reopen":
+    let testDir = "/tmp/baradb_test_manifest"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 512)
+    db.put("a", cast[seq[byte]]("val_a"))
+    db.put("b", cast[seq[byte]]("val_b"))
+    db.flush()
+    db.put("c", cast[seq[byte]]("val_c"))
+    db.flush()
+    let manifestPath = testDir / "MANIFEST"
+    check fileExists(manifestPath)
+    db.close()
+    var db2 = newLSMTree(testDir, 512)
+    check db2.sstableCount() == 2
+    let (found, val) = db2.get("a")
+    check found
+    check cast[string](val) == "val_a"
+    db2.close()
+
+  test "Orphan SSTable detected by checkStorageConsistency":
+    let testDir = "/tmp/baradb_test_manifest_orphan"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 512)
+    db.put("x", cast[seq[byte]]("val_x"))
+    db.flush()
+    # Create orphan file
+    let orphan = testDir / "sstables" / "99.sst"
+    var f = open(orphan, fmWrite)
+    f.write("fake")
+    close(f)
+    let issues = checkStorageConsistency(db)
+    check issues.len == 1
+    check issues[0].contains("Orphan")
+    db.close()
+
 suite "BaraQL Lexer":
   test "Tokenize simple SELECT":
     let tokens = lex.tokenize("SELECT name FROM users WHERE age > 18")

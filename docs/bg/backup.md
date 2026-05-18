@@ -1,198 +1,214 @@
 # Backup и Възстановяване
 
-## Online Snapshots
+BaraDB предоставя няколко стратегии за backup — от пълни snapshot-ове до инкрементални и online consistent backups.
 
-BaraDB поддържа online snapshots без спиране на сървъра. Snapshot-ът заснема консистентен изглед към момент във времето чрез MVCC.
+## Архитектура
 
-### Създаване на Snapshot
-
-```nim
-import barabadb/core/backup
-
-var bm = newBackupManager()
-bm.createSnapshot("/backup/baradb_2025-01-15")
+```
+┌─────────────────────────────────────────┐
+│  Data Directory                         │
+│  ├── MANIFEST          (atomic catalog) │
+│  ├── sstables/         (SSTable v3 CRC) │
+│  │   ├── 1.sst                          │
+│  │   └── 2.sst                          │
+│  └── wal/                               │
+│      ├── wal.log       (активен сегмент)│
+│      └── wal_archive/  (ротирани сегменти
+└─────────────────────────────────────────┘
 ```
 
-### Чрез CLI
+## SSTable Integrity (v3 CRC Footer)
+
+Всеки SSTable файл, записан от BaraDB, включва CRC32 footer:
+
+```
+[Header] 36 байта
+  magic, version(3), entryCount, level,
+  indexOffset, bloomOffset, footerOffset
+[Data Block]
+[Index Block]
+[Bloom Block]
+[Footer] 16 байта
+  dataCrc32, indexCrc32, bloomCrc32, reserved
+```
+
+Това позволява независима проверка на всеки SSTable:
 
 ```bash
-./build/baradadb --snapshot --output=/backup/snapshot.db
+# Чрез Nim API
+import barabadb/storage/lsm
+let (ok, msg) = verifySSTable("data/sstables/1.sst")
 ```
 
-### Чрез HTTP API
+## Storage Repair (`baradb repair`)
+
+При съмнение за повреда, пуснете repair инструмента:
 
 ```bash
-curl -X POST http://localhost:9470/api/backup \
-  -H "Content-Type: application/json" \
-  -d '{"destination": "/backup/snapshot.db"}'
+# Dry run — само преглед
+./build/baradadb repair --data-dir=./data --dry-run
+
+# Пълен ремонт — проверка, преместване на битите файлове, WAL replay
+./build/baradadb repair --data-dir=./data
 ```
 
-### Автоматизирани Backups
+**Какво прави repair:**
+1. Сканира всички `sstables/*.sst` и проверява CRC
+2. Премества корумпираните SSTables в `data/corrupt/`
+3. Пуска WAL replay за възстановяване на незаписани данни
+4. Докладва резултати
 
-Използвайте cron за планирани backups:
+## MANIFEST Каталог
+
+Файлът `MANIFEST` е единственият източник на истина за активните SSTables. Обновява се атомично при всеки flush и compaction.
+
+```json
+{
+  "version": 1,
+  "sequence": 42,
+  "createdAt": 1779103266,
+  "sstables": [
+    {"id": 1, "path": "sstables/1.sst", "level": 0, "minKey": "a", "maxKey": "z", "entryCount": 100}
+  ]
+}
+```
+
+Предимства:
+- **Консистентен изглед** — няма orphan SSTables след crash
+- **Бързо стартиране** — зарежда от MANIFEST вместо scan на директория
+- **Откриване на orphans** — `checkStorageConsistency()` докладва излишни/липсващи файлове
+
+## WAL Ротация
+
+Write-Ahead Log се ротира при достигане на 64MB:
+
+```
+wal/wal.log          → активен сегмент
+wal/wal_archive/
+  ├── wal.000001.log
+  ├── wal.000002.log
+  └── wal.000003.log
+```
+
+Ротацията се случва:
+- На всеки 1000 WAL записа (лека проверка на размер)
+- При всеки `flush` / `checkpoint`
+
+## Checkpoint
+
+Checkpoint създава консистентна граница на storage без спиране на сървъра:
 
 ```bash
-# Ежедневен snapshot в 2 сутринта
-0 2 * * * /usr/local/bin/baradadb --snapshot --output=/backup/baradb_$(date +\%Y\%m\%d).db
-
-# Запазване на последните 7 дни
-find /backup -name "baradb_*.db" -mtime +7 -delete
+./build/baradadb checkpoint --data-dir=./data
 ```
 
-## Point-in-Time Recovery (PITR)
+**Как работи:**
+1. Freeze на memtable (swap към immutable, нов memtable за writes)
+2. Flush на frozen memtable към SSTable
+3. Ротация на WAL
+4. Запис на MANIFEST
 
-BaraDB използва Write-Ahead Log (WAL) за възстановяване до момент във времето.
+Freeze-ът отнема **< 1ms**; flush-ът продължава паралелно с writes.
 
-### WAL Архивиране
+## Backup Команди
 
-Включете непрекъснато WAL архивиране:
+### Пълен Backup (tar.gz)
 
 ```bash
-BARADB_WAL_ARCHIVE_DIR=/backup/wal \
-BARADB_WAL_ARCHIVE_INTERVAL_MS=60000 \
-./build/baradadb
+./build/backup backup --data-dir=./data --output=backup_$(date +%s).tar.gz
 ```
 
-### Възстановяване от Checkpoint + WAL
+Архивира цялата data директория.
+
+### Инкрементален Backup
 
 ```bash
-# Възстановяване от snapshot
-./build/baradadb --recover \
-  --checkpoint=/backup/snapshot.db \
-  --wal-dir=/backup/wal
-
-# Възстановяване до конкретен LSN
-./build/baradadb --recover \
-  --checkpoint=/backup/snapshot.db \
-  --wal-dir=/backup/wal \
-  --target-lsn=15420
-
-# Възстановяване до конкретно време
-./build/baradadb --recover \
-  --checkpoint=/backup/snapshot.db \
-  --wal-dir=/backup/wal \
-  --target-time="2025-01-15T10:30:00Z"
+./build/backup incremental --data-dir=./data --output=backup_inc_$(date +%s).tar.gz
 ```
 
-### Възстановяване чрез SQL
+Включва само:
+- `MANIFEST`
+- Активни SSTables (от MANIFEST)
+- Текущ WAL (`wal/wal.log`)
+- WAL архив (`wal/wal_archive/*.log`)
 
-Можете също да възстановявате директно чрез BaraQL:
+Всички SSTables се **проверяват с CRC** преди архивиране.
 
-```sql
-RECOVER TO TIMESTAMP '2026-05-07T12:00:00';
-```
-
-### Инкрементални Backups
-
-Инкременталните backups копират само променени SSTables:
+### Online Consistent Backup
 
 ```bash
-./build/baradadb --backup-incremental \
-  --last-backup=/backup/previous \
-  --output=/backup/incremental_$(date +%Y%m%d)
+./build/baradadb backup --online --output=backup_online_$(date +%s).tar.gz
 ```
 
-## Репликация като Backup
+Еквивалентно на:
+1. `checkpoint`
+2. `incremental backup`
 
-За непрекъсната защита използвайте streaming репликация:
+**Безопасно за пускане, когато сървърът е спрян.** Ако сървърът работи, използвайте `backup incremental`.
 
-### Primary
+## Миграция на SSTable Версии
+
+Ако имате legacy v1/v2 SSTables, мигрирайте ги към v3:
 
 ```bash
-BARADB_REPLICATION_ENABLED=true \
-BARADB_REPLICATION_MODE=async \
-./build/baradadb
+# Преглед
+./build/baradadb migrate --data-dir=./data --dry-run
+
+# Миграция
+./build/baradadb migrate --data-dir=./data
 ```
 
-### Replica
+Миграцията пренаписва всеки legacy SSTable в текущия v3 формат (CRC footer) и обновява MANIFEST.
+
+## Процедури за Възстановяване
+
+### Сценарий 1: Открит е Корумпиран SSTable
 
 ```bash
-BARADB_REPLICATION_ENABLED=true \
-BARADB_REPLICATION_PRIMARY=primary:9472 \
-./build/baradadb
-```
-
-## Disaster Recovery
-
-### Процедури за Възстановяване
-
-#### Сценарий 1: Повреда на Единичен Файл
-
-```bash
-# Идентифициране на повреден SSTable от логовете
-# Възстановяване на конкретен SSTable от backup
-cp /backup/sstables/000012.sst ./data/sstables/
-
-# Възстановяване на индекса
-./build/baradadb --rebuild-index
-```
-
-#### Сценарий 2: Пълна Загуба на Данни
-
-```bash
-# 1. Възстановяване на последния snapshot
-cp /backup/snapshot.db ./data/
-
-# 2. Преиграване на WAL
-./build/baradadb --recover --wal-dir=/backup/wal
-
-# 3. Проверка
-curl http://localhost:9470/health
-```
-
-#### Сценарий 3: Отказ на Възел в Клъстер
-
-```bash
-# За Raft клъстери, просто стартирайте нов възел
-BARADB_RAFT_NODE_ID=newnode \
-BARADB_RAFT_PEERS=node1:9001,node2:9001 \
-./build/baradadb
-
-# Новият възел ще навакса чрез Raft log репликация
-```
-
-## Верификация на Backup
-
-Винаги проверявайте backups:
-
-```bash
-# Възстановяване във временна директория
-./build/baradadb --recover \
-  --checkpoint=/backup/snapshot.db \
-  --data-dir=/tmp/verify_data
+# Repair премества битите файлове и пуска WAL replay
+./build/baradadb repair --data-dir=./data
 
 # Проверка на консистентност
-curl http://localhost:9470/api/admin/check
+./build/baradadb repair --data-dir=./data --dry-run
+```
+
+### Сценарий 2: Възстановяване от Backup
+
+```bash
+# Спиране на сървъра
+# Разархивиране на backup
+tar -xzf backup_1234567890.tar.gz -C ./data
+
+# Рестарт — LSMTree зарежда от MANIFEST
+./build/baradadb
+```
+
+### Сценарий 3: Пълна Загуба на Данни
+
+```bash
+# 1. Разархивиране на последния backup
+tar -xzf backup_latest.tar.gz -C ./data
+
+# 2. Repair за replay на наличния WAL
+./build/baradadb repair --data-dir=./data
+
+# 3. Стартиране на сървъра
+./build/baradadb
 ```
 
 ## Изисквания за Съхранение
 
 | Тип Backup | Размер | Честота | Задържане |
 |------------|--------|---------|-----------|
-| Пълен snapshot | ~1× размер на данните | Ежедневно | 7 дни |
-| Инкрементален | ~0.1× размер на данните | На всеки час | 24 часа |
-| WAL архив | ~0.05× размер на данните / ден | Непрекъснато | 30 дни |
+| Пълен tar.gz | ~1× размер на данните | Седмично | 4 седмици |
+| Инкрементален | ~0.05× размер на данните | На всеки час | 24 часа |
+| WAL архив | ~0.02× размер на данните / ден | Непрекъснато | 7 дни |
 
 ## Най-добри Практики
 
-1. **Тествайте възстановяването редовно** — Backup, който не може да бъде възстановен, е безполезен
-2. **Съхранявайте backups извън локацията** — Използвайте S3, GCS или Azure Blob
-3. **Криптирайте backups** — Използвайте `gpg` или криптиране на ниво ОС
-4. **Мониторирайте backup задачите** — Алармирайте при неуспешни backups
-5. **Документирайте RTO/RPO** — Знайте целите си за време и точка на възстановяване
-
-### Качване на Backup в Облак
-
-```bash
-# Качване в S3
-aws s3 cp /backup/snapshot.db s3://my-bucket/baradb/
-
-# Качване в GCS
-gsutil cp /backup/snapshot.db gs://my-bucket/baradb/
-
-# Качване в Azure
-az storage blob upload \
-  --container-name backups \
-  --file /backup/snapshot.db \
-  --name baradb/snapshot.db
-```
+1. **Пускайте repair след некоректно спиране** — `./build/baradadb repair`
+2. **Мигрирайте legacy SSTables** — `./build/baradadb migrate`
+3. **Тествайте възстановяването редовно** — Backup, който не може да бъде възстановен, е безполезен
+4. **Използвайте incremental + checkpoint** — За чести консистентни snapshot-ове
+5. **Съхранявайте backups извън локацията** — S3, GCS или друг сървър
+6. **Следете MANIFEST sequence** — Трябва да расте монотонно с flush-овете
