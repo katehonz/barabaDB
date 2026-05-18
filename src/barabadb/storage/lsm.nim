@@ -375,11 +375,13 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
               of wekPut:
                 if not result.memTable.put(key, value, timestamp):
                   result.flushUnsafe()
-                  discard result.memTable.put(key, value, timestamp)
+                  if not result.memTable.put(key, value, timestamp):
+                    raise newException(IOError, "WAL recovery: failed to insert key into memtable")
               of wekDelete:
                 if not result.memTable.put(key, @[], timestamp, deleted = true):
                   result.flushUnsafe()
-                  discard result.memTable.put(key, @[], timestamp, deleted = true)
+                  if not result.memTable.put(key, @[], timestamp, deleted = true):
+                    raise newException(IOError, "WAL recovery: failed to insert delete tombstone into memtable")
               of wekCommit:
                 discard
               of wekCheckpoint:
@@ -401,7 +403,8 @@ proc put*(db: LSMTree, key: string, value: seq[byte]) =
       db.flushUnsafe()
     db.immutableMem = db.memTable
     db.memTable = newMemTable(db.memMaxSize)
-    discard db.memTable.put(key, value, ts)
+    if not db.memTable.put(key, value, ts):
+      raise newException(IOError, "LSM put failed after flush")
 
 proc delete*(db: LSMTree, key: string) =
   let ts = uint64(getMonoTime().ticks())
@@ -416,7 +419,8 @@ proc delete*(db: LSMTree, key: string) =
       db.flushUnsafe()
     db.immutableMem = db.memTable
     db.memTable = newMemTable(db.memMaxSize)
-    discard db.memTable.put(key, @[], ts, deleted = true)
+    if not db.memTable.put(key, @[], ts, deleted = true):
+      raise newException(IOError, "LSM delete failed after flush")
 
 proc putUnsafe*(db: LSMTree, key: string, value: seq[byte], deleted: bool = false) =
   ## Direct LSM insert without WAL logging — used by recovery.
@@ -428,7 +432,8 @@ proc putUnsafe*(db: LSMTree, key: string, value: seq[byte], deleted: bool = fals
       db.flushUnsafe()
     db.immutableMem = db.memTable
     db.memTable = newMemTable(db.memMaxSize)
-    discard db.memTable.put(key, value, ts, deleted)
+    if not db.memTable.put(key, value, ts, deleted):
+      raise newException(IOError, "LSM putUnsafe failed after flush")
 
 proc deleteUnsafe*(db: LSMTree, key: string) =
   putUnsafe(db, key, @[], deleted = true)

@@ -69,16 +69,18 @@ proc splitChild[K, V](parent: BTreeNode[K, V], index: int, order: int) =
   else:
     child.keys.setLen(mid)
 
-proc insertNonFull[K, V](node: BTreeNode[K, V], key: K, value: V, order: int) =
+proc insertNonFull[K, V](node: BTreeNode[K, V], key: K, value: V, order: int): bool =
+  ## Returns true if a new key was inserted, false if existing key got a new value.
   var i = node.keys.len - 1
   if node.isLeaf:
     while i >= 0 and key < node.keys[i]:
       dec i
     if i >= 0 and key == node.keys[i]:
       node.values[i].add(value)
-      return
+      return false
     node.keys.insert(key, i + 1)
     node.values.insert(@[value], i + 1)
+    return true
   else:
     while i >= 0 and key < node.keys[i]:
       dec i
@@ -87,20 +89,22 @@ proc insertNonFull[K, V](node: BTreeNode[K, V], key: K, value: V, order: int) =
       splitChild(node, i, order)
       if key > node.keys[i]:
         inc i
-    insertNonFull(node.children[i], key, value, order)
+    return insertNonFull(node.children[i], key, value, order)
 
 proc insert*[K, V](btree: var BTreeIndex[K, V], key: K, value: V) =
   acquire(btree.lock)
   try:
+    var inserted = false
     if btree.root.keys.len == btree.order - 1:
       var newRoot = newBTreeNode[K, V](isLeaf = false)
       newRoot.children.add(btree.root)
       splitChild(newRoot, 0, btree.order)
       btree.root = newRoot
-      insertNonFull(btree.root, key, value, btree.order)
+      inserted = insertNonFull(btree.root, key, value, btree.order)
     else:
-      insertNonFull(btree.root, key, value, btree.order)
-    inc btree.size
+      inserted = insertNonFull(btree.root, key, value, btree.order)
+    if inserted:
+      inc btree.size
   finally:
     release(btree.lock)
 

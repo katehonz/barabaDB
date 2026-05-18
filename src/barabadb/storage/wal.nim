@@ -38,6 +38,8 @@ proc newWriteAheadLog*(dir: string, syncOnWrite: bool = true): WriteAheadLog =
     stream.write(WALMagic)
     stream.write(WALVersion)
     stream.flush()
+  # NOTE: entryCount is reset to 0 when appending to existing WAL.
+  # For an accurate count, call readEntries() after construction.
   WriteAheadLog(path: path, stream: stream, entryCount: 0, syncOnWrite: syncOnWrite)
 
 proc writeEntry*(wal: var WriteAheadLog, entry: WalEntry) =
