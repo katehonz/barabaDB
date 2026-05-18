@@ -128,6 +128,9 @@ proc isVisible(tm: TxnManager, txn: Transaction, version: VersionedRecord): bool
   if deleter != TxnId(0):
     if deleter == txn.id:
       return false
+    # Aborted deleters should not hide the record
+    if deleter in tm.abortedTxns:
+      return true
     if uint64(deleter) <= uint64(txn.snapshotMaxTxn) and
        deleter notin txn.snapshotTxns:
       if deleter in tm.activeTxns:

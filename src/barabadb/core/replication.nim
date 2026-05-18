@@ -134,8 +134,14 @@ proc writeLsn*(rm: ReplicationManager, data: seq[byte]): uint64 =
       for replica in replicasToShip:
         rm.pendingAcks[lsn].incl(replica.id)
     release(rm.lock)
+    var ackCount = 0
     for replica in replicasToShip:
-      discard shipToReplica(replica, lsn, data)
+      if shipToReplica(replica, lsn, data):
+        inc ackCount
+    if replicasToShip.len > 0 and ackCount < replicasToShip.len:
+      # Not all replicas acked — log but still return LSN (caller decides)
+      when defined(debug):
+        echo "Replication sync: only ", ackCount, "/", replicasToShip.len, " replicas acked for LSN ", lsn
     return lsn
   of rmSemiSync:
     if replicasToShip.len > 0:
@@ -146,8 +152,15 @@ proc writeLsn*(rm: ReplicationManager, data: seq[byte]): uint64 =
           rm.pendingAcks[lsn].incl(replica.id)
           inc count
     release(rm.lock)
+    var ackCount = 0
     for replica in replicasToShip:
-      discard shipToReplica(replica, lsn, data)
+      if shipToReplica(replica, lsn, data):
+        inc ackCount
+        if ackCount >= rm.syncReplicaCount:
+          break
+    if replicasToShip.len > 0 and ackCount == 0 and rm.syncReplicaCount > 0:
+      when defined(debug):
+        echo "Replication semi-sync: no replicas acked for LSN ", lsn
     return lsn
 
 proc ackLsn*(rm: ReplicationManager, replicaId: string, lsn: uint64) =

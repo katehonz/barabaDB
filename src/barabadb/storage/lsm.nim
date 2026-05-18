@@ -13,7 +13,7 @@ import mmap
 
 const
   SSTableMagic* = 0x53535442'u32  # "SSTB"
-  SSTableVersion* = 1'u32
+  SSTableVersion* = 2'u32
   DefaultMemTableSize* = 4 * 1024 * 1024  # 4MB
   DefaultBloomFpRate* = 0.01
 
@@ -136,6 +136,7 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
   s.write(SSTableMagic)
   s.write(SSTableVersion)
   s.write(uint32(entries.len))
+  s.write(uint32(level))
   let indexOffsetPos = s.getPosition()
   s.write(0'u64)  # patched after data+bloom are written
   let bloomOffsetPos = s.getPosition()
@@ -207,12 +208,22 @@ proc loadSSTable*(path: string): SSTable =
 
   if mf.readUint32(0) != SSTableMagic:
     raise newException(ValueError, "Invalid SSTable magic")
-  if mf.readUint32(4) != SSTableVersion:
+  let fileVersion = mf.readUint32(4)
+  if fileVersion != SSTableVersion and fileVersion != 1'u32:
     raise newException(ValueError, "Unsupported SSTable version")
 
   let entryCount = int(mf.readUint32(8))
-  let indexOffset = int(mf.readUint64(12))
-  let bloomOffset = int(mf.readUint64(20))
+  var level = 0
+  var indexOffset = 0
+  var bloomOffset = 0
+  if fileVersion == 2'u32:
+    level = int(mf.readUint32(12))
+    indexOffset = int(mf.readUint64(16))
+    bloomOffset = int(mf.readUint64(24))
+  else:
+    # Version 1: no level field, defaults to 0
+    indexOffset = int(mf.readUint64(12))
+    bloomOffset = int(mf.readUint64(20))
 
   var idxTable = initTable[string, int64]()
   var minK = ""
@@ -246,7 +257,7 @@ proc loadSSTable*(path: string): SSTable =
     path: path,
     index: idxTable,
     bloom: bloom,
-    level: 0,
+    level: level,
     minKey: minK,
     maxKey: maxK,
     entryCount: entryCount,

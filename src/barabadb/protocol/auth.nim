@@ -271,15 +271,9 @@ proc validateCredentials*(am: AuthManager, creds: AuthCredentials): AuthResult =
                           role: claims.role, database: claims.database)
     return AuthResult(authenticated: false, error: "Invalid token")
   of amSCRAMSHA256:
-    ## Legacy fallback: simple hash comparison for backward compatibility.
-    ## Real SCRAM should use startScram() / finishScram().
-    if creds.username in am.users:
-      let stored = am.users[creds.username]
-      let clientHash = if creds.payload.len > 0: creds.payload else: hmacSha256(am.secretKey, "")
-      if stored == clientHash or stored == hmacSha256(am.secretKey, creds.payload):
-        return AuthResult(authenticated: true, username: creds.username,
-                          role: "user", database: "default")
-    return AuthResult(authenticated: false, error: "Invalid SCRAM credentials")
+    ## SCRAM-SHA-256 requires a full challenge-response handshake.
+    ## Use startScram() / finishScram() instead of validateCredentials().
+    return AuthResult(authenticated: false, error: "SCRAM requires challenge-response handshake. Use startScram/finishScram.")
 
 # ---------------------------------------------------------------------------
 # Token / user management
