@@ -177,7 +177,7 @@ proc logRestore*(archive: string, dataDir: string, success: bool, dryRun: bool =
     let f = open(logPath, fmAppend)
     f.write(entry)
     f.close()
-  except:
+  except IOError:
     discard  # Silently fail if log cannot be written
 
 proc readHistory*(): seq[string] =
@@ -191,7 +191,7 @@ proc readHistory*(): seq[string] =
     for line in splitLines(content):
       if line.len > 0:
         result.add(line)
-  except:
+  except IOError:
     discard
 
 proc backupDataDir*(dataDir: string, output: string, excludes: seq[string] = @[], compression: int = DEFAULT_COMPRESSION, verbose: bool = false): bool =

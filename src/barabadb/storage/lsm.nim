@@ -318,7 +318,7 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
       except:
         discard  # skip corrupt SSTables
 
-  sstables.sort(proc(a, b: SSTable): int = cmp(b.id, a.id))
+  sstables.sort(proc(a, b: SSTable): int = cmp(a.id, b.id))
 
   new(result)
   initLock(result.lock)
@@ -405,6 +405,21 @@ proc delete*(db: LSMTree, key: string) =
     db.memTable = newMemTable(db.memMaxSize)
     discard db.memTable.put(key, @[], ts, deleted = true)
 
+proc putUnsafe*(db: LSMTree, key: string, value: seq[byte], deleted: bool = false) =
+  ## Direct LSM insert without WAL logging — used by recovery.
+  let ts = uint64(getMonoTime().ticks())
+  acquire(db.lock)
+  defer: release(db.lock)
+  if not db.memTable.put(key, value, ts, deleted):
+    if db.immutableMem.len > 0:
+      db.flushUnsafe()
+    db.immutableMem = db.memTable
+    db.memTable = newMemTable(db.memMaxSize)
+    discard db.memTable.put(key, value, ts, deleted)
+
+proc deleteUnsafe*(db: LSMTree, key: string) =
+  putUnsafe(db, key, @[], deleted = true)
+
 proc getUnsafe(db: LSMTree, key: string): (bool, seq[byte]) =
   let (found, entry) = db.memTable.get(key)
   if found:
@@ -478,6 +493,9 @@ proc flush*(db: LSMTree) =
 proc close*(db: LSMTree) =
   acquire(db.lock)
   defer: release(db.lock)
+  # Flush both memtables to avoid data loss
+  while db.immutableMem.len > 0:
+    flushUnsafe(db)
   flushUnsafe(db)
   for sst in db.sstables.mitems:
     sst.close()
@@ -531,7 +549,8 @@ proc scanAll*(db: LSMTree): seq[(string, seq[byte])] =
         result.add((e.key, e.value))
 
   # Scan SSTables from newest to oldest
-  for sst in db.sstables:
+  for i in countdown(db.sstables.high, db.sstables.low):
+    let sst = db.sstables[i]
     for key, offset in sst.index:
       if key notin seen:
         seen[key] = true

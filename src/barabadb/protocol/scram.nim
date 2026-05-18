@@ -40,7 +40,9 @@ proc hmacSha256*(key, message: string): array[32, byte] =
     var ctx = initSha_256()
     ctx.update(k.toOpenArray(0, k.len-1))
     let hash = ctx.digest()
-    k = $hash
+    var kHashed = newString(32)
+    copyMem(addr kHashed[0], unsafeAddr hash[0], 32)
+    k = kHashed
   while k.len < 64:
     k &= "\x00"
 
@@ -130,6 +132,8 @@ proc generateNonce*(): string =
   ## Generate a cryptographically secure random nonce (base64-encoded).
   when defined(linux) or defined(macosx) or defined(bsd):
     let f = open("/dev/urandom")
+    if f == nil:
+      raise newException(IOError, "Failed to open /dev/urandom")
     defer: f.close()
     var bytes = newString(NonceBytes)
     let readLen = f.readBuffer(addr bytes[0], NonceBytes)
@@ -209,18 +213,18 @@ proc parseClientFinal*(msg: string): (string, string, seq[byte]) =
   ## Returns: (channel_binding, nonce, proof_bytes)
   var cbind = ""
   var nonce = ""
-  var proofHex = ""
+  var proofEncoded = ""
   for p in msg.split(","):
     if p.startsWith("c="):
       cbind = p[2..^1]
     elif p.startsWith("r="):
       nonce = p[2..^1]
     elif p.startsWith("p="):
-      proofHex = p[2..^1]
-  if nonce.len == 0 or proofHex.len == 0:
+      proofEncoded = p[2..^1]
+  if nonce.len == 0 or proofEncoded.len == 0:
     raise newException(ValueError, "Missing nonce or proof in client-final-message")
   # proof is base64-encoded
-  var proof = decode(proofHex)
+  var proof = decode(proofEncoded)
   var proofBytes = newSeq[byte](proof.len)
   if proof.len > 0:
     copyMem(addr proofBytes[0], addr proof[0], proof.len)
@@ -240,6 +244,8 @@ proc buildServerFinal*(serverSignature: openArray[byte]): string =
 # ---------------------------------------------------------------------------
 
 proc verifyClientProof*(state: ScramServerState, clientProof: openArray[byte]): bool =
+  if clientProof.len != 32:
+    return false
   let clientKey = xorBytes(clientProof, @(hmacSha256(state.storedKey, state.authMessage)))
   let computedStoredKey = sha256(clientKey)
   for i in 0..<32:

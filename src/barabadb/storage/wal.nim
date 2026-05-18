@@ -30,10 +30,11 @@ proc newWriteAheadLog*(dir: string, syncOnWrite: bool = true): WriteAheadLog =
   createDir(dir)
   let path = dir / "wal.log"
   let exists = fileExists(path)
+  let isEmpty = if exists: getFileSize(path) == 0 else: true
   let stream = if exists: newFileStream(path, fmAppend) else: newFileStream(path, fmWrite)
   if stream == nil:
     raise newException(IOError, "Cannot open WAL: " & path)
-  if not exists:
+  if not exists or isEmpty:
     stream.write(WALMagic)
     stream.write(WALVersion)
     stream.flush()
@@ -78,14 +79,17 @@ proc writeCommit*(wal: var WriteAheadLog, timestamp: uint64) =
 
 proc sync*(wal: var WriteAheadLog) =
   wal.stream.flush()
-  let fd = posix.open(cstring(wal.path), O_RDONLY)
+  # Re-open with O_RDWR so fsync operates on a write-capable fd.
+  # Not ideal (two fds for same file) but avoids accessing private
+  # FileStream internals that vary across Nim versions.
+  let fd = posix.open(cstring(wal.path), O_RDWR)
   if fd != -1:
     discard posix.fsync(fd)
     discard posix.close(fd)
 
 proc close*(wal: var WriteAheadLog) =
   wal.stream.flush()
-  let fd = posix.open(cstring(wal.path), O_RDONLY)
+  let fd = posix.open(cstring(wal.path), O_RDWR)
   if fd != -1:
     discard posix.fsync(fd)
     discard posix.close(fd)
@@ -100,10 +104,10 @@ proc readEntries*(walPath: string, untilTimestamp: uint64 = 0): seq[WalEntry] =
   let s = newFileStream(walPath, fmRead)
   if s == nil: return
   # Skip header
-  var magic: uint32
-  var version: uint32
-  discard s.readData(addr magic, 4)
-  discard s.readData(addr version, 4)
+  var magic: uint32 = 0
+  var version: uint32 = 0
+  if s.readData(addr magic, 4) != 4: return
+  if s.readData(addr version, 4) != 4: return
   if magic != WALMagic: return
   while not s.atEnd:
     var kind: uint8

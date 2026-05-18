@@ -245,7 +245,7 @@ proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): Wire
     result = WireValue(kind: fkBytes, bytesVal: readBytes(buf, pos))
   of fkArray:
     let count = int(readUint32(buf, pos))
-    if count > MaxWireArrayLen:
+    if count < 0 or count > MaxWireArrayLen:
       raise newException(ValueError, "Wire protocol: array exceeds max length")
     var arr: seq[WireValue] = @[]
     for i in 0..<count:
@@ -253,7 +253,7 @@ proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): Wire
     result = WireValue(kind: fkArray, arrayVal: arr)
   of fkObject:
     let count = int(readUint32(buf, pos))
-    if count > MaxWireObjectLen:
+    if count < 0 or count > MaxWireObjectLen:
       raise newException(ValueError, "Wire protocol: object exceeds max length")
     var obj: seq[(string, WireValue)] = @[]
     for i in 0..<count:
@@ -263,7 +263,7 @@ proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): Wire
     result = WireValue(kind: fkObject, objVal: obj)
   of fkVector:
     let count = int(readUint32(buf, pos))
-    if count > MaxWireVectorLen:
+    if count < 0 or count > MaxWireVectorLen:
       raise newException(ValueError, "Wire protocol: vector exceeds max length")
     if pos + count * 4 > buf.len:
       raise newException(ValueError, "Wire protocol: truncated vector data")

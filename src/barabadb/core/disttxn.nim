@@ -108,86 +108,119 @@ proc sendDistTxnRpc(host: string, port: int, txnId: uint64, action: string, time
   except CatchableError:
     return false
 
+type
+  ParticipantInfo = object
+    nodeId: string
+    host: string
+    port: int
+
 proc prepare*(txn: DistributedTransaction): bool =
+  # Phase 1: validate state and collect participants while holding lock
+  var participants: seq[ParticipantInfo] = @[]
+  var wasActive = false
   acquire(txn.lock)
-  if txn.state != dtsActive:
-    release(txn.lock)
+  if txn.state == dtsActive:
+    txn.state = dtsPreparing
+    wasActive = true
+    for nodeId, participant in txn.participants:
+      if participant.host.len > 0 and participant.port > 0:
+        participants.add(ParticipantInfo(nodeId: nodeId, host: participant.host, port: participant.port))
+  release(txn.lock)
+
+  if not wasActive:
     return false
 
-  txn.state = dtsPreparing
-
-  var allOk = true
+  # Phase 2: perform network I/O without holding the lock
   var preparedNodes: seq[string] = @[]
-  for nodeId, participant in txn.participants.mpairs:
-    if participant.host.len > 0 and participant.port > 0:
-      participant.prepared = sendDistTxnRpc(participant.host, participant.port, txn.id, "PREPARE")
-    else:
-      participant.prepared = true  # local participant
-    if participant.prepared:
-      preparedNodes.add(nodeId)
+  var allOk = true
+  for p in participants:
+    let ok = sendDistTxnRpc(p.host, p.port, txn.id, "PREPARE")
+    if ok:
+      preparedNodes.add(p.nodeId)
     else:
       allOk = false
 
+  # Phase 3: update state while holding lock
+  acquire(txn.lock)
   if allOk:
     txn.state = dtsPrepared
+    for nodeId, _ in txn.participants.mpairs:
+      txn.participants[nodeId].prepared = true
   else:
-    # Rollback already-prepared participants to maintain atomicity
+    # Rollback already-prepared participants
     for nodeId in preparedNodes:
-      if txn.participants[nodeId].host.len > 0 and txn.participants[nodeId].port > 0:
+      if txn.participants.hasKey(nodeId):
         discard sendDistTxnRpc(txn.participants[nodeId].host, txn.participants[nodeId].port, txn.id, "ROLLBACK")
-      txn.participants[nodeId].prepared = false
-      txn.participants[nodeId].aborted = true
+        txn.participants[nodeId].prepared = false
+        txn.participants[nodeId].aborted = true
     txn.state = dtsAborted
-
   release(txn.lock)
   return allOk
 
 proc commit*(txn: DistributedTransaction): bool =
+  # Phase 1: validate state and collect participants while holding lock
+  var participants: seq[ParticipantInfo] = @[]
+  var wasPrepared = false
   acquire(txn.lock)
-  if txn.state != dtsPrepared:
-    release(txn.lock)
+  if txn.state == dtsPrepared:
+    txn.state = dtsCommitting
+    wasPrepared = true
+    for nodeId, participant in txn.participants:
+      if participant.host.len > 0 and participant.port > 0:
+        participants.add(ParticipantInfo(nodeId: nodeId, host: participant.host, port: participant.port))
+  release(txn.lock)
+
+  if not wasPrepared:
     return false
 
-  txn.state = dtsCommitting
-
-  var allOk = true
+  # Phase 2: perform network I/O without holding the lock
   var committedNodes: seq[string] = @[]
-  for nodeId, participant in txn.participants.mpairs:
-    if participant.host.len > 0 and participant.port > 0:
-      participant.committed = sendDistTxnRpc(participant.host, participant.port, txn.id, "COMMIT")
-    else:
-      participant.committed = true  # local participant
-    if participant.committed:
-      committedNodes.add(nodeId)
+  var allOk = true
+  for p in participants:
+    let ok = sendDistTxnRpc(p.host, p.port, txn.id, "COMMIT")
+    if ok:
+      committedNodes.add(p.nodeId)
     else:
       allOk = false
 
+  # Phase 3: update state while holding lock
+  acquire(txn.lock)
   if allOk:
     txn.state = dtsCommitted
+    for nodeId, _ in txn.participants.mpairs:
+      txn.participants[nodeId].committed = true
+  elif committedNodes.len > 0:
+    txn.state = dtsCommitted
+    for nodeId in committedNodes:
+      if txn.participants.hasKey(nodeId):
+        txn.participants[nodeId].committed = true
   else:
-    if committedNodes.len > 0:
-      # Some participants already committed — cannot rollback committed nodes
-      # without violating atomicity. Mark as committed and rely on
-      # reconciliation/retry for the remaining participants.
-      txn.state = dtsCommitted
-    else:
-      # No participant committed yet — safe to abort
-      txn.state = dtsAborted
+    txn.state = dtsAborted
   release(txn.lock)
   return allOk or committedNodes.len > 0
 
 proc rollback*(txn: DistributedTransaction): bool =
+  # Phase 1: validate state and collect participants while holding lock
+  var participants: seq[ParticipantInfo] = @[]
+  var canRollback = false
   acquire(txn.lock)
-  if txn.state notin {dtsActive, dtsPreparing, dtsPrepared}:
-    release(txn.lock)
+  if txn.state in {dtsActive, dtsPreparing, dtsPrepared}:
+    txn.state = dtsAborting
+    canRollback = true
+    for nodeId, participant in txn.participants:
+      if participant.host.len > 0 and participant.port > 0:
+        participants.add(ParticipantInfo(nodeId: nodeId, host: participant.host, port: participant.port))
+  release(txn.lock)
+
+  if not canRollback:
     return false
 
-  txn.state = dtsAborting
-  for nodeId, participant in txn.participants.mpairs:
-    if participant.host.len > 0 and participant.port > 0:
-      participant.aborted = sendDistTxnRpc(participant.host, participant.port, txn.id, "ROLLBACK")
-    else:
-      participant.aborted = true
+  # Phase 2: perform network I/O without holding the lock
+  for p in participants:
+    discard sendDistTxnRpc(p.host, p.port, txn.id, "ROLLBACK")
+
+  # Phase 3: update state while holding lock
+  acquire(txn.lock)
   txn.state = dtsAborted
   release(txn.lock)
   return true

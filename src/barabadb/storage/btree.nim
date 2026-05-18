@@ -62,9 +62,12 @@ proc splitChild[K, V](parent: BTreeNode[K, V], index: int, order: int) =
   let midKey = child.keys[mid]
   parent.keys.insert(midKey, index)
   parent.children.insert(newNode, index + 1)
-  child.keys.setLen(mid)
+  # In B+ tree, leaf nodes must keep the boundary key for range scans
   if child.isLeaf:
-    child.values.setLen(mid)
+    child.keys.setLen(mid + 1)
+    child.values.setLen(mid + 1)
+  else:
+    child.keys.setLen(mid)
 
 proc insertNonFull[K, V](node: BTreeNode[K, V], key: K, value: V, order: int) =
   var i = node.keys.len - 1

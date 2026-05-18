@@ -54,14 +54,18 @@ proc openMmap*(path: string, mode: MmapMode = mmReadOnly): MmapFile =
 
   let mapped = mmap(nil, fileSize, prot, flags, fd, 0)
   if mapped == MAP_FAILED:
-    discard close(fd)
+    discard posix.close(fd)
     return MmapFile(path: path, regions: @[], totalSize: 0, pageSize: PageSize)
+
+  # Kernel keeps the mapping alive independently of the fd; close it now
+  # to avoid leaking one fd per SSTable.
+  discard posix.close(fd)
 
   let region = MmapRegion(
     data: cast[ptr UncheckedArray[byte]](mapped),
     size: fileSize,
     offset: 0,
-    fd: fd,
+    fd: -1,
     mode: mode,
   )
 
@@ -116,16 +120,21 @@ proc adviseRandom*(mf: MmapFile) =
 
 proc adviseWillNeed*(mf: MmapFile, offset: int, size: int) =
   if mf.regions.len > 0:
+    if offset < 0 or offset + size > mf.regions[0].size:
+      return
     discard madvise(addr mf.regions[0].data[offset], size, MADV_WILLNEED)
 
 proc adviseDontNeed*(mf: MmapFile, offset: int, size: int) =
   if mf.regions.len > 0:
+    if offset < 0 or offset + size > mf.regions[0].size:
+      return
     discard madvise(addr mf.regions[0].data[offset], size, MADV_DONTNEED)
 
 proc close*(mf: MmapFile) =
   for region in mf.regions:
     discard munmap(region.data, region.size)
-    discard close(cint(region.fd))
+    if region.fd != -1:
+      discard close(cint(region.fd))
   mf.regions.setLen(0)
 
 proc size*(mf: MmapFile): int = mf.totalSize

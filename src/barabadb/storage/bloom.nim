@@ -81,7 +81,7 @@ proc deserialize*(bf: var BloomFilter, data: seq[byte]) =
   )
   let numBytes = (bf.size + 7) div 8
   if data.len < 8 + numBytes:
-    return
+    raise newException(ValueError, "Bloom filter data too short: expected " & $(8 + numBytes) & " bytes, got " & $data.len)
   for i in 0..<bf.size:
     if (data[8 + i div 8] and (1'u8 shl (i mod 8))) != 0:
       bf.bits[i] = true

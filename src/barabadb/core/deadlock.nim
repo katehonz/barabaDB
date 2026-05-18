@@ -2,6 +2,7 @@
 import std/tables
 import std/sets
 import std/algorithm
+import std/locks
 
 type
   WaitEdge* = object
@@ -12,15 +13,18 @@ type
     edges: seq[WaitEdge]
     adjacency: Table[uint64, seq[uint64]]  # waiter -> holders
     txnIds: HashSet[uint64]
+    lock: Lock
 
 proc newDeadlockDetector*(): DeadlockDetector =
-  DeadlockDetector(
-    edges: @[],
-    adjacency: initTable[uint64, seq[uint64]](),
-    txnIds: initHashSet[uint64](),
-  )
+  new(result)
+  initLock(result.lock)
+  result.edges = @[]
+  result.adjacency = initTable[uint64, seq[uint64]]()
+  result.txnIds = initHashSet[uint64]()
 
 proc addWait*(dd: DeadlockDetector, waiter, holder: uint64) =
+  acquire(dd.lock)
+  defer: release(dd.lock)
   dd.edges.add(WaitEdge(waiter: waiter, holder: holder))
   dd.txnIds.incl(waiter)
   dd.txnIds.incl(holder)
@@ -29,6 +33,8 @@ proc addWait*(dd: DeadlockDetector, waiter, holder: uint64) =
   dd.adjacency[waiter].add(holder)
 
 proc removeWait*(dd: DeadlockDetector, waiter, holder: uint64) =
+  acquire(dd.lock)
+  defer: release(dd.lock)
   var newEdges: seq[WaitEdge] = @[]
   for edge in dd.edges:
     if edge.waiter != waiter or edge.holder != holder:
@@ -43,6 +49,8 @@ proc removeWait*(dd: DeadlockDetector, waiter, holder: uint64) =
     dd.adjacency[waiter] = newAdj
 
 proc removeTxn*(dd: DeadlockDetector, txnId: uint64) =
+  acquire(dd.lock)
+  defer: release(dd.lock)
   dd.txnIds.excl(txnId)
   dd.adjacency.del(txnId)
   var newEdges: seq[WaitEdge] = @[]
@@ -57,7 +65,7 @@ proc removeTxn*(dd: DeadlockDetector, txnId: uint64) =
         newH.add(h)
     holders = newH
 
-proc detectCycle*(dd: DeadlockDetector): seq[uint64] =
+proc detectCycleUnsafe(dd: DeadlockDetector): seq[uint64] =
   var visited = initHashSet[uint64]()
   var inStack = initHashSet[uint64]()
   var parent = initTable[uint64, uint64]()
@@ -98,8 +106,15 @@ proc detectCycle*(dd: DeadlockDetector): seq[uint64] =
         return cycle
   return @[]
 
+proc detectCycle*(dd: DeadlockDetector): seq[uint64] =
+  acquire(dd.lock)
+  defer: release(dd.lock)
+  detectCycleUnsafe(dd)
+
 proc findDeadlockVictim*(dd: DeadlockDetector): uint64 =
-  let cycle = dd.detectCycle()
+  acquire(dd.lock)
+  defer: release(dd.lock)
+  let cycle = detectCycleUnsafe(dd)
   if cycle.len == 0:
     return 0
   # Choose youngest txn (highest id) as victim
@@ -109,12 +124,23 @@ proc findDeadlockVictim*(dd: DeadlockDetector): uint64 =
       result = id
 
 proc hasDeadlock*(dd: DeadlockDetector): bool =
-  return dd.detectCycle().len > 0
+  acquire(dd.lock)
+  defer: release(dd.lock)
+  return detectCycleUnsafe(dd).len > 0
 
 proc clear*(dd: DeadlockDetector) =
+  acquire(dd.lock)
+  defer: release(dd.lock)
   dd.edges.setLen(0)
   dd.adjacency.clear()
   dd.txnIds.clear()
 
-proc edgeCount*(dd: DeadlockDetector): int = dd.edges.len
-proc txnCount*(dd: DeadlockDetector): int = dd.txnIds.len
+proc edgeCount*(dd: DeadlockDetector): int =
+  acquire(dd.lock)
+  defer: release(dd.lock)
+  dd.edges.len
+
+proc txnCount*(dd: DeadlockDetector): int =
+  acquire(dd.lock)
+  defer: release(dd.lock)
+  dd.txnIds.len

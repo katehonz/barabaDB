@@ -109,10 +109,10 @@ proc disconnect*(client: SyncClient) =
     try:
       let msg = makeQueryMessage(0, "DISCONNECT")
       netmod.send(client.socket, cast[string](msg))
-    except: discard
+    except IOError, OSError: discard
     netmod.close(client.socket)
     client.connected = false
-  deinitLock(client.lock)
+    deinitLock(client.lock)
 
 proc query*(client: SyncClient, sql: string): QueryResult =
   acquire(client.lock)

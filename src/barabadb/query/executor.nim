@@ -185,6 +185,14 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
 # AST to SQL serializer (for VIEW DDL persistence)
 # ----------------------------------------------------------------------
 
+proc sqlEscapeIdent*(ident: string): string =
+  ## Escape SQL identifiers by doubling double-quotes.
+  result = ident.replace("\"", "\"\"")
+
+proc sqlEscapeString*(s: string): string =
+  ## Escape SQL string literals by doubling single-quotes.
+  result = s.replace("'", "''")
+
 proc exprToSql(node: Node): string =
   if node == nil:
     return ""
@@ -200,7 +208,7 @@ proc exprToSql(node: Node): string =
   of nkNullLit:
     return "null"
   of nkIdent:
-    return node.identName
+    return "\"" & node.identName.replace("\"", "\"\"") & "\""
   of nkStar:
     return "*"
   of nkBinOp:
@@ -297,8 +305,13 @@ proc restoreSchema(ctx: ExecutionContext) =
     if not entry.key.startsWith("_schema:"): continue
     let ddl = cast[string](entry.value)
     if ddl.len == 0: continue
-    let tokens = qlex.tokenize(ddl)
-    let astNode = qpar.parse(tokens)
+    var astNode: Node
+    try:
+      let tokens = qlex.tokenize(ddl)
+      astNode = qpar.parse(tokens)
+    except:
+      # Skip corrupted schema entries during startup
+      continue
     if astNode.stmts.len > 0:
       let stmt = astNode.stmts[0]
       case stmt.kind
@@ -992,9 +1005,15 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if expr.binRight.kind == irekSubquery:
         let subRows = executePlan(ctx, expr.binRight.subqueryPlan)
         for row in subRows:
+          # Compare against the first non-internal column only (SQL semantics)
+          var firstVal = ""
+          var found = false
           for k, v in row:
             if k.startsWith("$"): continue
-            if v == left: return "true"
+            firstVal = v
+            found = true
+            break
+          if found and firstVal == left: return "true"
         return "false"
       try:
         let lv = parseFloat(left)
@@ -1006,9 +1025,15 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if expr.binRight.kind == irekSubquery:
         let subRows = executePlan(ctx, expr.binRight.subqueryPlan)
         for row in subRows:
+          # Compare against the first non-internal column only (SQL semantics)
+          var firstVal = ""
+          var found = false
           for k, v in row:
             if k.startsWith("$"): continue
-            if v == left: return "false"
+            firstVal = v
+            found = true
+            break
+          if found and firstVal == left: return "false"
         return "true"
       try:
         let lv = parseFloat(left)
@@ -1334,23 +1359,43 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if sql.len == 0:
         return ""
 
-      # Validate by trying EXPLAIN or LIMIT-wrapped query
-      var validateSql = sql
-      if validateSql.toLower().startsWith("select"):
-        validateSql = "SELECT * FROM (" & sql & ") LIMIT 0"
-      let tokens = qlex.tokenize(validateSql)
-      let astNode = qpar.parse(tokens)
-      if astNode.stmts.len > 0:
-        let validateRes = executeQuery(ctx, astNode)
-        if not validateRes.success:
-          # Self-correction: send error back to LLM
-          let correctionPrompt = "Schema:\n" & schemaInfo & "\nQuestion: " & question & "\n\nPrevious SQL: " & sql & "\n\nError: " & validateRes.message & "\n\nGenerate corrected SQL:"
+      # Validate by parsing only (never execute LLM-generated SQL directly)
+      let sqlLower = sql.toLower().strip()
+      let isSafeQuery = sqlLower.startsWith("select") or sqlLower.startsWith("explain") or
+                        sqlLower.startsWith("with")
+      let allowDml = ctx.sessionVars.getOrDefault("nl_to_sql.allow_dml", "false") == "true"
+      if not isSafeQuery and not allowDml:
+        # For non-SELECT: only do syntax validation via tokenize+parse, no execution
+        let tokens = qlex.tokenize(sql)
+        let astNode = qpar.parse(tokens)
+        if astNode.stmts.len > 0:
+          return sql
+        else:
+          let correctionPrompt = "Schema:\n" & schemaInfo & "\nQuestion: " & question & "\n\nPrevious SQL: " & sql & "\n\nError: Syntax error. Generate corrected SQL:"
           var correctedResponse = llmmod.generate(ctx.llmClient, correctionPrompt, systemPrompt)
           var correctedSql = llmmod.extractSQL(correctedResponse)
           if correctedSql.len > 0:
             return correctedSql
-
-      return sql
+          return ""
+      else:
+        # For SELECT/EXPLAIN or when ALLOW_DML is set: validate with LIMIT 0 or EXPLAIN
+        var validateSql = sql
+        if sqlLower.startsWith("select"):
+          validateSql = "SELECT * FROM (" & sql & ") LIMIT 0"
+        elif sqlLower.startsWith("with"):
+          validateSql = "WITH _cte_ AS (" & sql & ") SELECT 1 LIMIT 0"
+        let tokens = qlex.tokenize(validateSql)
+        let astNode = qpar.parse(tokens)
+        if astNode.stmts.len > 0:
+          let validateRes = executeQuery(ctx, astNode)
+          if not validateRes.success:
+            # Self-correction: send error back to LLM
+            let correctionPrompt = "Schema:\n" & schemaInfo & "\nQuestion: " & question & "\n\nPrevious SQL: " & sql & "\n\nError: " & validateRes.message & "\n\nGenerate corrected SQL:"
+            var correctedResponse = llmmod.generate(ctx.llmClient, correctionPrompt, systemPrompt)
+            var correctedSql = llmmod.extractSQL(correctedResponse)
+            if correctedSql.len > 0:
+              return correctedSql
+        return sql
     of "schema_prompt":
       if expr.irFuncArgs.len < 1: return ""
       let table = evalExpr(expr.irFuncArgs[0], row, ctx)
@@ -1358,33 +1403,33 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         return "Table '" & table & "' not found"
 
       let tbl = ctx.tables[table]
-      var result = ""
-      result.add("CREATE TABLE " & table & " (\n")
+      var ddl = ""
+      ddl.add("CREATE TABLE " & table & " (\n")
       for i, col in tbl.columns:
-        result.add("  " & col.name & " " & col.colType)
-        if col.isPk: result.add(" PRIMARY KEY")
-        if col.isNotNull: result.add(" NOT NULL")
-        if col.autoIncrement: result.add(" AUTO_INCREMENT")
+        ddl.add("  " & col.name & " " & col.colType)
+        if col.isPk: ddl.add(" PRIMARY KEY")
+        if col.isNotNull: ddl.add(" NOT NULL")
+        if col.autoIncrement: ddl.add(" AUTO_INCREMENT")
         if col.fkTable.len > 0:
-          result.add(" REFERENCES " & col.fkTable & "(" & col.fkColumn & ")")
-        if i < tbl.columns.len - 1: result.add(",")
-        result.add("\n")
+          ddl.add(" REFERENCES " & col.fkTable & "(" & col.fkColumn & ")")
+        if i < tbl.columns.len - 1: ddl.add(",")
+        ddl.add("\n")
 
       # Sample data
       var kvPairs: seq[(string, seq[byte])] = @[]
       let rows = execScan(ctx, table)
       let sampleLimit = min(5, rows.len)
       if sampleLimit > 0:
-        result.add(");\n\n-- Sample data:\n")
+        ddl.add(");\n\n-- Sample data:\n")
         for i in 0..<sampleLimit:
-          result.add("-- ")
+          ddl.add("-- ")
           var parts: seq[string] = @[]
           for col in tbl.columns:
             parts.add(col.name & "=" & rows[i].getOrDefault(col.name, ""))
-          result.add(parts.join(", "))
-          result.add("\n")
+          ddl.add(parts.join(", "))
+          ddl.add("\n")
       else:
-        result.add(");")
+        ddl.add(");")
 
       # Indexes
       var idxList: seq[string] = @[]
@@ -1395,20 +1440,20 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         if idxKey.startsWith(table & "."):
           idxList.add("HNSW: " & idxKey)
       if idxList.len > 0:
-        result.add("\n-- Indexes: " & idxList.join(", "))
+        ddl.add("\n-- Indexes: " & idxList.join(", "))
 
       # RLS policies
       if table in ctx.policies and ctx.policies[table].len > 0:
-        result.add("\n-- RLS Policies:\n")
+        ddl.add("\n-- RLS Policies:\n")
         for pol in ctx.policies[table]:
-          result.add("-- CREATE POLICY " & pol.name & " FOR " & pol.command & "\n")
+          ddl.add("-- CREATE POLICY " & pol.name & " FOR " & pol.command & "\n")
 
       if tbl.foreignKeys.len > 0:
-        result.add("\n-- Foreign Keys:\n")
+        ddl.add("\n-- Foreign Keys:\n")
         for fk in tbl.foreignKeys:
-          result.add("-- " & fk.refTable & "(" & fk.refColumn & ") ON DELETE " & fk.onDelete & "\n")
+          ddl.add("-- " & fk.refTable & "(" & fk.refColumn & ") ON DELETE " & fk.onDelete & "\n")
 
-      return result
+      return ddl
     of "similarity_nodes":
       if expr.irFuncArgs.len < 1: return "[]"
       let graphName = evalExpr(expr.irFuncArgs[0], row, ctx)
@@ -1507,7 +1552,6 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
           return $ctx.sequences[seqName]
       finally:
         release(ctx.sharedLock.lock)
-      return "0"
       return "0"
     of "snowflake_id":
       # Snowflake ID: timestamp_ms(41 bits) | node_id(10 bits) | sequence(12 bits)
@@ -1662,20 +1706,30 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
                   kvPairs: var seq[(string, seq[byte])]): int =
   if not hasPrivilege(ctx, table, "INSERT"):
     return 0
+  let tblDef = if table in ctx.tables: ctx.tables[table] else: TableDef()
   var count = 0
   for rowVals in values:
     var key = ""
     var keyFound = false
     var valParts: seq[string] = @[]
+    # Build composite PK key from all PK columns
+    if tblDef.pkColumns.len > 0:
+      var pkParts: seq[string] = @[]
+      for pkCol in tblDef.pkColumns:
+        let pkVal = getValue(rowVals, fields, pkCol)
+        pkParts.add(pkCol & "=" & escapeRowVal(pkVal))
+      key = pkParts.join(":")
+      keyFound = true
     for i, f in fields:
       if i < rowVals.len:
         if not keyFound:
           key = f & "=" & escapeRowVal(rowVals[i])
           keyFound = true
-        else:
+        elif tblDef.pkColumns.len == 0 or f.toLower() notin tblDef.pkColumns.mapIt(it.toLower()):
           valParts.add(f & "=" & escapeRowVal(rowVals[i]))
       elif f.len > 0:
-        valParts.add(f & "=")
+        if tblDef.pkColumns.len == 0 or f.toLower() notin tblDef.pkColumns.mapIt(it.toLower()):
+          valParts.add(f & "=")
     let valStr = valParts.join(",")
     let fullKey = table & "." & key
 
@@ -2107,32 +2161,24 @@ proc validateConstraints*(ctx: ExecutionContext, tableName: string,
         if not typeOk:
           return (false, typeErr)
 
-      # FK check
+      # FK check — uses LSM get which searches memtable + SSTables
       if col.fkTable.len > 0 and col.fkColumn.len > 0 and not isNull(val):
         let fkKey = col.fkTable & "." & col.fkColumn & "=" & val
         let (fkExists, _) = ctx.db.get(fkKey)
         if not fkExists:
-          # Also check if value is in any row's first field
-          var found = false
-          let prefix = col.fkTable & "."
-          for entry in ctx.db.scanMemTable():
-            if entry.deleted: continue
-            if entry.key.startsWith(prefix):
-              let rest = entry.key[prefix.len..^1]
-              if rest.startsWith(col.fkColumn & "=") and rest[col.fkColumn.len+1..^1] == val:
-                found = true
-                break
-          if not found:
-            return (false, "FOREIGN KEY violation: '" & val & "' not found in " & col.fkTable & "." & col.fkColumn)
+          return (false, "FOREIGN KEY violation: '" & val & "' not found in " & col.fkTable & "." & col.fkColumn)
 
     # PK uniqueness (skip during UPDATE — PK shouldn't change)
     if not skipPkCheck and tbl.pkColumns.len > 0:
       var pkVals: seq[string] = @[]
+      var pkParts: seq[string] = @[]
       for pkCol in tbl.pkColumns:
-        pkVals.add(getValue(rowVals, fields, pkCol))
+        let pkVal = getValue(rowVals, fields, pkCol)
+        pkVals.add(pkVal)
+        pkParts.add(pkCol & "=" & escapeRowVal(pkVal))
       let pkStr = pkVals.join("|")
-      # Check with field=value format (as stored by execInsert)
-      var pkKey = tableName & "." & tbl.pkColumns[0] & "=" & escapeRowVal(pkVals[0])
+      # Check with composite PK format (as stored by execInsert)
+      let pkKey = tableName & "." & pkParts.join(":")
       let (exists, _) = ctx.db.get(pkKey)
       if exists:
         return (false, "UNIQUE constraint violated: duplicate key '" & pkStr & "'")
@@ -4739,7 +4785,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     ctx.views[stmt.cvName] = stmt.cvQuery
     let viewKey = "_schema:views:" & stmt.cvName
     let viewSql = selectToSql(stmt.cvQuery)
-    let viewDdl = "CREATE VIEW " & stmt.cvName & " AS " & viewSql
+    let viewDdl = "CREATE VIEW \"" & sqlEscapeIdent(stmt.cvName) & "\" AS " & viewSql
     ctx.db.put(viewKey, cast[seq[byte]](viewDdl))
     return okResult(msg="CREATE VIEW " & stmt.cvName)
 
@@ -4762,7 +4808,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     ctx.tables[stmt.trigTable].triggers = triggers
     # Persist trigger to LSM-Tree
     let trigKey = "_schema:triggers:" & stmt.trigTable & ":" & stmt.trigName
-    let trigDdl = "CREATE TRIGGER " & stmt.trigName & " ON " & stmt.trigTable & " " &
+    let trigDdl = "CREATE TRIGGER \"" & sqlEscapeIdent(stmt.trigName) & "\" ON \"" & sqlEscapeIdent(stmt.trigTable) & "\" " &
                   stmt.trigTiming & " " & stmt.trigEvent & " AS " & stmt.trigAction.strVal
     ctx.db.put(trigKey, cast[seq[byte]](trigDdl))
     return okResult(msg="CREATE TRIGGER " & stmt.trigName)
@@ -5031,7 +5077,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     ctx.users[stmt.cuName] = UserDef(name: stmt.cuName, passwordHash: stmt.cuPassword,
                                      isSuperuser: stmt.cuSuperuser, roles: @[])
     let userKey = "_schema:users:" & stmt.cuName
-    let userDdl = "CREATE USER " & stmt.cuName & " WITH PASSWORD '" & stmt.cuPassword & "'" &
+    let userDdl = "CREATE USER \"" & sqlEscapeIdent(stmt.cuName) & "\" WITH PASSWORD '" & sqlEscapeString(stmt.cuPassword) & "'" &
                   (if stmt.cuSuperuser: " SUPERUSER" else: " NOSUPERUSER")
     ctx.db.put(userKey, cast[seq[byte]](userDdl))
     return okResult(msg="CREATE USER " & stmt.cuName)
@@ -5050,7 +5096,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                        withCheckExpr: stmt.cpWithCheck))
     ctx.policies[stmt.cpTable] = pols
     let polKey = "_schema:policies:" & stmt.cpTable & ":" & stmt.cpName
-    var polDdl = "CREATE POLICY " & stmt.cpName & " ON " & stmt.cpTable
+    var polDdl = "CREATE POLICY \"" & sqlEscapeIdent(stmt.cpName) & "\" ON \"" & sqlEscapeIdent(stmt.cpTable) & "\""
     if stmt.cpCommand != "ALL":
       polDdl.add(" FOR " & stmt.cpCommand)
     if stmt.cpUsing != nil:

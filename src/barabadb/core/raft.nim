@@ -124,9 +124,10 @@ proc loadState(node: RaftNode) =
       let dataLen = int(s.readUint32())
       var data = newSeq[byte](dataLen)
       if dataLen > 0:
-        discard s.readData(addr data[0], dataLen)
+        if s.readData(addr data[0], dataLen) != dataLen:
+          raise newException(IOError, "Incomplete Raft log data read")
       node.log[i] = LogEntry(term: term, index: index, command: cmd, data: data)
-  except:
+  except IOError, OSError:
     discard
   s.close()
 
@@ -431,7 +432,8 @@ proc readString(s: Stream): string =
   let len = int(s.readUint32())
   if len > 0:
     result = newString(len)
-    discard s.readData(result[0].addr, len)
+    if s.readData(result[0].addr, len) != len:
+      raise newException(IOError, "Incomplete string read from stream")
   else:
     result = ""
 

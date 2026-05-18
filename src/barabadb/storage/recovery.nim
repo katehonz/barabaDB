@@ -32,6 +32,7 @@ type
     dataDir*: string
     entries*: seq[RecoveredEntry]
     result*: RecoveryResult
+    lastTxnId*: uint64  # tracks commits seen in WAL
 
 proc newCrashRecovery*(walDir: string, dataDir: string): CrashRecovery =
   CrashRecovery(
@@ -101,6 +102,7 @@ proc scanWAL*(rec: CrashRecovery): seq[RecoveredEntry] =
       discard
 
   stream.close()
+  rec.lastTxnId = txnId
 
 proc analyze*(rec: CrashRecovery): RecoveryResult =
   rec.entries = rec.scanWAL()
@@ -109,10 +111,7 @@ proc analyze*(rec: CrashRecovery): RecoveryResult =
     rec.result = RecoveryResult(state: recDone, applied: false)
     return rec.result
 
-  var lastCommitted: uint64 = 0
-  for entry in rec.entries:
-    if entry.txnId > lastCommitted:
-      lastCommitted = entry.txnId
+  var lastCommitted = rec.lastTxnId
 
   var redoCount = 0
   var undoCount = 0
@@ -149,11 +148,11 @@ proc recover*(rec: CrashRecovery, db: LSMTree = nil): RecoveryResult =
   var undoCount = 0
   for entry in rec.entries:
     if entry.txnId < analysis.lastTxn:
-      # Committed — redo
+      # Committed — redo (bypass WAL to avoid duplicate entries)
       if entry.isDelete:
-        db.delete(entry.key)
+        db.deleteUnsafe(entry.key)
       else:
-        db.put(entry.key, entry.value)
+        db.putUnsafe(entry.key, entry.value)
       inc redoCount
     else:
       # Uncommitted — skip (undo)

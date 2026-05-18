@@ -110,10 +110,13 @@ proc constantTimeCompare(a, b: string): bool =
 # JWT token helpers
 # ---------------------------------------------------------------------------
 
+proc jsonEscape(s: string): string =
+  result = s.replace("\\", "\\\\").replace("\"", "\\\"")
+
 proc createToken*(am: AuthManager, claims: JWTClaims): string =
   let header = base64UrlEncode("{\"alg\":\"HS256\",\"typ\":\"JWT\"}")
-  var payloadJson = "{\"sub\":\"" & claims.sub & "\",\"role\":\"" & claims.role &
-    "\",\"database\":\"" & claims.database & "\""
+  var payloadJson = "{\"sub\":\"" & jsonEscape(claims.sub) & "\",\"role\":\"" & jsonEscape(claims.role) &
+    "\",\"database\":\"" & jsonEscape(claims.database) & "\""
   if claims.exp > 0:
     payloadJson &= ",\"exp\":" & $claims.exp
   if claims.iat > 0:

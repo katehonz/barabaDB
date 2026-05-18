@@ -181,8 +181,8 @@ proc parsePrimary(p: var Parser): Node =
     Node(kind: nkCase, caseExpr: caseExpr, caseWhens: whens, caseElse: elseExpr,
          line: tok.line, col: tok.col)
   else:
-    discard p.advance()
-    Node(kind: nkNullLit, line: tok.line, col: tok.col)
+    raise newException(ValueError,
+      "Unexpected token " & $tok.kind & " at line " & $tok.line & ", col " & $tok.col)
 
 proc parseOverClause(p: var Parser): Node =
   ## Parse OVER ( [PARTITION BY expr, ...] [ORDER BY expr [ASC|DESC], ...] [frame] )
@@ -324,7 +324,10 @@ proc parseComparison(p: var Parser): Node =
     if p.peek().kind == tkNot:
       discard p.advance()
       negated = true
-    discard p.advance()  # consume NULL token (assumed)
+    if p.peek().kind != tkNull:
+      raise newException(ValueError,
+        "Expected NULL after IS " & (if negated: "NOT " else: "") & "at line " & $tok.line)
+    discard p.advance()  # consume NULL token
     return Node(kind: nkIsExpr, isExpr: result, isNegated: negated,
                 line: tok.line, col: tok.col)
   while p.peek().kind in {tkEq, tkNotEq, tkLt, tkLtEq, tkGt, tkGtEq, tkFtsMatch, tkDistanceOp, tkJsonContains, tkJsonContainedBy, tkJsonHasAny, tkJsonHasAll}:

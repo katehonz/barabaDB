@@ -141,6 +141,8 @@ proc readString*(buf: ZeroBuf, offset: var int): string =
   let len = int(buf.readInt64(offset))
   offset += 8
   if len > 0:
+    if offset + len > buf.capacity:
+      raise newException(ValueError, "ZeroCopy readString: buffer overflow")
     result = newString(len)
     copyMem(addr result[0], addr buf.data[offset], len)
     offset += len

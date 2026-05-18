@@ -3845,6 +3845,59 @@ suite "Foreign Key Enforcement":
     check childSel.rows.len == 0
 
 
+suite "Composite Primary Key":
+  var db: LSMTree
+  var ctx: qexec.ExecutionContext
+  var tmpDir: string
+
+  setup:
+    tmpDir = getTempDir() / "baradb_compk_test_" & $getMonoTime().ticks
+    db = newLSMTree(tmpDir)
+    ctx = qexec.newExecutionContext(db)
+
+  teardown:
+    removeDir(tmpDir)
+
+  test "Composite PK insert stores distinct rows":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE orders (user_id INT, order_id INT, amount INT, PRIMARY KEY (user_id, order_id))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO orders (user_id, order_id, amount) VALUES (1, 100, 50)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO orders (user_id, order_id, amount) VALUES (1, 101, 75)"))
+    let sel = qexec.executeQuery(ctx, parse("SELECT * FROM orders"))
+    check sel.success
+    check sel.rows.len == 2
+
+  test "Composite PK prevents duplicate key":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE items (warehouse INT, sku TEXT, qty INT, PRIMARY KEY (warehouse, sku))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO items (warehouse, sku, qty) VALUES (1, 'ABC', 10)"))
+    let dup = qexec.executeQuery(ctx, parse("INSERT INTO items (warehouse, sku, qty) VALUES (1, 'ABC', 20)"))
+    check not dup.success
+    check dup.message.contains("UNIQUE constraint violated")
+
+  test "Composite PK allows same first column with different second":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE scores (player INT, level INT, score INT, PRIMARY KEY (player, level))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO scores (player, level, score) VALUES (1, 1, 100)"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO scores (player, level, score) VALUES (1, 2, 200)"))
+    let sel = qexec.executeQuery(ctx, parse("SELECT * FROM scores"))
+    check sel.success
+    check sel.rows.len == 2
+
+  test "Composite PK SELECT returns correct rows":
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE pair (a INT, b INT, val TEXT, PRIMARY KEY (a, b))"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO pair (a, b, val) VALUES (1, 2, 'first')"))
+    discard qexec.executeQuery(ctx, parse("INSERT INTO pair (a, b, val) VALUES (1, 3, 'second')"))
+    let sel = qexec.executeQuery(ctx, parse("SELECT * FROM pair"))
+    check sel.success
+    check sel.rows.len == 2
+    # Verify both rows exist (order may vary)
+    var foundFirst = false
+    var foundSecond = false
+    for row in sel.rows:
+      if row["val"] == "first": foundFirst = true
+      if row["val"] == "second": foundSecond = true
+    check foundFirst
+    check foundSecond
+
+
 suite "Hybrid RAG Search":
   var db: LSMTree
   var ctx: qexec.ExecutionContext

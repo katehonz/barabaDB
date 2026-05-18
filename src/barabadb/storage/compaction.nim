@@ -98,11 +98,10 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
       merged.add(entry)
       lastKey = entry.key
 
-  # Filter out tombstones (deleted entries)
+  # Keep tombstones to prevent deleted keys from resurrecting in lower levels
   var final: seq[Entry] = @[]
   for entry in merged:
-    if not entry.deleted:
-      final.add(entry)
+    final.add(entry)
 
   # Write merged SSTable
   let outputPath = cs.dataDir / "sstables" / ("level_" & $level & "_" & $tables[0].createdAt & ".sst")

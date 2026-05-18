@@ -99,6 +99,8 @@ proc newServer*(config: BaraConfig): Server =
 # ----------------------------------------------------------------------
 
 proc readUint32BE(data: string, pos: int): uint32 =
+  if pos + 4 > data.len:
+    raise newException(ValueError, "readUint32BE: index out of bounds")
   var bytes: array[4, byte]
   for i in 0..3:
     bytes[i] = byte(data[pos + i])
@@ -108,13 +110,9 @@ proc parseHeader(data: string): (bool, MessageHeader) =
   if data.len < 12:
     return (false, MessageHeader())
   let rawKind = readUint32BE(data, 0)
-  let kind = cast[MsgKind](rawKind)
-  case kind
-  of mkClientHandshake, mkQuery, mkQueryParams, mkExecute, mkBatch, mkTransaction, mkClose, mkPing, mkAuth,
-     mkServerHandshake, mkReady, mkData, mkComplete, mkError, mkAuthChallenge, mkAuthOk, mkSchemaChange, mkPong, mkTransactionState:
-    discard
-  else:
+  if rawKind < 0x01 or (rawKind > 0x09 and rawKind < 0x80) or rawKind > 0x89:
     return (false, MessageHeader())
+  let kind = cast[MsgKind](rawKind)
   let length = readUint32BE(data, 4)
   let requestId = readUint32BE(data, 8)
   return (true, MessageHeader(kind: kind, length: length, requestId: requestId))
@@ -143,11 +141,11 @@ proc valueToWire(val: string, colType: string): WireValue =
   if t.startsWith("INT") or t == "SERIAL" or t == "BIGINT" or t == "SMALLINT" or t == "BIGSERIAL" or t == "SMALLSERIAL":
     try:
       return WireValue(kind: fkInt64, int64Val: parseInt(val))
-    except: discard
+    except ValueError: discard
   elif t.startsWith("FLOAT") or t == "REAL" or t == "DOUBLE" or t == "NUMERIC" or t.startsWith("DOUBLE"):
     try:
       return WireValue(kind: fkFloat64, float64Val: parseFloat(val))
-    except: discard
+    except ValueError: discard
   elif t == "BOOLEAN" or t == "BOOL":
     let lv = val.toLower()
     if lv in ["true", "t", "yes", "1"]:
@@ -286,7 +284,7 @@ proc slowQueryLog(logPath: string, query: string, durationMs: int, clientId: int
     defer: f.close()
     let line = $getMonoTime().ticks() & " | " & $clientId & " | " & $durationMs & "ms | " & query & "\n"
     f.write(line)
-  except: discard
+  except IOError: discard
 
 proc verifyToken(secret, tokenStr: string): (bool, string, string) =
   try:
@@ -296,7 +294,7 @@ proc verifyToken(secret, tokenStr: string): (bool, string, string) =
     let userId = token.claims["sub"].node.str
     let role = if "role" in token.claims: token.claims["role"].node.str else: "user"
     return (true, userId, role)
-  except:
+  except ValueError, KeyError:
     return (false, "", "")
 
 proc recvWithTimeout(client: AsyncSocket, size: int, timeoutMs: int): Future[string] {.async.} =
