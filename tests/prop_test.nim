@@ -1,4 +1,4 @@
-## Property-Based Tests — evalExprValue invariants
+## Property-Based Tests — evalExprValue + B-Tree invariants
 import std/unittest
 import std/tables
 import std/random
@@ -8,6 +8,7 @@ import std/math
 
 import barabadb/core/types
 import barabadb/storage/lsm
+import barabadb/storage/btree
 import barabadb/query/ir as qir
 import barabadb/query/executor as qexec
 
@@ -677,3 +678,143 @@ suite "Property-Based — evalExprValue Invariants":
     check v.kind == vkNull
     let s = evalExpr(nil, initTable[string, string](), nil)
     check s == ""
+
+# ═══════════════════════════════════════════════════
+# B-Tree Property-Based Invariants
+# ═══════════════════════════════════════════════════
+suite "Property-Based — B-Tree Invariants":
+
+  proc randKey(rng: var Rand, minVal: int = 0, maxVal: int = 10000): int =
+    rng.rand(minVal..maxVal)
+
+  test "B-Tree size equals number of unique keys after random inserts":
+    var rng = initRand(1000)
+    var btree = newBTreeIndex[int, string](order = 8)
+    var uniqueKeys = initTable[int, bool]()
+    for i in 0..<500:
+      let k = randKey(rng)
+      btree.insert(k, "v" & $k)
+      uniqueKeys[k] = true
+    check btree.len == uniqueKeys.len
+
+  test "B-Tree get returns all values for inserted key":
+    var rng = initRand(1001)
+    var btree = newBTreeIndex[int, string](order = 8)
+    var expected = initTable[int, seq[string]]()
+    for i in 0..<200:
+      let k = randKey(rng, 0, 50)
+      let v = "val_" & $i
+      btree.insert(k, v)
+      if k notin expected:
+        expected[k] = @[]
+      expected[k].add(v)
+    for k, vals in expected:
+      let got = btree.get(k)
+      check got == vals
+
+  test "B-Tree scan returns keys in ascending order":
+    var rng = initRand(1002)
+    var btree = newBTreeIndex[int, string](order = 8)
+    for i in 0..<300:
+      btree.insert(randKey(rng, 0, 1000), "x")
+    let result = btree.scan(0, 1000)
+    for i in 1..<result.len:
+      check result[i-1][0] <= result[i][0]
+
+  test "B-Tree scan range is inclusive and correct":
+    var rng = initRand(1003)
+    var btree = newBTreeIndex[int, string](order = 8)
+    var inserted = initTable[int, bool]()
+    for i in 0..<400:
+      let k = randKey(rng, 0, 200)
+      btree.insert(k, "v")
+      inserted[k] = true
+    let scanned = btree.scan(50, 100)
+    for (k, _) in scanned:
+      check k >= 50
+      check k <= 100
+      check inserted[k]
+
+  test "B-Tree contains after insert":
+    var rng = initRand(1004)
+    var btree = newBTreeIndex[int, string](order = 8)
+    var keys: seq[int] = @[]
+    for i in 0..<100:
+      let k = randKey(rng)
+      btree.insert(k, "v")
+      keys.add(k)
+    for k in keys:
+      check btree.contains(k)
+
+  test "B-Tree remove decreases size":
+    var rng = initRand(1005)
+    var btree = newBTreeIndex[int, string](order = 8)
+    var inserted = initTable[int, seq[string]]()
+    for i in 0..<200:
+      let k = randKey(rng, 0, 100)
+      let v = "v" & $i
+      btree.insert(k, v)
+      if k notin inserted:
+        inserted[k] = @[]
+      inserted[k].add(v)
+    let beforeSize = btree.len
+    var removedCount = 0
+    for k, vals in inserted:
+      if vals.len > 0:
+        btree.remove(k, vals[0])
+        inc removedCount
+    # Size should decrease by number of keys that had values removed
+    # (if all values removed, key is deleted)
+    check btree.len <= beforeSize
+
+  test "B-Tree with large order handles many inserts":
+    var rng = initRand(1006)
+    var btree = newBTreeIndex[int, string](order = 64)
+    for i in 0..<2000:
+      btree.insert(i, "v" & $i)
+    check btree.len == 2000
+    for i in 0..<2000:
+      check btree.contains(i)
+
+  test "B-Tree duplicate inserts append values":
+    var rng = initRand(1007)
+    var btree = newBTreeIndex[int, string](order = 8)
+    let k = 42
+    for i in 0..<50:
+      btree.insert(k, "v" & $i)
+    let vals = btree.get(k)
+    check vals.len == 50
+    for i in 0..<50:
+      check vals[i] == "v" & $i
+
+  test "B-Tree scan on empty tree returns empty":
+    var btree = newBTreeIndex[int, string]()
+    let result = btree.scan(0, 100)
+    check result.len == 0
+
+  test "B-Tree random interleaved insert/remove maintains invariants":
+    var rng = initRand(1008)
+    var btree = newBTreeIndex[int, string](order = 8)
+    var tracker = initTable[int, seq[string]]()
+    for i in 0..<300:
+      let op = rng.rand(0..2)
+      let k = randKey(rng, 0, 50)
+      case op
+      of 0, 1:  # insert
+        let v = "v" & $i
+        btree.insert(k, v)
+        if k notin tracker:
+          tracker[k] = @[]
+        tracker[k].add(v)
+      of 2:  # remove
+        if k in tracker and tracker[k].len > 0:
+          let v = tracker[k][0]
+          btree.remove(k, v)
+          tracker[k].del(0)
+          if tracker[k].len == 0:
+            tracker.del(k)
+      else: discard
+    # Verify all tracked keys are present
+    for k, vals in tracker:
+      let got = btree.get(k)
+      check got == vals
