@@ -8,6 +8,11 @@ import std/os
 import std/endians
 import std/monotimes
 import std/locks
+import std/nativesockets
+when defined(windows):
+  from std/winlean import TCP_NODELAY
+else:
+  from std/posix import TCP_NODELAY
 import config
 import logging
 import ../protocol/wire
@@ -22,6 +27,7 @@ import ../core/disttxn
 import ../core/replication
 import ../core/sharding
 import ../core/gossip
+import ../protocol/ratelimit
 import jwt as jwtlib
 
 type
@@ -37,12 +43,11 @@ type
     clusterMembership*: ClusterMembership
     gossipProtocol*: GossipProtocol
     tls*: TLSContext
+    rateLimiter*: RateLimiter
     activeConnections*: int
     activeConnectionsLock*: Lock
 
-proc newServer*(config: BaraConfig): Server =
-  let dataDir = config.dataDir / "server"
-  let db = newLSMTree(dataDir)
+proc newServerWithDb*(config: BaraConfig, db: LSMTree): Server =
   let ctx = newExecutionContext(db)
   ctx.txnManager = newTxnManager()
   var tls: TLSContext = nil
@@ -85,18 +90,39 @@ proc newServer*(config: BaraConfig): Server =
   gp.onSuspect = proc(nodeId: string) {.gcsafe.} =
     cm.onNodeSuspect(nodeId)
 
+  # Initialize rate limiter
+  let rl = newRateLimiter(rlaTokenBucket, config.rateLimitGlobal, config.rateLimitPerClient)
+
   result = Server(config: config, running: false, db: db, ctx: ctx,
          txnManager: ctx.txnManager, distTxnManager: newDistTxnManager(),
          replicationManager: newReplicationManager(),
          shardRouter: shardRouter,
          clusterMembership: cm,
          gossipProtocol: gp,
-         tls: tls)
+         tls: tls,
+         rateLimiter: rl)
   initLock(result.activeConnectionsLock)
+
+proc newServer*(config: BaraConfig): Server =
+  let dataDir = config.dataDir / "server"
+  let db = newLSMTree(dataDir)
+  return newServerWithDb(config, db)
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
 # ----------------------------------------------------------------------
+
+proc bytesToString(data: seq[byte]): string =
+  ## Safely convert seq[byte] to string (copies data)
+  result = newString(data.len)
+  for i in 0..<data.len:
+    result[i] = char(data[i])
+
+proc stringToBytes(data: string): seq[byte] =
+  ## Safely convert string to seq[byte] (copies data)
+  result = newSeq[byte](data.len)
+  for i in 0..<data.len:
+    result[i] = byte(data[i])
 
 proc readUint32BE(data: string, pos: int): uint32 =
   if pos + 4 > data.len:
@@ -381,7 +407,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
                 let key = data[0..<nullPos]
                 let value = data[nullPos+1..^1]
                 if value.len > 0:
-                  server.db.put(key, cast[seq[byte]](value))
+                  server.db.put(key, stringToBytes(value))
                 else:
                   server.db.delete(key)
           await client.send("ACK " & $lsn & "\n")
@@ -435,27 +461,35 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
       if not authenticated and header.kind != mkAuth:
         let err = makeErrorMessage(header.requestId, 401, "Authentication required")
-        await client.send(cast[string](err))
+        await client.send(bytesToString(err))
         continue
+
+      # Rate limiting for query messages
+      if header.kind in {mkQuery, mkQueryParams}:
+        let clientKey = "client-" & $clientId
+        if not server.rateLimiter.allowRequest(clientKey):
+          let err = serializeError(429, "Rate limit exceeded", header.requestId)
+          await client.send(bytesToString(err))
+          continue
 
       case header.kind
       of mkAuth:
-        let tokenStr = parseAuthMessage(cast[seq[byte]](payload))
+        let tokenStr = parseAuthMessage(stringToBytes(payload))
         let (valid, userId, role) = verifyToken(secret, tokenStr)
         if valid:
           authenticated = true
           connCtx.currentUser = userId
           connCtx.currentRole = role
           let okMsg = makeAuthOkMessage(header.requestId)
-          await client.send(cast[string](okMsg))
+          await client.send(bytesToString(okMsg))
           info("Client " & $clientId & " authenticated as " & userId)
         else:
           let err = makeErrorMessage(header.requestId, 403, "Invalid token")
-          await client.send(cast[string](err))
+          await client.send(bytesToString(err))
 
       of mkQuery:
         var pos = 0
-        let queryStr = readString(cast[seq[byte]](payload), pos)
+        let queryStr = readString(stringToBytes(payload), pos)
         info("[" & $clientId & "] Query: " & queryStr)
 
         # Shard-aware routing: check if this node should handle the write
@@ -471,7 +505,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
                 if localShards.len == 0:
                   shardCheck = false
                   let err = serializeError(3, "Node not assigned to any shard", header.requestId)
-                  await client.send(cast[string](err))
+                  await client.send(bytesToString(err))
                 break
 
         if shardCheck:
@@ -484,15 +518,15 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
           if success:
             let dataMsg = serializeResult(result, header.requestId)
-            await client.send(cast[string](dataMsg))
+            await client.send(bytesToString(dataMsg))
             let completeMsg = serializeComplete(result.affectedRows, header.requestId)
-            await client.send(cast[string](completeMsg))
+            await client.send(bytesToString(completeMsg))
           else:
             let errorMsg = serializeError(1, errorMsg, header.requestId)
-            await client.send(cast[string](errorMsg))
+            await client.send(bytesToString(errorMsg))
 
       of mkQueryParams:
-        let (queryStr, params) = readQueryParamsMessage(cast[seq[byte]](payload))
+        let (queryStr, params) = readQueryParamsMessage(stringToBytes(payload))
         info("[" & $clientId & "] QueryParams: " & queryStr & " (" & $params.len & " params)")
 
         let startTicks = getMonoTime().ticks()
@@ -504,26 +538,26 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
         if success:
           let dataMsg = serializeResult(result, header.requestId)
-          await client.send(cast[string](dataMsg))
+          await client.send(bytesToString(dataMsg))
           let completeMsg = serializeComplete(result.affectedRows, header.requestId)
-          await client.send(cast[string](completeMsg))
+          await client.send(bytesToString(completeMsg))
         else:
           let errorMsg = serializeError(1, errorMsg, header.requestId)
-          await client.send(cast[string](errorMsg))
+          await client.send(bytesToString(errorMsg))
 
       of mkPing:
         var pongMsg = WireMessage(
           header: MessageHeader(kind: mkPong, length: 0, requestId: header.requestId),
           payload: @[],
         )
-        await client.send(cast[string](serializeMessage(pongMsg)))
+        await client.send(bytesToString(serializeMessage(pongMsg)))
 
       of mkClose:
         break
 
       else:
         let errorMsg = serializeError(2, "Unsupported message kind: " & $header.kind, header.requestId)
-        await client.send(cast[string](errorMsg))
+        await client.send(bytesToString(errorMsg))
 
   except Exception as e:
     errorMsg("Client " & $clientId & " error: " & e.msg)
@@ -537,6 +571,11 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
     info("Client " & $clientId & " disconnected")
     client.close()
 
+proc setTcpNoDelay(sock: AsyncSocket) =
+  ## Enable TCP_NODELAY using the correct protocol level (IPPROTO_TCP).
+  ## asyncnet.setSockOpt uses SOL_SOCKET by default which fails for OptNoDelay.
+  setSockOptInt(sock.getFd, IPPROTO_TCP.cint, TCP_NODELAY, 1)
+
 proc run*(server: Server) {.async.} =
   server.running = true
   var clientId = 0
@@ -548,6 +587,7 @@ proc run*(server: Server) {.async.} =
 
   let sock = newAsyncSocket()
   sock.setSockOpt(OptReuseAddr, true)
+  setTcpNoDelay(sock)
   sock.bindAddr(Port(server.config.port), server.config.address)
   sock.listen()
   if server.config.tlsEnabled:
@@ -556,6 +596,7 @@ proc run*(server: Server) {.async.} =
     info("BaraDB listening on " & server.config.address & ":" & $server.config.port)
   while server.running:
     let client = await sock.accept()
+    setTcpNoDelay(client)
     acquire(server.activeConnectionsLock)
     var shouldAccept = true
     try:

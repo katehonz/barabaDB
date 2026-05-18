@@ -19,6 +19,7 @@ import ../protocol/wire
 import ../core/websocket
 import jwt as jwtlib
 import ../protocol/auth
+import ../protocol/ratelimit
 
 type
   HttpServer* = ref object
@@ -29,6 +30,7 @@ type
     metrics*: Metrics
     secretKey*: string
     authManager*: AuthManager
+    rateLimiter*: RateLimiter
     ws*: WsServer
 
   Metrics* = ref object
@@ -38,13 +40,12 @@ type
     selectCount*: int
     activeConnections*: int
 
-proc newHttpServer*(config: BaraConfig): HttpServer =
-  let dataDir = config.dataDir / "server"
-  let db = newLSMTree(dataDir)
+proc newHttpServerWithDb*(config: BaraConfig, db: LSMTree): HttpServer =
   let ctx = newExecutionContext(db)
   ctx.txnManager = newTxnManager()
   let secret = config.getEffectiveJwtSecret()
   let ws = newWsServer(config, secret)
+  let rl = newRateLimiter(rlaTokenBucket, config.rateLimitGlobal, config.rateLimitPerClient)
   ctx.onChange = proc(ev: ChangeEvent) =
     let msg = $ev.kind & " " & ev.table
     asyncCheck ws.broadcastToTable(ev.table, msg)
@@ -52,7 +53,13 @@ proc newHttpServer*(config: BaraConfig): HttpServer =
   HttpServer(config: config, running: false, db: db, ctx: ctx,
              secretKey: secret,
              authManager: am,
+             rateLimiter: rl,
              metrics: Metrics(), ws: ws)
+
+proc newHttpServer*(config: BaraConfig): HttpServer =
+  let dataDir = config.dataDir / "server"
+  let db = newLSMTree(dataDir)
+  return newHttpServerWithDb(config, db)
 
 # ----------------------------------------------------------------------
 # JWT helpers
@@ -123,6 +130,13 @@ proc queryHandler(server: HttpServer): RequestHandler =
           return
         userId = uid
         role = r
+
+      # Rate limiting
+      let clientKey = request.headers["X-Forwarded-For"]
+      let rateLimitKey = if clientKey.len > 0: clientKey else: "http-global"
+      if not server.rateLimiter.allowRequest(rateLimitKey):
+        ctx.json(%*{"error": "Rate limit exceeded"}, 429)
+        return
 
       let body = parseJson(request.body)
       if body == nil or "query" notin body:

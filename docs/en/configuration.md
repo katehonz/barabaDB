@@ -45,8 +45,10 @@ BaraDB can be configured via **environment variables**, a **config file**, or **
 |----------|---------|-------------|
 | `BARADB_AUTH_ENABLED` | `false` | Enable authentication |
 | `BARADB_JWT_SECRET` | — | JWT signing secret |
-| `BARADB_RATE_LIMIT_GLOBAL` | `10000` | Global requests per second |
-| `BARADB_RATE_LIMIT_PER_CLIENT` | `1000` | Per-client requests per second |
+| `BARADB_RATE_LIMIT_GLOBAL` | `10000` | Global requests per minute (token-bucket) |
+| `BARADB_RATE_LIMIT_PER_CLIENT` | `1000` | Per-client requests per minute (token-bucket) |
+
+> **Note:** Rate limiting is enforced at the protocol level in both TCP and HTTP servers. TCP uses client connection ID for per-client limits. HTTP uses `X-Forwarded-For` header (for proxy setups) or a global key.
 
 ### Logging
 

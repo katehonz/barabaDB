@@ -2,6 +2,21 @@
 
 All notable changes to BaraDB are documented in this file.
 
+## [Unreleased] — Server Architecture Improvements
+
+### Fixed
+
+- **Shared Storage Instance** — TCP and HTTP servers now share a single LSMTree instance instead of creating separate ones, eliminating data inconsistency between protocols
+- **Unsafe Cast Operations** — Replaced all `cast[string]` and `cast[seq[byte]]` with safe `bytesToString`/`stringToBytes` helper functions that properly copy data for ARC/ORC memory management compatibility
+
+### Changed
+
+- **TCP_NODELAY Enabled** — Both listening and client sockets now have TCP_NODELAY set, reducing latency for small messages (queries, acks) by disabling Nagle's algorithm
+- **Rate Limiter Integrated** — Token-bucket rate limiter is now active in both TCP and HTTP server handlers:
+  - TCP: Per-client rate limiting on query messages (error code 429)
+  - HTTP: Rate limiting on `/query` and `/batch` endpoints with `X-Forwarded-For` support
+- **Gossip Error Handling** — Improved UDP socket error recovery with exponential backoff (100ms-5s) and socket recreation only after 10 consecutive failures
+
 ## [Unreleased] — AI-Native Platform
 
 ### Added

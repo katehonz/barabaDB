@@ -230,17 +230,21 @@ proc main() =
         warn("Failed to generate self-signed certificate. TLS disabled.")
         config.tlsEnabled = false
 
+  # Shared LSMTree instance for both TCP and HTTP servers
+  let dataDir = config.dataDir / "server"
+  let sharedDb = newLSMTree(dataDir)
+
   # Start HTTP server (blocking, multi-threaded via hunos) in background thread
-  var httpServer = newHttpServer(config)
+  var httpServer = newHttpServerWithDb(config, sharedDb)
   spawn httpServer.run(config.port + 440)  # HTTP port = TCP port + 440
 
   # Start background compaction loop
-  let cm = newCompactionManager(httpServer.db)
+  let cm = newCompactionManager(sharedDb)
   asyncCheck cm.startCompactionLoop()
 
   # Create TCP server (initialization is synchronous, run is async)
   let localId {.used.} = if config.raftNodeId.len > 0: config.raftNodeId else: "node-" & $config.port
-  var tcpServer = newServer(config)
+  var tcpServer = newServerWithDb(config, sharedDb)
 
   # Start Raft cluster if enabled
   if config.raftEnabled:
@@ -251,11 +255,9 @@ proc main() =
       if cmd == "put":
         let parts = cast[string](data).split("\x00")
         if parts.len >= 2:
-          httpServer.db.put(parts[0], cast[seq[byte]](parts[1]))
-          tcpServer.db.put(parts[0], cast[seq[byte]](parts[1]))
+          sharedDb.put(parts[0], cast[seq[byte]](parts[1]))
       elif cmd == "delete":
-        httpServer.db.delete(cast[string](data))
-        tcpServer.db.delete(cast[string](data))
+        sharedDb.delete(cast[string](data))
 
     # Wire RAFT ↔ DistTxn
     wireRaftDistTxn(raftNode, tcpServer)

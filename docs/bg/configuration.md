@@ -45,8 +45,10 @@ BaraDB може да се конфигурира чрез **променливи
 |------------|----------|----------|
 | `BARADB_AUTH_ENABLED` | `false` | Включване на автентикация |
 | `BARADB_JWT_SECRET` | — | JWT подписващ secret |
-| `BARADB_RATE_LIMIT_GLOBAL` | `10000` | Глобални заявки в секунда |
-| `BARADB_RATE_LIMIT_PER_CLIENT` | `1000` | Заявки в секунда за клиент |
+| `BARADB_RATE_LIMIT_GLOBAL` | `10000` | Глобални заявки в минута (token-bucket) |
+| `BARADB_RATE_LIMIT_PER_CLIENT` | `1000` | Заявки в минута за клиент (token-bucket) |
+
+> **Забележка:** Rate limiting се прилага на ниво протокол и в двата сървъра (TCP и HTTP). TCP използва ID на връзката за per-client лимити. HTTP използва `X-Forwarded-For` хедър (за прокси среди) или глобален ключ.
 
 ### Логване
 

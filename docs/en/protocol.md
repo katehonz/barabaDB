@@ -11,6 +11,11 @@ BaraDB supports multiple protocols for client communication:
 
 The binary protocol uses big-endian encoding for all multi-byte values.
 
+### Connection Optimizations
+
+- **TCP_NODELAY** — Enabled on both server and client sockets to minimize latency for small messages (queries, acks). This disables Nagle's algorithm, ensuring packets are sent immediately without buffering.
+- **Rate Limiting** — Token-bucket rate limiter is integrated at the protocol level. Queries exceeding the rate limit receive error code 429.
+
 ### Connection Lifecycle
 
 ```
@@ -141,6 +146,18 @@ printf '\x00\x00\x00\x12\x01\x02\x00\x00\x00\x00\x08SELECT 1' > /dev/tcp/localho
 ## HTTP/REST API
 
 Base URL: `http://localhost:9470/api/v1`
+
+### Rate Limiting
+
+All query endpoints (`/query`, `/batch`) are protected by a token-bucket rate limiter:
+- **Global rate** — Configured via `BARADB_RATE_LIMIT_GLOBAL` (default: 10,000 requests/minute)
+- **Per-client rate** — Configured via `BARADB_RATE_LIMIT_PER_CLIENT` (default: 1,000 requests/minute)
+- **Client identification** — Uses `X-Forwarded-For` header when behind a proxy, otherwise uses a global key
+
+When rate-limited, the server returns HTTP 429 with:
+```json
+{"error": "Rate limit exceeded"}
+```
 
 ### Endpoints
 

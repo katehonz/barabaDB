@@ -34,10 +34,31 @@ BaraDB е **мултимодален database engine**, написан на Nim,
 - **WebSocket** (`core/websocket.nim`): Full-duplex стрийминг
 - **Embedded** (`storage/lsm.nim`): Директен in-process достъп
 
+### Сървърна Архитектура
+
+TCP и HTTP сървърите споделят един LSMTree инстанс за гарантиране на консистентност на данните:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                 СПОДЕЛЕНО СЪХРАНЕНИЕ                      │
+│                 LSMTree Инстанс                          │
+├────────────────────────┬────────────────────────────────┤
+│   TCP Сървър           │   HTTP Сървър                  │
+│   (Бинарен Протокол)   │   (REST API)                   │
+│   Порт: 9472           │   Порт: 9912                   │
+│   TCP_NODELAY: ВКЛ     │   Multi-threaded               │
+└────────────────────────┴────────────────────────────────┘
+```
+
+**Ключови оптимизации:**
+- **Споделен LSMTree** — И двата сървъра работят върху един и същ database инстанс, елиминирайки несъответствие в данните
+- **TCP_NODELAY** — Включен както на слушащия, така и на клиентските сокети за по-ниска латентност при малки съобщения
+- **Безопасна конверсия на байтове** — Правилни `bytesToString`/`stringToBytes` функции вместо unsafe `cast` операции
+
 ### Управление на Връзки
 
 - **Connection Pool** (`protocol/pool.nim`): Min/max лимити на връзки с idle timeout
-- **Rate Limiting** (`protocol/ratelimit.nim`): Token-bucket глобални и per-client лимити
+- **Rate Limiting** (`protocol/ratelimit.nim`): Token-bucket глобални и per-client лимити, интегрирани в TCP и HTTP хендърите
 - **Автентикация** (`protocol/auth.nim`): JWT с HMAC-SHA256 и достъп на база роли
 - **TLS/SSL** (`protocol/ssl.nim`): TLS 1.3 с автоматично генерирани сертификати
 
@@ -95,7 +116,7 @@ BaraQL конвейрът:
 - **Raft Консенсус** (`core/raft.nim`): Leader election, log репликация
 - **Шардиране** (`core/sharding.nim`): Hash, range и consistent hashing
 - **Репликация** (`core/replication.nim`): Sync, async, semi-sync режими
-- **Gossip Протокол** (`core/gossip.nim`): SWIM-подобно управление на членство
+- **Gossip Протокол** (`core/gossip.nim`): SWIM-подобно управление на членство с експоненциален backoff при грешки
 - **Разпределени Транзакции** (`core/disttxn.nim`): Two-phase commit
 
 ## Ключови Дизайнерски Решения

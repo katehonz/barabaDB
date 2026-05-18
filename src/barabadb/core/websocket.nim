@@ -5,6 +5,11 @@ import std/strutils
 import std/tables
 import std/base64
 import std/sets
+import std/nativesockets
+when defined(windows):
+  from std/winlean import TCP_NODELAY
+else:
+  from std/posix import TCP_NODELAY
 import config
 import jwt as jwtlib
 
@@ -307,16 +312,22 @@ proc handleConnection(server: WsServer, client: AsyncSocket) {.async.} =
   inc server.nextId
   asyncCheck server.handleWsClient(client, server.nextId)
 
+proc setTcpNoDelay(sock: AsyncSocket) =
+  ## Enable TCP_NODELAY using the correct protocol level (IPPROTO_TCP).
+  setSockOptInt(sock.getFd, IPPROTO_TCP.cint, TCP_NODELAY, 1)
+
 proc run*(server: WsServer, port: int = 9471) {.async.} =
   server.running = true
   let sock = newAsyncSocket()
   sock.setSockOpt(OptReuseAddr, true)
+  setTcpNoDelay(sock)
   sock.bindAddr(Port(port))
   sock.listen()
   echo "BaraDB WebSocket listening on port ", port
 
   while server.running:
     let client = await sock.accept()
+    setTcpNoDelay(client)
     asyncCheck server.handleConnection(client)
 
 proc stop*(server: WsServer) =

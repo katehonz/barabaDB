@@ -34,10 +34,31 @@ Multiple communication protocols:
 - **WebSocket** (`core/websocket.nim`): Full-duplex streaming
 - **Embedded** (`storage/lsm.nim`): Direct in-process access
 
+### Server Architecture
+
+The TCP and HTTP servers share a single LSMTree instance to ensure data consistency:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                    SHARED STORAGE                        │
+│                    LSMTree Instance                      │
+├────────────────────────┬────────────────────────────────┤
+│   TCP Server           │   HTTP Server                  │
+│   (Binary Protocol)    │   (REST API)                   │
+│   Port: 9472           │   Port: 9912                   │
+│   TCP_NODELAY: ON      │   Multi-threaded               │
+└────────────────────────┴────────────────────────────────┘
+```
+
+**Key optimizations:**
+- **Shared LSMTree** — Both servers operate on the same database instance, eliminating data inconsistency
+- **TCP_NODELAY** — Enabled on both listening and client sockets for lower latency on small messages
+- **Safe byte conversion** — Proper `bytesToString`/`stringToBytes` functions instead of unsafe `cast` operations
+
 ### Connection Management
 
 - **Connection Pool** (`protocol/pool.nim`): Min/max connection limits with idle timeout
-- **Rate Limiting** (`protocol/ratelimit.nim`): Token-bucket global and per-client limits
+- **Rate Limiting** (`protocol/ratelimit.nim`): Token-bucket global and per-client limits, integrated in both TCP and HTTP handlers
 - **Authentication** (`protocol/auth.nim`): JWT with HMAC-SHA256 and role-based access
 - **TLS/SSL** (`protocol/ssl.nim`): TLS 1.3 with auto-generated certificates
 
@@ -121,7 +142,7 @@ Client → Protocol → Auth → Parser → AST → IR → Codegen
 - **Raft Consensus** (`core/raft.nim`): Leader election, log replication
 - **Sharding** (`core/sharding.nim`): Hash, range, and consistent hashing
 - **Replication** (`core/replication.nim`): Sync, async, semi-sync modes
-- **Gossip Protocol** (`core/gossip.nim`): SWIM-like membership management
+- **Gossip Protocol** (`core/gossip.nim`): SWIM-like membership management with exponential backoff error recovery
 - **Distributed Transactions** (`core/disttxn.nim`): Two-phase commit
 
 ## Key Design Decisions

@@ -320,21 +320,36 @@ proc startGossipListener*(gp: GossipProtocol) {.async.} =
   gp.sock.setSockOpt(OptReuseAddr, true)
   gp.sock.bindAddr(Port(gp.gossipPort))
   gp.running = true
+  var consecutiveErrors = 0
+  const maxConsecutiveErrors = 10
+  const baseRetryDelayMs = 100
+
   while gp.running:
     try:
       let (data, senderAddr, _) = await gp.sock.recvFrom(65535)
+      consecutiveErrors = 0  # Reset on success
       if data.len > 0:
         gp.handleIncomingGossip(data, senderAddr)
-    except:
-      # Small sleep on error to avoid spin
-      gp.sock.close()
-      # Recreate socket for next iteration
-      try:
-        gp.sock = newAsyncSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
-        gp.sock.setSockOpt(OptReuseAddr, true)
-        gp.sock.bindAddr(Port(gp.gossipPort))
-      except:
+    except CatchableError as e:
+      if not gp.running:
         break
+      inc consecutiveErrors
+      if consecutiveErrors >= maxConsecutiveErrors:
+        # Recreate socket after too many errors
+        try:
+          gp.sock.close()
+        except:
+          discard
+        try:
+          gp.sock = newAsyncSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
+          gp.sock.setSockOpt(OptReuseAddr, true)
+          gp.sock.bindAddr(Port(gp.gossipPort))
+          consecutiveErrors = 0
+        except:
+          break
+      # Exponential backoff with cap
+      let delayMs = min(baseRetryDelayMs * (1 shl min(consecutiveErrors, 6)), 5000)
+      await sleepAsync(delayMs)
 
 proc startGossip*(gp: GossipProtocol, healthIntervalMs: int = 1000,
                   gossipIntervalMs: int = 2000) =
