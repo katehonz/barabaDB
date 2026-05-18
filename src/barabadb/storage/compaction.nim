@@ -107,13 +107,16 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
   let outputPath = cs.dataDir / "sstables" / ("level_" & $level & "_" & $tables[0].createdAt & ".sst")
   var sst = writeSSTable(final, outputPath, level + 1)
 
+  # Use actual file size instead of rough guess
+  let actualSize = try: getFileSize(outputPath) except: final.len * 64
+
   let outputMeta = SSTableMeta(
     path: outputPath,
     level: level + 1,
     minKey: sst.minKey,
     maxKey: sst.maxKey,
     entryCount: final.len,
-    sizeBytes: final.len * 64,
+    sizeBytes: actualSize,
     createdAt: tables[^1].createdAt,
   )
 

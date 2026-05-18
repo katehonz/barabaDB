@@ -135,6 +135,8 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
   # Write header
   s.write(SSTableMagic)
   s.write(SSTableVersion)
+  if entries.len > high(uint32).int:
+    raise newException(ValueError, "SSTable entry count exceeds uint32 limit")
   s.write(uint32(entries.len))
   s.write(uint32(level))
   let indexOffsetPos = s.getPosition()
@@ -146,8 +148,12 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
   var offsets = newSeq[(string, int64)](entries.len)
   for i, entry in entries:
     offsets[i] = (entry.key, int64(s.getPosition()))
+    if entry.key.len > high(uint32).int:
+      raise newException(ValueError, "SSTable key length exceeds uint32 limit")
     s.write(uint32(entry.key.len))
     s.write(entry.key)
+    if entry.value.len > high(uint32).int:
+      raise newException(ValueError, "SSTable value length exceeds uint32 limit")
     s.write(uint32(entry.value.len))
     if entry.value.len > 0:
       s.writeData(addr entry.value[0], entry.value.len)

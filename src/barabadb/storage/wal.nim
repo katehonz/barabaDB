@@ -26,6 +26,8 @@ type
     entryCount: uint64
     syncOnWrite: bool
 
+proc readEntries*(walPath: string, untilTimestamp: uint64 = 0): seq[WalEntry]
+
 proc newWriteAheadLog*(dir: string, syncOnWrite: bool = true): WriteAheadLog =
   createDir(dir)
   let path = dir / "wal.log"
@@ -38,9 +40,13 @@ proc newWriteAheadLog*(dir: string, syncOnWrite: bool = true): WriteAheadLog =
     stream.write(WALMagic)
     stream.write(WALVersion)
     stream.flush()
-  # NOTE: entryCount is reset to 0 when appending to existing WAL.
-  # For an accurate count, call readEntries() after construction.
-  WriteAheadLog(path: path, stream: stream, entryCount: 0, syncOnWrite: syncOnWrite)
+  # Count existing entries when appending to an existing WAL so
+  # entryCount() remains accurate across restarts.
+  var count: uint64 = 0
+  if exists and not isEmpty:
+    for e in readEntries(path):
+      inc count
+  WriteAheadLog(path: path, stream: stream, entryCount: count, syncOnWrite: syncOnWrite)
 
 proc writeEntry*(wal: var WriteAheadLog, entry: WalEntry) =
   wal.stream.write(uint8(entry.kind))
