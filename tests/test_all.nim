@@ -6,7 +6,6 @@ import std/os
 import std/asyncdispatch
 import std/monotimes
 import std/base64
-import std/random
 import std/json
 
 import barabadb/core/types

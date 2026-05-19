@@ -503,7 +503,7 @@ proc handleInitialize(params: JsonNode): JsonNode =
     "protocolVersion": "2024-11-05",
     "serverInfo": {
       "name": "BaraDB MCP Server",
-      "version": "1.1.4"
+      "version": "1.1.6"
     },
     "capabilities": {
       "tools": {}
@@ -690,7 +690,7 @@ proc processMessage(raw: string): string =
 # ---------------------------------------------------------------------------
 
 proc init*(dataDir: string = "./data"): McpServerCtx =
-  logToStderr("BaraDB MCP Server v1.1.4 initializing...")
+  logToStderr("BaraDB MCP Server v1.1.6 initializing...")
   let db = newLSMTree(dataDir)
   let ctx = newExecutionContext(db)
   ctx.txnManager = newTxnManager()

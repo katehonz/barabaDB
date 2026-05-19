@@ -21,7 +21,7 @@ This directory contains TLA+ specifications for core BaraDB distributed-systems 
 - Java Runtime Environment (JRE) 8+ — the bundled `tla2tools.jar` contains TLC and SANY.
 - Or [TLA+ Toolbox](https://lamport.azurewebsites.net/tla/toolbox.html) (GUI + TLC model checker).
 
-## Verified State Space (v1.1.4)
+## Verified State Space (v1.1.6)
 
 | Spec | States Generated | Distinct States | Depth |
 |------|-----------------|-----------------|-------|

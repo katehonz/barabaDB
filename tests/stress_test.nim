@@ -2,11 +2,8 @@
 ## Each worker gets its own LSMTree instance (thread-safe via internal locks).
 import std/os
 import std/random
-import std/strutils
 import std/times
 import std/monotimes
-import std/sequtils
-import std/threadpool
 import barabadb/storage/lsm
 
 const
@@ -14,16 +11,24 @@ const
   OpsPerWorker = 1000
   KeySpace = 500
 
+type
+  WorkerArgs = tuple
+    workerId: int
+    dataDir: string
+    errors: ptr int
+
 randomize()
 
-proc runWorker(workerId: int, dataDir: string): int =
-  var db = newLSMTree(dataDir)
-  var errors = 0
+proc runWorker(args: WorkerArgs) {.thread.} =
+  var db: LSMTree
+  var localErrors = 0
+  {.cast(gcsafe).}:
+    db = newLSMTree(args.dataDir)
 
   for i in 0 ..< OpsPerWorker:
     let op = rand(0 .. 2)
-    let key = "key_" & $workerId & "_" & $(rand(0 ..< KeySpace))
-    let value = cast[seq[byte]]("val_" & $i & "_" & $workerId)
+    let key = "key_" & $args.workerId & "_" & $(rand(0 ..< KeySpace))
+    let value = cast[seq[byte]]("val_" & $i & "_" & $args.workerId)
 
     case op
     of 0:
@@ -39,12 +44,12 @@ proc runWorker(workerId: int, dataDir: string): int =
       discard
 
   for k in 0 ..< KeySpace:
-    let key = "key_" & $workerId & "_" & $k
+    let key = "key_" & $args.workerId & "_" & $k
     let (found, _) = db.get(key)
     discard found
 
   db.close()
-  return errors
+  args.errors[] = localErrors
 
 proc main() =
   let baseDir = "/tmp/baradb_stress_test"
@@ -57,14 +62,18 @@ proc main() =
   for i in 0 ..< NumWorkers:
     workerDirs.add(baseDir / "worker_" & $i)
 
-  # Run workers in parallel using threadpool
-  var futures: seq[FlowVar[int]] = @[]
+  # Run workers in parallel using std/threads
+  var threadArr: array[NumWorkers, Thread[WorkerArgs]]
+  var errorCounts: array[NumWorkers, int]
+
   for i in 0 ..< NumWorkers:
-    futures.add(spawn runWorker(i, workerDirs[i]))
+    let args: WorkerArgs = (workerId: i, dataDir: workerDirs[i], errors: addr errorCounts[i])
+    createThread(threadArr[i], runWorker, args)
 
   var totalErrors = 0
-  for f in futures:
-    totalErrors += ^f
+  for i in 0 ..< NumWorkers:
+    joinThread(threadArr[i])
+    totalErrors += errorCounts[i]
 
   let elapsed = (getMonoTime() - start).inMilliseconds
   let totalOps = NumWorkers * OpsPerWorker

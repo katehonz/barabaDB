@@ -116,7 +116,7 @@ proc exportOtlp*(tracer: Tracer, endpoint: string = "http://localhost:4318/v1/tr
         {"key": "service.name", "value": {"stringValue": "baradadb"}}
       ]},
       "scopeSpans": [{
-        "scope": {"name": "baradadb-tracer", "version": "1.1.4"},
+        "scope": {"name": "baradadb-tracer", "version": "1.1.6"},
         "spans": otlpSpans
       }]
     }]

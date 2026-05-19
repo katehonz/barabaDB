@@ -22,7 +22,7 @@ run_tlc() {
 }
 
 echo "=============================================="
-echo " BaraDB Formal Verification Suite v1.1.4"
+echo " BaraDB Formal Verification Suite v1.1.6"
 echo " Running TLC model checker on all specs"
 echo "=============================================="
 echo ""

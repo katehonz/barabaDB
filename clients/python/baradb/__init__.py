@@ -41,7 +41,7 @@ from .core import (
     ResultFormat,
 )
 
-__version__ = "1.1.4"
+__version__ = "1.1.6"
 __all__ = [
     "Client",
     "QueryBuilder",

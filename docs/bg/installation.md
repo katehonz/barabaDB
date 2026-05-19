@@ -143,7 +143,7 @@ strip build/baradadb
 
 ```bash
 ./build/baradadb --version
-# Очакван резултат: BaraDB v1.1.4 — Multimodal Database Engine
+# Очакван резултат: BaraDB v1.1.6 — Multimodal Database Engine
 ```
 
 ## Стартиране на Тестове
@@ -234,7 +234,7 @@ docker-compose up -d
 Добавете към вашия `.nimble` файл:
 
 ```nim
-requires "barabadb >= 1.1.4"
+requires "barabadb >= 1.1.6"
 ```
 
 Използване в кода:
@@ -255,7 +255,7 @@ db.close()
 ./build/baradadb
 
 # Очакван изход:
-# BaraDB v1.1.4 — Multimodal Database Engine
+# BaraDB v1.1.6 — Multimodal Database Engine
 # BaraDB TCP listening on 127.0.0.1:9472
 
 # Тестване с HTTP API

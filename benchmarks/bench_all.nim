@@ -1,7 +1,6 @@
 ## BaraDB Benchmarks — performance tests for all engines
 import std/monotimes
 import std/times
-import std/tables
 import std/random
 import std/strutils
 import std/os

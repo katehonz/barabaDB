@@ -13,7 +13,7 @@ curl http://localhost:9470/health
 ```json
 {
   "status": "healthy",
-  "version": "1.1.4",
+  "version": "1.1.6",
   "uptime_seconds": 86400,
   "checks": {
     "storage": "ok",

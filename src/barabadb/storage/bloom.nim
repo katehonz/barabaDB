@@ -24,10 +24,10 @@ proc hash1*(bf: BloomFilter, data: openArray[byte]): uint64 =
   result = uint64(!$h)
 
 proc hash2*(bf: BloomFilter, data: openArray[byte]): uint64 =
-  var h: Hash = 5381
+  var h: uint64 = 5381
   for b in data:
-    h = ((h shl 5) + h) + Hash(b)
-  result = uint64(h)
+    h = ((h shl 5) + h) + uint64(b)
+  result = h
 
 proc getHashes(bf: BloomFilter, data: openArray[byte]): seq[int] =
   let h1 = bf.hash1(data)

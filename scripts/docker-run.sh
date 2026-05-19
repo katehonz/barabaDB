@@ -29,7 +29,7 @@ docker run -d \
   -e BARADB_PORT=9472 \
   -e BARADB_DATA_DIR=/data \
   -e BARADB_LOG_LEVEL=info \
-  --health-cmd "wget -q --spider http://localhost:9470/health || exit 1" \
+  --health-cmd "wget -q --spider http://localhost:9912/health || exit 1" \
   --health-interval 15s \
   --health-timeout 5s \
   --health-retries 3 \

@@ -68,15 +68,17 @@ proc put*(mt: var MemTable, key: string, value: seq[byte], timestamp: uint64, de
   let entrySize = key.len + value.len + 16
   if entrySize > mt.maxSize:
     return false
-  if mt.size + entrySize > mt.maxSize and mt.entries.len > 0:
-    return false
   let entry = Entry(key: key, value: value, timestamp: timestamp, deleted: deleted)
   let pos = mt.entries.lowerBound(entry, proc(a, b: Entry): int = cmp(a.key, b.key))
   if pos < mt.entries.len and mt.entries[pos].key == key:
+    let oldSize = mt.entries[pos].key.len + mt.entries[pos].value.len + 16
     mt.entries[pos] = entry
+    mt.size += entrySize - oldSize
   else:
+    if mt.size + entrySize > mt.maxSize and mt.entries.len > 0:
+      return false
     mt.entries.insert(entry, pos)
-  mt.size += entrySize
+    mt.size += entrySize
   return true
 
 proc get*(mt: MemTable, key: string): (bool, Entry) =

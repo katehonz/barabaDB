@@ -13,12 +13,9 @@
 #   docker build -f Dockerfile.source -t baradb:latest .
 
 # ─── Stage 1: Builder ─────────────────────────────────────
-FROM nimlang/nim:2.2.10-alpine AS builder
+FROM nimlang/nim:2.2.10 AS builder
 
 WORKDIR /build
-
-# Инсталираме build зависимости
-RUN apk add --no-cache git gcc musl-dev openssl-dev pcre-dev
 
 # Копираме nimble файл и инсталираме публични зависимости
 COPY baradadb.nimble .
@@ -33,21 +30,27 @@ COPY *.nim .
 RUN nim c -d:release --opt:speed -d:ssl -o:baradadb src/baradadb.nim
 
 # Компилираме backup tool
-RUN nim c -d:release -o:backup src/barabadb/core/backup.nim
+RUN nim c -d:release --path:src -o:backup src/barabadb/core/backup.nim
 
 # ─── Stage 2: Production Runtime ──────────────────────────
-FROM alpine:3.19
+FROM ubuntu:24.04
 
 LABEL maintainer="BaraDB Team"
 LABEL description="BaraDB — Multimodal Database Engine (source build)"
-LABEL version="1.1.4"
+LABEL version="1.1.6"
 
 # Инсталираме runtime зависимости
-RUN apk add --no-cache ca-certificates su-exec wget pcre
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libpcre3 \
+        ca-certificates \
+        wget \
+        gosu && \
+    rm -rf /var/lib/apt/lists/*
 
 # Създаваме dedicated потребител за сигурност
-RUN addgroup -g 1000 -S baradb && \
-    adduser -u 1000 -S baradb -G baradb
+RUN groupadd -r baradb && \
+    useradd -r -g baradb baradb
 
 WORKDIR /app
 
@@ -66,20 +69,20 @@ RUN mkdir -p /data && chown baradb:baradb /data && \
 # Environment variables (defaults)
 ENV BARADB_ADDRESS=0.0.0.0
 ENV BARADB_PORT=9472
-ENV BARADB_HTTP_PORT=9470
-ENV BARADB_WS_PORT=9471
+# Note: HTTP port = TCP port + 440 (9912 when TCP=9472)
+# Note: WS port   = TCP port + 441 (9913 when TCP=9472)
 ENV BARADB_DATA_DIR=/data
 ENV BARADB_LOG_LEVEL=info
 
 # Expose ports
-EXPOSE 9472 9470 9471
+EXPOSE 9472 9912 9913
 
 # Volume за persistent data
 VOLUME ["/data"]
 
 # Healthcheck
 HEALTHCHECK --interval=15s --timeout=5s --start-period=10s --retries=3 \
-    CMD wget -q --spider http://localhost:${BARADB_HTTP_PORT}/health || exit 1
+    CMD wget -qO- http://localhost:9912/health >/dev/null 2>&1 || exit 1
 
 # Стартираме чрез entrypoint
 ENTRYPOINT ["docker-entrypoint.sh"]

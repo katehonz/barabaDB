@@ -4,6 +4,9 @@ import std/random
 import std/strutils
 import std/os
 import std/monotimes
+import std/tables
+import std/sets
+import std/algorithm
 
 import barabadb/protocol/wire
 import barabadb/storage/lsm
@@ -547,6 +550,7 @@ suite "Storage Fuzz":
   test "LSM delete removes key and get returns false":
     var rng = initRand(6002)
     let tmpDir = getTempDir() / "baradb_fuzz_lsm_del_" & $getCurrentProcessId()
+    removeDir(tmpDir)
     createDir(tmpDir)
     defer: removeDir(tmpDir)
 
@@ -554,11 +558,14 @@ suite "Storage Fuzz":
     defer: db.close()
 
     var keys: seq[string] = @[]
-    for i in 0..<200:
+    var seen = initHashSet[string]()
+    while keys.len < 200:
       let k = randKey(rng, 1, 16)
-      let v = randValue(rng, 0, 64)
-      db.put(k, v)
-      keys.add(k)
+      if k notin seen:
+        seen.incl(k)
+        let v = randValue(rng, 0, 64)
+        db.put(k, v)
+        keys.add(k)
 
     # Delete half
     for i in 0..<keys.len div 2:
@@ -678,19 +685,23 @@ suite "Storage Fuzz":
     defer: removeDir(tmpDir)
 
     var entries: seq[Entry] = @[]
-    for i in 0..<100:
-      entries.add(Entry(
-        key: randKey(rng, 1, 20),
-        value: randValue(rng, 0, 128),
-        timestamp: uint64(i),
-        deleted: false,
-      ))
+    var seenSst = initHashSet[string]()
+    while entries.len < 100:
+      let k = randKey(rng, 1, 20)
+      if k notin seenSst:
+        seenSst.incl(k)
+        entries.add(Entry(
+          key: k,
+          value: randValue(rng, 0, 128),
+          timestamp: uint64(entries.len),
+          deleted: false,
+        ))
 
     # Sort entries by key for SSTable
     entries.sort(proc(a, b: Entry): int = cmp(a.key, b.key))
 
     let path = tmpDir / "test.sst"
-    let sst = writeSSTable(entries, path, level = 0)
+    var sst = writeSSTable(entries, path, level = 0)
     defer: close(sst)
 
     for e in entries:
@@ -735,17 +746,21 @@ suite "Storage Fuzz":
     defer: removeDir(tmpDir)
 
     var entries: seq[Entry] = @[]
-    for i in 0..<50:
-      entries.add(Entry(
-        key: randKey(rng, 1, 16),
-        value: randValue(rng, 0, 64),
-        timestamp: uint64(i),
-        deleted: rng.rand(0..1) == 1,
-      ))
+    var seenTomb = initHashSet[string]()
+    while entries.len < 50:
+      let k = randKey(rng, 1, 16)
+      if k notin seenTomb:
+        seenTomb.incl(k)
+        entries.add(Entry(
+          key: k,
+          value: randValue(rng, 0, 64),
+          timestamp: uint64(entries.len),
+          deleted: rng.rand(0..1) == 1,
+        ))
     entries.sort(proc(a, b: Entry): int = cmp(a.key, b.key))
 
     let path = tmpDir / "tombstones.sst"
-    let sst = writeSSTable(entries, path, level = 0)
+    var sst = writeSSTable(entries, path, level = 0)
     defer: close(sst)
 
     for e in entries:

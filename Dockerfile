@@ -10,13 +10,16 @@
 #   docker build -t baradb:latest .
 #
 # Run:
-#   docker run -d -p 9472:9472 -p 9470:9470 -p 9471:9471 -v baradb_data:/data baradb:latest
+#   docker run -d -p 9472:9472 -p 9912:9912 -p 9913:9913 -v baradb_data:/data baradb:latest
 
 FROM debian:bookworm-slim
 
+ARG BUILD_DATE
+ARG VCS_REF
+
 LABEL maintainer="BaraDB Team"
 LABEL description="BaraDB — Multimodal Database Engine"
-LABEL version="1.1.4"
+LABEL version="1.1.6"
 
 # Инсталираме runtime зависимости
 # libpcre3 — нужна за Nim regex (зарежда се динамично)

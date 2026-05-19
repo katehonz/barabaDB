@@ -41,7 +41,7 @@
 
 ### Добавки
 
-- **Client SDKs v1.1.4** — Пълнофункционални клиенти за всички езици:
+- **Client SDKs v1.1.6** — Пълнофункционални клиенти за всички езици:
   - JavaScript: TypeScript дефиниции, package.json, примери, unit и integration тестове
   - Python: Преструктуриран като пакет (`baradb/` с `__init__.py` и `core.py`), pyproject.toml, примери, тестове (query builder, wire protocol, integration)
   - Nim: Примери, integration тестове, README
@@ -72,7 +72,7 @@
 ### Промени
 
 - **Версията е вдигната до 1.1.0** във всички компоненти (сървър, Docker изображения, клиенти, CLI)
-- **README** — Версионният badge е обновен; всички feature таблици вече реферират v1.1.4
+- **README** — Версионният badge е обновен; всички feature таблици вече реферират v1.1.6
 - **TLA+ Формална Верификация** — Добавени `crossmodal.tla`, `backup.tla`, `recovery.tla`; symmetry reduction във всички 9 спецификации
 - **Чист build** — 0 компилаторни предупреждения на Nim 2.2.10
 

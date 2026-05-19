@@ -143,7 +143,7 @@ strip build/baradadb
 
 ```bash
 ./build/baradadb --version
-# Beklenen: BaraDB v1.1.4 — Multimodal Database Engine
+# Beklenen: BaraDB v1.1.6 — Multimodal Database Engine
 ```
 
 ## Testleri Çalıştırma
@@ -237,7 +237,7 @@ docker-compose up -d
 `.nimble` dosyanıza ekleyin:
 
 ```nim
-requires "barabadb >= 1.1.4"
+requires "barabadb >= 1.1.6"
 ```
 
 Kodunuzda kullanın:
@@ -258,7 +258,7 @@ db.close()
 ./build/baradadb
 
 # Beklenen çıktı:
-# BaraDB v1.1.4 — Multimodal Database Engine
+# BaraDB v1.1.6 — Multimodal Database Engine
 # BaraDB TCP listening on 127.0.0.1:9472
 
 # HTTP API ile test et

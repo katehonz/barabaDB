@@ -199,7 +199,7 @@ proc queryHandler(server: HttpServer): RequestHandler =
 proc healthHandler(): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
     let ctx = newContext(request)
-    ctx.json(%*{"status": "ok", "version": "1.1.4"})
+    ctx.json(%*{"status": "ok", "version": "1.1.6"})
 
 proc metricsHandler(server: HttpServer): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
@@ -535,7 +535,7 @@ function showTab(idx){
 }
 setInterval(() => { if(document.querySelectorAll('.panel')[4].classList.contains('active')) loadMetrics() }, 5000)
 </script>
-<div class='status' style='text-align:center;padding:10px'>BaraDB v1.1.4 — Multimodal Database Engine</div>
+<div class='status' style='text-align:center;padding:10px'>BaraDB v1.1.6 — Multimodal Database Engine</div>
 </body></html>"""
     request.respond(200, @[("Content-Type", "text/html; charset=utf-8")], html)
 
