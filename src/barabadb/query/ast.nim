@@ -428,14 +428,17 @@ type
     of nkInExpr:
       inLeft*: Node
       inRight*: Node
+      inNegated*: bool
     of nkBetweenExpr:
       betweenExpr*: Node
       betweenLow*: Node
       betweenHigh*: Node
+      betweenNegated*: bool
     of nkLikeExpr:
       likeExpr*: Node
       likePattern*: Node
       likeCaseInsensitive*: bool
+      likeNegated*: bool
     of nkIsExpr:
       isExpr*: Node
       isType*: string

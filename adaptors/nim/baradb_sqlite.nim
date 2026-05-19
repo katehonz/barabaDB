@@ -1,6 +1,6 @@
 ## BaraDB adapter mimicking db_sqlite API for NimForum
 
-import std/strutils, std/tables, std/sequtils, std/parseutils
+import std/strutils, std/parseutils, std/times
 import ../../clients/nim/src/baradb/client as baradb_client
 
 type
@@ -24,6 +24,17 @@ proc dbQuote*(s: string): string =
     else: add(result, c)
   add(result, '\'')
 
+proc preprocessQuery(q: string): string =
+  ## Replace SQLite-specific expressions with BaraDB-compatible equivalents.
+  result = q
+  let nowStr = format(now(), "yyyy-MM-dd HH:mm:ss")
+  result = result.replace("TIMESTAMP", "DATETIME")
+  result = result.replace("timestamp", "DATETIME")
+  result = result.replace("DATETIME('now')", "'" & nowStr & "'")
+  result = result.replace("datetime('now')", "'" & nowStr & "'")
+  result = result.replace("INET", "STRING")
+  result = result.replace("inet", "STRING")
+
 proc dbFormat*(formatstr: SqlQuery, args: varargs[string]): string =
   var res = ""
   var a = 0
@@ -35,7 +46,7 @@ proc dbFormat*(formatstr: SqlQuery, args: varargs[string]): string =
       inc(a)
     else:
       add(res, c)
-  res
+  result = preprocessQuery(res)
 
 proc toClient(db: DbConn): SyncClient =
   cast[SyncClient](db)
@@ -82,7 +93,7 @@ proc getRow*(db: DbConn, query: SqlQuery, args: varargs[string, `$`]): seq[strin
   if qr.rows.len > 0:
     return qr.rows[0]
   else:
-    return newSeq[string](qr.columns.len)
+    return @[]
 
 proc getAllRows*(db: DbConn, query: SqlQuery, args: varargs[string, `$`]): seq[seq[string]] =
   let client = toClient(db)
@@ -119,10 +130,12 @@ proc insertID*(db: DbConn, query: SqlQuery, args: varargs[string, `$`]): int64 =
   if tableName.len > 0:
     let idQr = client.query("SELECT max(id) FROM " & tableName)
     if idQr.rows.len > 0 and idQr.rows[0].len > 0:
-      try:
-        return parseInt(idQr.rows[0][0]).int64
-      except:
-        discard
+      let val = idQr.rows[0][0]
+      if val.len > 0 and val != "\\N":
+        try:
+          return parseInt(val).int64
+        except:
+          discard
   return -1
 
 proc tryInsertID*(db: DbConn, query: SqlQuery, args: varargs[string, `$`]): int64 =
@@ -135,11 +148,13 @@ proc nextId*(db: DbConn, tableName: string): int64 =
   let client = toClient(db)
   let qr = client.query("SELECT max(id) FROM " & tableName)
   if qr.rows.len > 0 and qr.rows[0].len > 0:
-    try:
-      let current = parseInt(qr.rows[0][0])
-      return current.int64 + 1
-    except:
-      return 1
+    let val = qr.rows[0][0]
+    if val.len > 0 and val != "\\N":
+      try:
+        let current = parseInt(val)
+        return current.int64 + 1
+      except:
+        return 1
   return 1
 
 proc execAffectedRows*(db: DbConn, query: SqlQuery, args: varargs[string, `$`]): int64 =
@@ -147,3 +162,15 @@ proc execAffectedRows*(db: DbConn, query: SqlQuery, args: varargs[string, `$`]):
   let q = dbFormat(query, args)
   let qr = client.query(q)
   return qr.affectedRows.int64
+
+proc dbBegin*(db: DbConn) =
+  let client = toClient(db)
+  discard client.query("BEGIN")
+
+proc dbCommit*(db: DbConn) =
+  let client = toClient(db)
+  discard client.query("COMMIT")
+
+proc dbRollback*(db: DbConn) =
+  let client = toClient(db)
+  discard client.query("ROLLBACK")

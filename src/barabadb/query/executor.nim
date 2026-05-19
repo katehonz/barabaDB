@@ -252,6 +252,8 @@ proc exprToSql(node: Node): string =
       return node.funcName & "()"
   of nkUnaryOp:
     return $node.unOp & " " & exprToSql(node.unOperand)
+  of nkPath:
+    return node.pathParts.join(".")
   else:
     return $node.kind
 
@@ -956,7 +958,12 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         if parseFloat(left) == parseFloat(right): return "true"
       except: discard
       return "false"
-    of irNeq: return if left != right: "true" else: "false"
+    of irNeq:
+      if left != right: return "true"
+      # Try numeric comparison
+      try:
+        return if parseFloat(left) != parseFloat(right): "true" else: "false"
+      except: return "false"
     of irLt:
       try:
         return if parseFloat(left) < parseFloat(right): "true" else: "false"
@@ -2374,41 +2381,73 @@ proc lowerExpr*(node: Node): IRExpr =
     result.binOp = if node.likeCaseInsensitive: irILike else: irLike
     result.binLeft = lowerExpr(node.likeExpr)
     result.binRight = lowerExpr(node.likePattern)
+    if node.likeNegated:
+      let wrapped = result
+      result = IRExpr(kind: irekUnary, valueKind: vkBool, unOp: irNot, unExpr: wrapped)
   of nkBetweenExpr:
-    result = IRExpr(kind: irekBinary, valueKind: vkBool)
-    result.binOp = irAnd
-    let leftCmp = IRExpr(kind: irekBinary, valueKind: vkBool)
-    leftCmp.binOp = irGte
-    leftCmp.binLeft = lowerExpr(node.betweenExpr)
-    leftCmp.binRight = lowerExpr(node.betweenLow)
-    let rightCmp = IRExpr(kind: irekBinary, valueKind: vkBool)
-    rightCmp.binOp = irLte
-    rightCmp.binLeft = lowerExpr(node.betweenExpr)
-    rightCmp.binRight = lowerExpr(node.betweenHigh)
-    result.binLeft = leftCmp
-    result.binRight = rightCmp
+    if node.betweenNegated:
+      # NOT BETWEEN => NOT (expr >= low AND expr <= high)
+      result = IRExpr(kind: irekBinary, valueKind: vkBool)
+      result.binOp = irOr
+      let leftCmp = IRExpr(kind: irekBinary, valueKind: vkBool)
+      leftCmp.binOp = irLt
+      leftCmp.binLeft = lowerExpr(node.betweenExpr)
+      leftCmp.binRight = lowerExpr(node.betweenLow)
+      let rightCmp = IRExpr(kind: irekBinary, valueKind: vkBool)
+      rightCmp.binOp = irGt
+      rightCmp.binLeft = lowerExpr(node.betweenExpr)
+      rightCmp.binRight = lowerExpr(node.betweenHigh)
+      result.binLeft = leftCmp
+      result.binRight = rightCmp
+    else:
+      result = IRExpr(kind: irekBinary, valueKind: vkBool)
+      result.binOp = irAnd
+      let leftCmp = IRExpr(kind: irekBinary, valueKind: vkBool)
+      leftCmp.binOp = irGte
+      leftCmp.binLeft = lowerExpr(node.betweenExpr)
+      leftCmp.binRight = lowerExpr(node.betweenLow)
+      let rightCmp = IRExpr(kind: irekBinary, valueKind: vkBool)
+      rightCmp.binOp = irLte
+      rightCmp.binLeft = lowerExpr(node.betweenExpr)
+      rightCmp.binRight = lowerExpr(node.betweenHigh)
+      result.binLeft = leftCmp
+      result.binRight = rightCmp
   of nkInExpr:
     if node.inRight.kind == nkArrayLit:
-      result = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkBool, boolVal: false))
-      for elem in node.inRight.arrayElems:
-        let eqCmp = IRExpr(kind: irekBinary)
-        eqCmp.binOp = irEq
-        eqCmp.binLeft = lowerExpr(node.inLeft)
-        eqCmp.binRight = lowerExpr(elem)
-        let orNode = IRExpr(kind: irekBinary)
-        orNode.binOp = irOr
-        orNode.binLeft = result
-        orNode.binRight = eqCmp
-        result = orNode
+      if node.inNegated:
+        # NOT IN (list) => AND of != comparisons
+        result = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkBool, boolVal: true))
+        for elem in node.inRight.arrayElems:
+          let neqCmp = IRExpr(kind: irekBinary)
+          neqCmp.binOp = irNeq
+          neqCmp.binLeft = lowerExpr(node.inLeft)
+          neqCmp.binRight = lowerExpr(elem)
+          let andNode = IRExpr(kind: irekBinary)
+          andNode.binOp = irAnd
+          andNode.binLeft = result
+          andNode.binRight = neqCmp
+          result = andNode
+      else:
+        result = IRExpr(kind: irekLiteral, literal: IRLiteral(kind: vkBool, boolVal: false))
+        for elem in node.inRight.arrayElems:
+          let eqCmp = IRExpr(kind: irekBinary)
+          eqCmp.binOp = irEq
+          eqCmp.binLeft = lowerExpr(node.inLeft)
+          eqCmp.binRight = lowerExpr(elem)
+          let orNode = IRExpr(kind: irekBinary)
+          orNode.binOp = irOr
+          orNode.binLeft = result
+          orNode.binRight = eqCmp
+          result = orNode
     elif node.inRight.kind == nkSubquery:
       result = IRExpr(kind: irekBinary)
-      result.binOp = irIn
+      result.binOp = if node.inNegated: irNotIn else: irIn
       result.binLeft = lowerExpr(node.inLeft)
       result.binRight = IRExpr(kind: irekSubquery)
       result.binRight.subqueryPlan = lowerSelect(node.inRight.subQuery)
     else:
       result = IRExpr(kind: irekBinary)
-      result.binOp = irEq
+      result.binOp = if node.inNegated: irNeq else: irEq
       result.binLeft = lowerExpr(node.inLeft)
       result.binRight = lowerExpr(node.inRight)
   of nkExists:
@@ -2900,12 +2939,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               var minVal = ""
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
+                if v == "\\\\N": continue
                 if minVal == "" or cmpMin(v, minVal): minVal = v
               newRow[alias] = minVal
             of irMax:
               var maxVal = ""
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
+                if v == "\\\\N": continue
                 if maxVal == "" or cmpMax(v, maxVal): maxVal = v
               newRow[alias] = maxVal
             of irArrayAgg:
@@ -2964,20 +3005,23 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
   of irpkSort:
     var sourceRows = executePlan(ctx, plan.sortSource)
     if plan.sortExprs.len == 0: return sourceRows
-    let sortExpr = plan.sortExprs[0]
-    let ascending = if plan.sortDirs.len > 0: plan.sortDirs[0] else: true
     proc sortCmp(a, b: Row): int =
-      let va = evalExpr(sortExpr, a, ctx)
-      let vb = evalExpr(sortExpr, b, ctx)
-      try:
-        let fa = parseFloat(va)
-        let fb = parseFloat(vb)
-        if fa < fb: return -1
-        if fa > fb: return 1
-        return 0
-      except:
-        return cmp(va, vb)
-    sourceRows.sort(sortCmp, if ascending: Ascending else: Descending)
+      for i, sortExpr in plan.sortExprs:
+        let ascending = if i < plan.sortDirs.len: plan.sortDirs[i] else: true
+        let va = evalExpr(sortExpr, a, ctx)
+        let vb = evalExpr(sortExpr, b, ctx)
+        var cmpRes = 0
+        try:
+          let fa = parseFloat(va)
+          let fb = parseFloat(vb)
+          if fa < fb: cmpRes = -1
+          elif fa > fb: cmpRes = 1
+        except:
+          cmpRes = cmp(va, vb)
+        if not ascending: cmpRes = -cmpRes
+        if cmpRes != 0: return cmpRes
+      return 0
+    sourceRows.sort(sortCmp, Ascending)
     return sourceRows
 
   of irpkLimit:
@@ -3075,12 +3119,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             var minVal = ""
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
+              if v == "\\\\N": continue
               if minVal == "" or cmpMin(v, minVal): minVal = v
             aggRow[aggKey] = minVal
           of irMax:
             var maxVal = ""
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
+              if v == "\\\\N": continue
               if maxVal == "" or cmpMax(v, maxVal): maxVal = v
             aggRow[aggKey] = maxVal
           of irArrayAgg:
@@ -3107,7 +3153,21 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     let leftRows = executePlan(ctx, plan.joinLeft)
     result = @[]
 
-    proc mergeRow(left, right: Row, leftAlias, rightAlias: string): Row =
+    proc getScanTable(p: IRPlan): string =
+      if p == nil: return ""
+      case p.kind
+      of irpkScan: p.scanTable
+      of irpkJoin: getScanTable(p.joinRight)
+      else: ""
+
+    proc getLeftmostScanTable(p: IRPlan): string =
+      if p == nil: return ""
+      case p.kind
+      of irpkScan: p.scanTable
+      of irpkJoin: getLeftmostScanTable(p.joinLeft)
+      else: ""
+
+    proc mergeRow(left, right: Row, leftAlias, rightAlias, leftTable, rightTable: string): Row =
       result = initTable[string, string]()
       for k, v in left:
         if not k.startsWith("$"):
@@ -3115,17 +3175,20 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       for k, v in right:
         if not k.startsWith("$") and k notin result:
           result[k] = v
-      if leftAlias.len > 0:
+      let lq = if leftAlias.len > 0: leftAlias elif leftTable.len > 0: leftTable else: ""
+      if lq.len > 0:
         for k, v in left:
           if not k.startsWith("$"):
-            result[leftAlias & "." & k] = v
-      if rightAlias.len > 0:
+            result[lq & "." & k] = v
+      let rq = if rightAlias.len > 0: rightAlias elif rightTable.len > 0: rightTable else: ""
+      if rq.len > 0:
         for k, v in right:
           if not k.startsWith("$"):
-            result[rightAlias & "." & k] = v
+            result[rq & "." & k] = v
 
     let leftAlias = if plan.joinLeft != nil and plan.joinLeft.kind == irpkScan:
                       plan.joinLeft.scanAlias else: ""
+    let leftTable = getLeftmostScanTable(plan.joinLeft)
 
     # LATERAL JOIN: for each left row, scan right, merge, then filter/sort/limit
     if plan.joinLateral:
@@ -3169,7 +3232,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         # Merge, filter
         var mergedRows: seq[Row]
         for r in rawRightRows:
-          let merged = mergeRow(l, r, leftAlias, rightAlias)
+          let merged = mergeRow(l, r, leftAlias, rightAlias, leftTable, getScanTable(plan.joinRight))
           if rightFilter != nil and evalExpr(rightFilter, merged, ctx) != "true":
             continue
           if plan.joinCond != nil and evalExpr(plan.joinCond, merged, ctx) != "true":
@@ -3245,11 +3308,12 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
 
     let rightAlias = if plan.joinRight != nil and plan.joinRight.kind == irpkScan:
                        plan.joinRight.scanAlias else: ""
+    let rightTable = getScanTable(plan.joinRight)
 
     if plan.joinKind == irjkCross:
       for l in leftRows:
         for r in rightRows:
-          result.add(mergeRow(l, r, leftAlias, rightAlias))
+          result.add(mergeRow(l, r, leftAlias, rightAlias, leftTable, rightTable))
       return result
 
     case plan.joinStrategy
@@ -3296,9 +3360,9 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           matchedProbe[i] = true
           for brow in hashTable[key]:
             if buildIsLeft:
-              result.add(mergeRow(brow, prow, leftAlias, rightAlias))
+              result.add(mergeRow(brow, prow, leftAlias, rightAlias, leftTable, rightTable))
             else:
-              result.add(mergeRow(prow, brow, leftAlias, rightAlias))
+              result.add(mergeRow(prow, brow, leftAlias, rightAlias, leftTable, rightTable))
 
       # LEFT / RIGHT / FULL padding for non-matching probe rows
       if plan.joinKind == irjkLeft or plan.joinKind == irjkFull or plan.joinKind == irjkRight:
@@ -3414,9 +3478,9 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             for entry in entries:
               let parsed = parseRowData(entry.rowValue)
               if outerIsLeft:
-                result.add(mergeRow(orow, parsed, leftAlias, rightAlias))
+                result.add(mergeRow(orow, parsed, leftAlias, rightAlias, leftTable, rightTable))
               else:
-                result.add(mergeRow(parsed, orow, leftAlias, rightAlias))
+                result.add(mergeRow(parsed, orow, leftAlias, rightAlias, leftTable, rightTable))
           elif plan.joinKind == irjkLeft or plan.joinKind == irjkRight or plan.joinKind == irjkFull:
             matchedOuter[i] = false
 
@@ -3455,7 +3519,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       for l in leftRows:
         var matched = false
         for r in rightRows:
-          let merged = mergeRow(l, r, leftAlias, rightAlias)
+          let merged = mergeRow(l, r, leftAlias, rightAlias, leftTable, rightTable)
           if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
             result.add(merged)
             matched = true
@@ -3479,7 +3543,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         for r in rightRows:
           var found = false
           for l in leftRows:
-            let merged = mergeRow(l, r, leftAlias, rightAlias)
+            let merged = mergeRow(l, r, leftAlias, rightAlias, leftTable, rightTable)
             if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
               found = true
               break
@@ -3568,12 +3632,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             var minVal = ""
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
+              if v == "\\\\N": continue
               if minVal == "" or cmpMin(v, minVal): minVal = v
             aggResult = minVal
           of irMax:
             var maxVal = ""
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
+              if v == "\\\\N": continue
               if maxVal == "" or cmpMax(v, maxVal): maxVal = v
             aggResult = maxVal
           else: discard
@@ -3878,7 +3944,7 @@ proc getSelectColumns(stmt: Node): seq[string] =
     elif e.kind == nkIdent:
       result.add(e.identName)
     elif e.kind == nkPath and e.pathParts.len > 0:
-      result.add(e.pathParts[^1])
+      result.add(e.pathParts.join("."))
     elif e.kind == nkFuncCall:
       var aliasArgs: seq[string] = @[]
       for arg in e.funcArgs:
@@ -4740,8 +4806,10 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
       var kvPairs: seq[(string, seq[byte])]
       for key, version in ctx.pendingTxn.writeSet:
-        if version.value == @[]: ctx.db.delete(key)
-        else: ctx.db.put(key, version.value)
+        if version.value == @[] and version.xmax != TxnId(0):
+          ctx.db.delete(key)
+        else:
+          ctx.db.put(key, version.value)
         kvPairs.add((key, version.value))
       discard ctx.txnManager.commit(ctx.pendingTxn)
       ctx.pendingTxn = nil

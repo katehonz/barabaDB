@@ -296,6 +296,11 @@ proc parseAddSub(p: var Parser): Node =
 
 proc parseComparison(p: var Parser): Node =
   result = p.parseAddSub()
+  # Check for NOT prefix on IN/LIKE/BETWEEN
+  var negated = false
+  if p.peek().kind == tkNot:
+    discard p.advance()
+    negated = true
   # Handle BETWEEN ... AND ...
   if p.peek().kind == tkBetween:
     let tok = p.advance()
@@ -303,12 +308,27 @@ proc parseComparison(p: var Parser): Node =
     discard p.expect(tkAnd)
     let high = p.parseAddSub()
     return Node(kind: nkBetweenExpr, betweenExpr: result,
-                betweenLow: low, betweenHigh: high, line: tok.line, col: tok.col)
+                betweenLow: low, betweenHigh: high,
+                betweenNegated: negated,
+                line: tok.line, col: tok.col)
   # Handle IN (subquery | list)
   if p.peek().kind == tkIn:
     let tok = p.advance()
-    let right = p.parseAddSub()
+    discard p.expect(tkLParen)
+    let right: Node =
+      if p.peek().kind == tkSelect:
+        let sub = p.parseSelect()
+        discard p.expect(tkRParen)
+        Node(kind: nkSubquery, subQuery: sub, line: tok.line, col: tok.col)
+      else:
+        var elems: seq[Node] = @[]
+        elems.add(p.parseExpr())
+        while p.match(tkComma):
+          elems.add(p.parseExpr())
+        discard p.expect(tkRParen)
+        Node(kind: nkArrayLit, arrayElems: elems, line: tok.line, col: tok.col)
     return Node(kind: nkInExpr, inLeft: result, inRight: right,
+                inNegated: negated,
                 line: tok.line, col: tok.col)
   # Handle LIKE / ILIKE
   if p.peek().kind in {tkLike, tkILike}:
@@ -316,7 +336,13 @@ proc parseComparison(p: var Parser): Node =
     let tok = p.advance()
     let pattern = p.parseAddSub()
     return Node(kind: nkLikeExpr, likeExpr: result, likePattern: pattern,
-                likeCaseInsensitive: isILike, line: tok.line, col: tok.col)
+                likeCaseInsensitive: isILike,
+                likeNegated: negated,
+                line: tok.line, col: tok.col)
+  # If we consumed NOT but didn't find IN/LIKE/BETWEEN, put it back is not possible.
+  # Instead, wrap result in a unary NOT node.
+  if negated:
+    result = Node(kind: nkUnaryOp, unOp: ukNot, unOperand: result, line: 0, col: 0)
   # Handle IS NULL / IS NOT NULL
   if p.peek().kind == tkIs:
     let tok = p.advance()

@@ -46,3 +46,4 @@ src/barabadb/storage/compaction
 src/barabadb/query/executor
 tests/join_tests
 *.tar.gz
+tests/nimforum_smoke_test

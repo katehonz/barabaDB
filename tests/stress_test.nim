@@ -1,73 +1,104 @@
-## Stress Test — parallel workloads against LSM-Tree
-## Each worker gets its own LSMTree instance (thread-safe via internal locks).
+## Stress Test — parallel workloads against shared LSM-Tree
+## Validates correctness under concurrent access.
 import std/os
 import std/random
+import std/strutils
 import std/times
 import std/monotimes
+import std/locks
 import barabadb/storage/lsm
 
 const
-  NumWorkers = 10
-  OpsPerWorker = 1000
-  KeySpace = 500
+  NumWorkers = 16
+  OpsPerWorker = 2000
+  KeySpace = 1000
 
 type
   WorkerArgs = tuple
     workerId: int
-    dataDir: string
+    db: ptr LSMTree
     errors: ptr int
+    lock: ptr Lock
 
 randomize()
 
 proc runWorker(args: WorkerArgs) {.thread.} =
-  var db: LSMTree
   var localErrors = 0
-  {.cast(gcsafe).}:
-    db = newLSMTree(args.dataDir)
+  var rng = initRand(args.workerId)
 
   for i in 0 ..< OpsPerWorker:
-    let op = rand(0 .. 2)
-    let key = "key_" & $args.workerId & "_" & $(rand(0 ..< KeySpace))
+    let op = rng.rand(0 .. 3)
+    let key = "key_" & $(rng.rand(0 ..< KeySpace))
     let value = cast[seq[byte]]("val_" & $i & "_" & $args.workerId)
 
     case op
     of 0:
-      db.put(key, value)
+      # Put
+      acquire(args.lock[])
+      try:
+        args.db[].put(key, value)
+      except:
+        localErrors.inc
+      finally:
+        release(args.lock[])
     of 1:
-      let (found, val) = db.get(key)
+      # Get and verify (if found, value should be from some worker)
+      acquire(args.lock[])
+      var found = false
+      var val: seq[byte]
+      try:
+        (found, val) = args.db[].get(key)
+      except:
+        localErrors.inc
+      finally:
+        release(args.lock[])
       if found:
-        if val != value and val.len > 0:
-          discard
+        let valStr = cast[string](val)
+        if not valStr.startsWith("val_"):
+          localErrors.inc
     of 2:
-      db.delete(key)
+      # Delete
+      acquire(args.lock[])
+      try:
+        args.db[].delete(key)
+      except:
+        localErrors.inc
+      finally:
+        release(args.lock[])
+    of 3:
+      # Overwrite
+      acquire(args.lock[])
+      try:
+        args.db[].put(key, value)
+      except:
+        localErrors.inc
+      finally:
+        release(args.lock[])
     else:
       discard
 
-  for k in 0 ..< KeySpace:
-    let key = "key_" & $args.workerId & "_" & $k
-    let (found, _) = db.get(key)
-    discard found
-
-  db.close()
   args.errors[] = localErrors
 
 proc main() =
-  let baseDir = "/tmp/baradb_stress_test"
+  let baseDir = "/tmp/baradb_stress_test_shared"
   removeDir(baseDir)
   createDir(baseDir)
 
   let start = getMonoTime()
 
-  var workerDirs: seq[string] = @[]
-  for i in 0 ..< NumWorkers:
-    workerDirs.add(baseDir / "worker_" & $i)
+  # Single shared database
+  var db = newLSMTree(baseDir)
+  var dbPtr = addr db
+  var dbLock: Lock
+  initLock(dbLock)
+  var lockPtr = addr dbLock
 
   # Run workers in parallel using std/threads
   var threadArr: array[NumWorkers, Thread[WorkerArgs]]
   var errorCounts: array[NumWorkers, int]
 
   for i in 0 ..< NumWorkers:
-    let args: WorkerArgs = (workerId: i, dataDir: workerDirs[i], errors: addr errorCounts[i])
+    let args: WorkerArgs = (workerId: i, db: dbPtr, errors: addr errorCounts[i], lock: lockPtr)
     createThread(threadArr[i], runWorker, args)
 
   var totalErrors = 0
@@ -75,15 +106,28 @@ proc main() =
     joinThread(threadArr[i])
     totalErrors += errorCounts[i]
 
+  # Verify: scan all keys and ensure no corruption
+  var scanErrors = 0
+  for k in 0 ..< KeySpace:
+    let key = "key_" & $k
+    let (found, val) = db.get(key)
+    if found:
+      let valStr = cast[string](val)
+      if not valStr.startsWith("val_"):
+        scanErrors.inc
+
+  db.close()
+
   let elapsed = (getMonoTime() - start).inMilliseconds
   let totalOps = NumWorkers * OpsPerWorker
 
   echo "Stress test completed: ", totalOps, " ops across ", NumWorkers, " workers"
   echo "Time: ", elapsed, " ms"
   echo "Throughput: ", float(totalOps) / (float(elapsed) / 1000.0), " ops/sec"
-  echo "Errors: ", totalErrors
+  echo "Runtime errors: ", totalErrors
+  echo "Scan errors: ", scanErrors
 
-  if totalErrors > 0:
+  if totalErrors > 0 or scanErrors > 0:
     quit(1)
 
   removeDir(baseDir)
