@@ -106,6 +106,8 @@ type
     autoIncCounters*: Table[string, int64]
     sequences*: Table[string, int64]
     sharedLock*: SharedLock  # shared across cloned contexts — protects tables, views, btrees, ftsIndexes, users, policies, autoIncCounters, sequences
+    outerRow*: Table[string, string]  # outer query row for correlated subqueries
+    subqueryPlan*: IRPlan  # current subquery plan being evaluated (for correlation in execScan)
 
   MigrationRecord* = object
     name*: string
@@ -609,6 +611,70 @@ proc parseVectorString*(value: string): seq[float32] =
 # ----------------------------------------------------------------------
 
 proc execScan(ctx: ExecutionContext, table: string): seq[Row]
+
+# Collect correlated table names from IRExpr (qualified refs with 2+ parts)
+proc collectCorrelatedTables(expr: IRExpr, outTables: var seq[string]) =
+  if expr == nil: return
+  case expr.kind
+  of irekField:
+    if expr.fieldPath.len >= 2:
+      let tbl = expr.fieldPath[0]
+      if tbl notin outTables: outTables.add(tbl)
+  of irekBinary:
+    collectCorrelatedTables(expr.binLeft, outTables)
+    collectCorrelatedTables(expr.binRight, outTables)
+  of irekUnary:
+    collectCorrelatedTables(expr.unExpr, outTables)
+  of irekFuncCall:
+    for a in expr.irFuncArgs: collectCorrelatedTables(a, outTables)
+  of irekCast:
+    collectCorrelatedTables(expr.irCastExpr, outTables)
+  of irekExists:
+    discard  # nested exists — skip for simplicity
+  of irekAggregate:
+    for a in expr.aggArgs: collectCorrelatedTables(a, outTables)
+  of irekConditional:
+    collectCorrelatedTables(expr.cond, outTables)
+    collectCorrelatedTables(expr.thenExpr, outTables)
+    collectCorrelatedTables(expr.elseExpr, outTables)
+  of irekWindowFunc:
+    for a in expr.wfArgs: collectCorrelatedTables(a, outTables)
+    for a in expr.wfPartition: collectCorrelatedTables(a, outTables)
+    for a in expr.wfOrderBy: collectCorrelatedTables(a, outTables)
+  else: discard
+
+# Walk plan to find correlated table names
+proc collectCorrelatedTablesFromPlan(plan: IRPlan, outTables: var seq[string]) =
+  if plan == nil: return
+  case plan.kind
+  of irpkScan: discard
+  of irpkFilter:
+    collectCorrelatedTables(plan.filterCond, outTables)
+    collectCorrelatedTablesFromPlan(plan.filterSource, outTables)
+  of irpkProject:
+    for e in plan.projectExprs: collectCorrelatedTables(e, outTables)
+    collectCorrelatedTablesFromPlan(plan.projectSource, outTables)
+  of irpkSort:
+    for e in plan.sortExprs: collectCorrelatedTables(e, outTables)
+    collectCorrelatedTablesFromPlan(plan.sortSource, outTables)
+  of irpkLimit:
+    collectCorrelatedTablesFromPlan(plan.limitSource, outTables)
+  of irpkGroupBy:
+    for e in plan.groupKeys: collectCorrelatedTables(e, outTables)
+    for e in plan.groupAggs:
+      for a in e.aggArgs: collectCorrelatedTables(a, outTables)
+    collectCorrelatedTablesFromPlan(plan.groupSource, outTables)
+  of irpkUnion:
+    collectCorrelatedTablesFromPlan(plan.unionLeft, outTables)
+    collectCorrelatedTablesFromPlan(plan.unionRight, outTables)
+  of irpkJoin:
+    collectCorrelatedTables(plan.joinCond, outTables)
+    collectCorrelatedTablesFromPlan(plan.joinLeft, outTables)
+    collectCorrelatedTablesFromPlan(plan.joinRight, outTables)
+  of irpkInsert, irpkUpdate, irpkDelete, irpkValues, irpkExplain,
+     irpkCTE, irpkWindow, irpkPivot, irpkUnpivot, irpkGraphTraversal,
+     irpkMerge, irpkCreateType:
+    discard
 proc executeQuery*(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
 
 # ----------------------------------------------------------------------
@@ -921,6 +987,9 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if "$value" in row:
         let parsed = parseRowData(row["$value"])
         if colName in parsed: return parsed[colName]
+      # Fallback to outer row for correlated subquery references
+      if ctx != nil and ctx.outerRow.len > 0:
+        if fullPath in ctx.outerRow: return ctx.outerRow[fullPath]
     return "\\N"
   of irekStar:
     return "*"
@@ -1633,6 +1702,21 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if k.startsWith(prefix):
         return v
     return ""
+  of irekSubquery:
+    # Execute subquery and return scalar value (first column of first row)
+    if ctx != nil:
+      let savedOuter = ctx.outerRow
+      let savedPlan = ctx.subqueryPlan
+      ctx.outerRow = row
+      ctx.subqueryPlan = expr.subqueryPlan
+      let subRows = executePlan(ctx, expr.subqueryPlan)
+      ctx.outerRow = savedOuter
+      ctx.subqueryPlan = savedPlan
+      if subRows.len > 0:
+        for k, v in subRows[0]:
+          if not k.startsWith("$"):
+            return v
+    return ""
   else: return ""
 
 proc lowerExpr*(node: Node): IRExpr
@@ -1712,6 +1796,23 @@ proc execScan(ctx: ExecutionContext, table: string): seq[Row] =
       row[rest[0..<eqPos]] = rest[eqPos+1..^1]
     # RLS filter
     if passesPolicy(ctx, table, "SELECT", row):
+      # Inject qualified columns from outerRow for correlated subqueries
+      if ctx.outerRow.len > 0:
+        var outerTables: seq[string] = @[]
+        # Try to infer outer table from qualified refs already in outerRow keys
+        for k in ctx.outerRow.keys:
+          if k.contains('.') and not k.startsWith('$'):
+            let tbl = k.split('.')[0]
+            if tbl notin outerTables: outerTables.add(tbl)
+        # If no qualified keys found, scan subquery plan for correlated refs
+        if outerTables.len == 0 and ctx.subqueryPlan != nil:
+          collectCorrelatedTablesFromPlan(ctx.subqueryPlan, outerTables)
+        # Inject qualified columns
+        for k, v in ctx.outerRow:
+          if k.startsWith('$'): continue
+          if k.contains('.'): continue  # already qualified
+          for tbl in outerTables:
+            row[tbl & "." & k] = v
       result.add(row)
 
 proc execPointRead(ctx: ExecutionContext, table: string, key: string): seq[Row] =
