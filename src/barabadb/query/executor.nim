@@ -24,6 +24,24 @@ import ../storage/wal
 import ../core/mvcc
 import ../core/tracing
 import ../fts/engine as fts
+
+proc cmpMax(a, b: string): bool =
+  var fa, fb: float
+  try:
+    fa = parseFloat(a)
+    fb = parseFloat(b)
+    result = fa > fb
+  except ValueError:
+    result = a > b
+
+proc cmpMin(a, b: string): bool =
+  var fa, fb: float
+  try:
+    fa = parseFloat(a)
+    fb = parseFloat(b)
+    result = fa < fb
+  except ValueError:
+    result = a < b
 import ../vector/engine as vengine
 import ../graph/engine as gengine
 import ../graph/community as gcomm
@@ -2882,13 +2900,13 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               var minVal = ""
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                if minVal == "" or v < minVal: minVal = v
+                if minVal == "" or cmpMin(v, minVal): minVal = v
               newRow[alias] = minVal
             of irMax:
               var maxVal = ""
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                if maxVal == "" or v > maxVal: maxVal = v
+                if maxVal == "" or cmpMax(v, maxVal): maxVal = v
               newRow[alias] = maxVal
             of irArrayAgg:
               var arr: seq[string]
@@ -3057,13 +3075,13 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             var minVal = ""
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              if minVal == "" or v < minVal: minVal = v
+              if minVal == "" or cmpMin(v, minVal): minVal = v
             aggRow[aggKey] = minVal
           of irMax:
             var maxVal = ""
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              if maxVal == "" or v > maxVal: maxVal = v
+              if maxVal == "" or cmpMax(v, maxVal): maxVal = v
             aggRow[aggKey] = maxVal
           of irArrayAgg:
             var arr: seq[string]
@@ -3550,13 +3568,13 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             var minVal = ""
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              if minVal == "" or v < minVal: minVal = v
+              if minVal == "" or cmpMin(v, minVal): minVal = v
             aggResult = minVal
           of irMax:
             var maxVal = ""
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              if maxVal == "" or v > maxVal: maxVal = v
+              if maxVal == "" or cmpMax(v, maxVal): maxVal = v
             aggResult = maxVal
           else: discard
         # Clean pivot value (remove quotes)
