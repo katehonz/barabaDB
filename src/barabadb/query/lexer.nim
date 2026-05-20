@@ -160,6 +160,10 @@ type
     tkBfs
     tkDfs
     tkPath
+    tkDatabase
+    tkDatabases
+    tkUse
+    tkShow
 
     tkAutoIncrement
     tkSequence
@@ -382,6 +386,10 @@ const keywords*: Table[string, TokenKind] = {
   "bfs": tkBfs,
   "dfs": tkDfs,
   "path": tkPath,
+  "database": tkDatabase,
+  "databases": tkDatabases,
+  "use": tkUse,
+  "show": tkShow,
   "over": tkOver,
   "partition": tkPartition,
   "row": tkRow,

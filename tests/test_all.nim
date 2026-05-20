@@ -2831,7 +2831,7 @@ suite "Window Functions":
     # Sales: Diana(75000)=1, Charlie(70000)=2
     var found = initTable[string, string]()
     for row in r.rows:
-      found[row["name"]] = row["rn"]
+      found[$row["name"]] = $row["rn"]
     check found["Eve"] == "1"
     check found["Alice"] == "2"
     check found["Bob"] == "3"
@@ -3474,7 +3474,7 @@ suite "Auto-Increment & ID Generators":
     let r = qexec.executeQuery(ctx, parse("SELECT gen_random_uuid() AS uid"))
     check r.success
     check r.rows.len == 1
-    let uid = r.rows[0]["uid"]
+    let uid = $r.rows[0]["uid"]
     check uid.len == 36
     check uid[8] == '-'
     check uid[13] == '-'
@@ -3486,7 +3486,7 @@ suite "Auto-Increment & ID Generators":
     let r = qexec.executeQuery(ctx, parse("SELECT uuid() AS uid"))
     check r.success
     check r.rows.len == 1
-    check r.rows[0]["uid"].len == 36
+    check ($r.rows[0]["uid"]).len == 36
 
   test "Two UUIDs are different":
     let r = qexec.executeQuery(ctx, parse("SELECT uuid() AS a, uuid() AS b"))
@@ -3564,7 +3564,7 @@ suite "Auto-Increment & ID Generators":
     let r = qexec.executeQuery(ctx, parse("SELECT snowflake_id(1) AS sid"))
     check r.success
     check r.rows.len == 1
-    let sid = r.rows[0]["sid"]
+    let sid = $r.rows[0]["sid"]
     check sid.len > 0
     var num: int64 = 0
     try:
@@ -3720,17 +3720,17 @@ suite "Type Safety — evalExprValue":
     check r.success
     check r.rows[0]["r"] == "17.5"
 
-  test "evalExprValue returns correct Value kind for literals":
+  test "evalExpr returns correct Value kind for literals":
     let lit = IRExpr(kind: irekLiteral, valueKind: vkInt64)
     lit.literal = IRLiteral(kind: vkInt64, int64Val: 42)
-    let v = evalExprValue(lit, initTable[string, string](), nil)
+    let v = evalExpr(lit, initTable[string, Value](), nil)
     check v.kind == vkInt64
     check v.int64Val == 42
 
-  test "evalExprValue returns correct Value kind for float literal":
+  test "evalExpr returns correct Value kind for float literal":
     let lit = IRExpr(kind: irekLiteral, valueKind: vkFloat64)
     lit.literal = IRLiteral(kind: vkFloat64, float64Val: 3.14)
-    let v = evalExprValue(lit, initTable[string, string](), nil)
+    let v = evalExpr(lit, initTable[string, Value](), nil)
     check v.kind == vkFloat64
     check v.float64Val == 3.14
 
@@ -3998,7 +3998,7 @@ suite "Hybrid RAG Search":
     let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search('docs', 'embedding', 'content', 'quick brown', '[1.0, 0.0, 0.0]', 10) AS res"))
     check r.success
     check r.rows.len == 1
-    let jsonStr = r.rows[0]["res"]
+    let jsonStr = $r.rows[0]["res"]
     check jsonStr.len > 2  # not "[]"
     let arr = parseJson(jsonStr)
     check arr.kind == JArray
@@ -4013,7 +4013,7 @@ suite "Hybrid RAG Search":
     let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search_ids('docs2', 'embedding', 'content', 'machine learning', '[0.0, 1.0, 0.0]', 10) AS ids"))
     check r.success
     check r.rows.len == 1
-    let idsStr = r.rows[0]["ids"]
+    let idsStr = $r.rows[0]["ids"]
     check idsStr.len > 0
     check idsStr.contains("20")
 
@@ -4029,7 +4029,7 @@ suite "Hybrid RAG Search":
     discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts3 ON docs3(content) USING FTS"))
     let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search('docs3', 'embedding', 'content', 'quick brown fox', '[1.0, 0.0, 0.0]', 10) AS res"))
     check r.success
-    let arr = parseJson(r.rows[0]["res"])
+    let arr = parseJson($r.rows[0]["res"])
     check arr.len == 3
     # Doc 3 should be first (matches both vector and FTS), doc 1 second (vector only), doc 2 third (no match)
     check arr[0]["id"].getStr() == "3"
@@ -4038,7 +4038,7 @@ suite "Hybrid RAG Search":
     let r = qexec.executeQuery(ctx, parse("SELECT rerank('quick brown', '[{\"id\":\"1\",\"score\":\"0.5\"},{\"id\":\"2\",\"score\":\"0.5\"}]') AS res"))
     check r.success
     # Both have same score, rerank should preserve order (no content to boost)
-    let arr = parseJson(r.rows[0]["res"])
+    let arr = parseJson($r.rows[0]["res"])
     check arr.kind == JArray
     check arr.len == 2
 
@@ -4060,7 +4060,7 @@ suite "Hybrid RAG Search":
     discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts5 ON docs5(content) USING FTS"))
     let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search_filtered('docs5', 'embedding', 'content', 'quick brown fox', '[1.0, 0.0, 0.0]', 10, 'tenant_id', 'tenant-a') AS res"))
     check r.success
-    let arr = parseJson(r.rows[0]["res"])
+    let arr = parseJson($r.rows[0]["res"])
     # Doc 1 (tenant-a) should be first and highest scored; Doc 2 (tenant-b) must be excluded
     check arr[0]["id"].getStr() == "1"
     for elem in arr:
@@ -4074,6 +4074,6 @@ suite "Hybrid RAG Search":
     discard qexec.executeQuery(ctx, parse("CREATE INDEX idx_fts6 ON docs6(content) USING FTS"))
     let r = qexec.executeQuery(ctx, parse("SELECT hybrid_search_filtered('docs6', 'embedding', 'content', 'quick brown fox', '[1.0, 0.0, 0.0]', 10, '', '') AS res"))
     check r.success
-    let arr = parseJson(r.rows[0]["res"])
+    let arr = parseJson($r.rows[0]["res"])
     check arr.len == 2
 

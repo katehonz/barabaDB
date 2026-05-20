@@ -3,6 +3,8 @@ import std/os
 import std/strutils
 import std/monotimes
 import std/tables
+import std/sequtils
+import barabadb/core/types
 import barabadb/query/executor as qexec
 import barabadb/query/parser
 import barabadb/storage/lsm
@@ -97,7 +99,7 @@ suite "JOIN execution":
     var foundBob = false
     for row in r.rows:
       if row["u.name"] == "Bob":
-        check row["x.total"] == "\\N"
+        check row["x.total"].kind == vkNull
         foundBob = true
     check foundBob
 

@@ -1646,6 +1646,42 @@ proc parseDropGraph(p: var Parser): Node =
   result = Node(kind: nkDropGraph, dgName: name, dgIfExists: ifExists,
                 line: tok.line, col: tok.col)
 
+proc parseCreateDatabase(p: var Parser): Node =
+  let tok = p.expect(tkCreate)
+  discard p.expect(tkDatabase)
+  var ifNotExists = false
+  if p.peek().kind == tkIf:
+    discard p.advance()
+    discard p.expect(tkNot)
+    discard p.expect(tkExists)
+    ifNotExists = true
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkCreateDatabase, cdDbName: name, cdIfNotExists: ifNotExists,
+                line: tok.line, col: tok.col)
+
+proc parseDropDatabase(p: var Parser): Node =
+  let tok = p.expect(tkDrop)
+  discard p.expect(tkDatabase)
+  var ifExists = false
+  if p.peek().kind == tkIf:
+    discard p.advance()
+    discard p.expect(tkExists)
+    ifExists = true
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkDropDatabase, ddDbName: name, ddIfExists: ifExists,
+                line: tok.line, col: tok.col)
+
+proc parseUseDatabase(p: var Parser): Node =
+  let tok = p.expect(tkUse)
+  let name = p.expect(tkIdent).value
+  result = Node(kind: nkUseDatabase, udDbName: name,
+                line: tok.line, col: tok.col)
+
+proc parseShowDatabases(p: var Parser): Node =
+  let tok = p.expect(tkShow)
+  discard p.expect(tkDatabases)
+  result = Node(kind: nkShowDatabases, line: tok.line, col: tok.col)
+
 proc parseStatement*(p: var Parser): Node =
   case p.peek().kind
   of tkWith, tkSelect: p.parseSelect()
@@ -1674,6 +1710,8 @@ proc parseStatement*(p: var Parser): Node =
         p.parseCreatePolicy()
       elif next.kind == tkGraph:
         p.parseCreateGraph()
+      elif next.kind == tkDatabase:
+        p.parseCreateDatabase()
       else:
         p.parseCreateType()
     else:
@@ -1695,6 +1733,8 @@ proc parseStatement*(p: var Parser): Node =
         p.parseDropPolicy()
       elif next.kind == tkGraph:
         p.parseDropGraph()
+      elif next.kind == tkDatabase:
+        p.parseDropDatabase()
       else:
         let tok = p.advance()
         Node(kind: nkNullLit, line: tok.line, col: tok.col)
@@ -1713,6 +1753,14 @@ proc parseStatement*(p: var Parser): Node =
     p.parseRevoke()
   of tkSet:
     p.parseSetVar()
+  of tkUse:
+    p.parseUseDatabase()
+  of tkShow:
+    if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkDatabases:
+      p.parseShowDatabases()
+    else:
+      let tok = p.advance()
+      Node(kind: nkNullLit, line: tok.line, col: tok.col)
   of tkApply:
     if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkMigration:
       p.parseApplyMigration()

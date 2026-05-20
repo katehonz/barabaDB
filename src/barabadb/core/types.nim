@@ -1,6 +1,7 @@
 import std/times
 import std/oids
 import std/monotimes
+import std/strutils
 
 type
   ValueKind* = enum
@@ -124,3 +125,60 @@ proc newRecordId*(): RecordId =
 
 proc `==`*(a, b: RecordId): bool {.borrow.}
 proc `$`*(r: RecordId): string = $uint64(r)
+
+proc `==`*(a, b: Value): bool {.noSideEffect.} =
+  if a.kind != b.kind: return false
+  case a.kind
+  of vkNull: return true
+  of vkBool: return a.boolVal == b.boolVal
+  of vkInt8: return a.int8Val == b.int8Val
+  of vkInt16: return a.int16Val == b.int16Val
+  of vkInt32: return a.int32Val == b.int32Val
+  of vkInt64: return a.int64Val == b.int64Val
+  of vkFloat32: return a.float32Val == b.float32Val
+  of vkFloat64: return a.float64Val == b.float64Val
+  of vkString: return a.strVal == b.strVal
+  of vkBytes: return a.bytesVal == b.bytesVal
+  of vkUuid: return a.uuidVal == b.uuidVal
+  of vkDateTime: return false  # DateTime comparison not supported without side effects
+  of vkJson: return a.jsonVal == b.jsonVal
+  of vkArray: return false  # Recursive comparison not supported
+  of vkObject: return false  # Recursive comparison not supported
+  of vkVector: return a.vecVal == b.vecVal
+
+proc `!=`*(a, b: Value): bool {.noSideEffect.} =
+  return not (a == b)
+
+proc `$`*(v: Value): string =
+  case v.kind
+  of vkNull: return "\\N"
+  of vkBool: return $v.boolVal
+  of vkInt8: return $v.int8Val
+  of vkInt16: return $v.int16Val
+  of vkInt32: return $v.int32Val
+  of vkInt64: return $v.int64Val
+  of vkFloat32: return $v.float32Val
+  of vkFloat64: return $v.float64Val
+  of vkString: return v.strVal
+  of vkBytes: return "<bytes>"
+  of vkUuid: return $v.uuidVal
+  of vkDateTime: return $v.dtVal
+  of vkJson: return v.jsonVal
+  of vkArray: return $v.arrayVal
+  of vkObject: return $v.objVal
+  of vkVector: return $v.vecVal
+
+proc `==`*(a: Value, b: string): bool =
+  if a.kind == vkString: return a.strVal == b
+  if a.kind == vkNull: return b == "\\N"
+  return $a == b
+
+proc `==`*(a: string, b: Value): bool =
+  return b == a
+
+proc `in`*(v: Value, s: seq[string]): bool =
+  return $v in s
+
+proc `in`*(s: string, v: Value): bool =
+  if v.kind == vkString: return v.strVal.contains(s)
+  return ($v).contains(s)

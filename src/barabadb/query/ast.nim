@@ -43,6 +43,10 @@ type
     nkSetVar
     nkCreateGraph
     nkDropGraph
+    nkCreateDatabase
+    nkDropDatabase
+    nkUseDatabase
+    nkShowDatabases
 
     # Clauses
     nkFrom
@@ -336,6 +340,16 @@ type
     of nkDropGraph:
       dgName*: string
       dgIfExists*: bool
+    of nkCreateDatabase:
+      cdDbName*: string
+      cdIfNotExists*: bool
+    of nkDropDatabase:
+      ddDbName*: string
+      ddIfExists*: bool
+    of nkUseDatabase:
+      udDbName*: string
+    of nkShowDatabases:
+      discard
     of nkApplyMigration:
       amName*: string
     of nkMigrationStatus:

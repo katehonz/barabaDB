@@ -158,7 +158,7 @@ type
     fkOnUpdate*: string
     autoIncrement*: bool
 
-  Row* = Table[string, string]
+  Row* = Table[string, Value]
 
   ExecResult* = object
     success*: bool
@@ -501,6 +501,29 @@ proc getValue(values: seq[string], fields: seq[string], colName: string): string
 proc isNull*(value: string): bool =
   value == "\\N" or value.toLower() == "null"
 
+proc valueToString*(v: Value): string =
+  case v.kind
+  of vkNull: return "\\N"
+  of vkString: return v.strVal
+  of vkInt64: return $v.int64Val
+  of vkFloat64: return $v.float64Val
+  of vkBool: return $v.boolVal
+  else: return ""
+
+proc `%`*(v: Value): JsonNode =
+  case v.kind
+  of vkNull: return newJNull()
+  of vkString: return %v.strVal
+  of vkInt64: return %v.int64Val
+  of vkFloat64: return %v.float64Val
+  of vkBool: return %v.boolVal
+  else: return newJNull()
+
+proc toString*(v: Value): string = valueToString(v)
+
+proc `[]=`*(t: var Row, key: string, val: string) =
+  t[key] = Value(kind: vkString, strVal: val)
+
 proc escapeRowVal(v: string): string =
   v.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=")
 
@@ -545,6 +568,11 @@ proc parseRowData(valStr: string): Table[string, string] =
       let k = part[0..<eqPos].strip()
       let v = unescapeRowVal(part[eqPos+1..^1].strip())
       result[k] = v
+
+proc parseRowDataToValueRow(valStr: string): Row =
+  result = initTable[string, Value]()
+  for k, v in parseRowData(valStr):
+    result[k] = v
 
 proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row]
 
@@ -716,12 +744,12 @@ proc realIdFromKey(key: string): string =
 proc findRealIdByDocId(ctx: ExecutionContext, table: string, docId: uint64): string =
   for row in execScan(ctx, table):
     if "$key" in row:
-      let docKey = table & "." & row["$key"]
+      let docKey = table & "." & valueToString(row["$key"])
       var hash: uint64 = 0
       for ch in docKey:
         hash = hash * 31 + uint64(ord(ch))
       if hash == docId:
-        return realIdFromKey(row["$key"])
+        return realIdFromKey(valueToString(row["$key"]))
   return ""
 
 proc doHybridSearch(ctx: ExecutionContext, table: string, vecCol: string, textCol: string,
@@ -809,8 +837,8 @@ proc doHybridSearchFiltered(ctx: ExecutionContext, table: string, vecCol: string
       if filterCol.len > 0:
         passesFilter = false
         for row in execScan(ctx, table):
-          if realIdFromKey(row.getOrDefault("$key", "")) == realId:
-            if filterCol in row and row[filterCol] == filterVal:
+          if realIdFromKey(valueToString(row.getOrDefault("$key", Value(kind: vkNull)))) == realId:
+            if filterCol in row and valueToString(row[filterCol]) == filterVal:
               passesFilter = true
             break
       if passesFilter:
@@ -829,9 +857,11 @@ proc doHybridSearchFiltered(ctx: ExecutionContext, table: string, vecCol: string
     sorted = sorted[0..<k]
   return sorted
 
-proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string
+proc stringTableToValueRow(row: Table[string, string]): Row
+proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string
+proc evalExprLegacy*(expr: IRExpr, row: Row, ctx: ExecutionContext = nil): string
 
-proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): Value =
+proc evalExpr*(expr: IRExpr, row: Row, ctx: ExecutionContext = nil): Value =
   if expr == nil: return Value(kind: vkNull)
   case expr.kind
   of irekLiteral:
@@ -846,16 +876,25 @@ proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionCont
     if expr.fieldPath.len > 0:
       let fullPath = expr.fieldPath.join(".")
       var s = ""
-      if fullPath in row: s = row[fullPath]
+      var found = false
+      if fullPath in row:
+        s = valueToString(row[fullPath])
+        found = true
       else:
         let colName = expr.fieldPath[^1]
-        if colName in row: s = row[colName]
-        elif "$key" in row and row["$key"].startsWith(colName & "="):
-          s = row["$key"][colName.len+1..^1]
+        if colName in row:
+          s = valueToString(row[colName])
+          found = true
+        elif "$key" in row and valueToString(row["$key"]).startsWith(colName & "="):
+          s = valueToString(row["$key"])[colName.len+1..^1]
+          found = true
         elif "$value" in row:
-          let parsed = parseRowData(row["$value"])
-          if colName in parsed: s = parsed[colName]
+          let parsed = parseRowData(valueToString(row["$value"]))
+          if colName in parsed:
+            s = parsed[colName]
+            found = true
       if s == "\\N": return Value(kind: vkNull)
+      if not found: return Value(kind: vkNull)
       case expr.valueKind
       of vkInt64:
         try: return Value(kind: vkInt64, int64Val: parseInt(s))
@@ -881,8 +920,8 @@ proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionCont
   of irekBinary:
     case expr.binOp
     of irAdd:
-      let lv = evalExprValue(expr.binLeft, row, ctx)
-      let rv = evalExprValue(expr.binRight, row, ctx)
+      let lv = evalExpr(expr.binLeft, row, ctx)
+      let rv = evalExpr(expr.binRight, row, ctx)
       if lv.kind == vkInt64 and rv.kind == vkInt64:
         return Value(kind: vkInt64, int64Val: lv.int64Val + rv.int64Val)
       elif lv.kind == vkFloat64 and rv.kind == vkFloat64:
@@ -896,8 +935,8 @@ proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionCont
       else:
         return Value(kind: vkNull)
     of irSub:
-      let lv = evalExprValue(expr.binLeft, row, ctx)
-      let rv = evalExprValue(expr.binRight, row, ctx)
+      let lv = evalExpr(expr.binLeft, row, ctx)
+      let rv = evalExpr(expr.binRight, row, ctx)
       if lv.kind == vkInt64 and rv.kind == vkInt64:
         return Value(kind: vkInt64, int64Val: lv.int64Val - rv.int64Val)
       elif lv.kind == vkFloat64 and rv.kind == vkFloat64:
@@ -909,8 +948,8 @@ proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionCont
       else:
         return Value(kind: vkNull)
     of irMul:
-      let lv = evalExprValue(expr.binLeft, row, ctx)
-      let rv = evalExprValue(expr.binRight, row, ctx)
+      let lv = evalExpr(expr.binLeft, row, ctx)
+      let rv = evalExpr(expr.binRight, row, ctx)
       if lv.kind == vkInt64 and rv.kind == vkInt64:
         return Value(kind: vkInt64, int64Val: lv.int64Val * rv.int64Val)
       elif lv.kind == vkFloat64 and rv.kind == vkFloat64:
@@ -922,8 +961,8 @@ proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionCont
       else:
         return Value(kind: vkNull)
     of irDiv:
-      let lv = evalExprValue(expr.binLeft, row, ctx)
-      let rv = evalExprValue(expr.binRight, row, ctx)
+      let lv = evalExpr(expr.binLeft, row, ctx)
+      let rv = evalExpr(expr.binRight, row, ctx)
       var rvf = 0.0
       if rv.kind == vkFloat64: rvf = rv.float64Val
       elif rv.kind == vkInt64: rvf = float(rv.int64Val)
@@ -935,16 +974,16 @@ proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionCont
       else: return Value(kind: vkNull)
       return Value(kind: vkFloat64, float64Val: lvf / rvf)
     of irMod:
-      let lv = evalExprValue(expr.binLeft, row, ctx)
-      let rv = evalExprValue(expr.binRight, row, ctx)
+      let lv = evalExpr(expr.binLeft, row, ctx)
+      let rv = evalExpr(expr.binRight, row, ctx)
       if lv.kind == vkInt64 and rv.kind == vkInt64:
         if rv.int64Val == 0: return Value(kind: vkNull)
         return Value(kind: vkInt64, int64Val: lv.int64Val mod rv.int64Val)
       else:
         return Value(kind: vkNull)
     of irPow:
-      let lv = evalExprValue(expr.binLeft, row, ctx)
-      let rv = evalExprValue(expr.binRight, row, ctx)
+      let lv = evalExpr(expr.binLeft, row, ctx)
+      let rv = evalExpr(expr.binRight, row, ctx)
       var lvf = 0.0
       if lv.kind == vkFloat64: lvf = lv.float64Val
       elif lv.kind == vkInt64: lvf = float(lv.int64Val)
@@ -955,24 +994,43 @@ proc evalExprValue*(expr: IRExpr, row: Table[string, string], ctx: ExecutionCont
       else: return Value(kind: vkNull)
       return Value(kind: vkFloat64, float64Val: pow(lvf, rvf))
     else:
-      let s = evalExpr(expr, row, ctx)
+      let s = evalExprLegacy(expr, row, ctx)
       return Value(kind: vkString, strVal: s)
   of irekUnary:
     case expr.unOp
     of irNeg:
-      let v = evalExprValue(expr.unExpr, row, ctx)
+      let v = evalExpr(expr.unExpr, row, ctx)
       case v.kind
       of vkInt64: return Value(kind: vkInt64, int64Val: -v.int64Val)
       of vkFloat64: return Value(kind: vkFloat64, float64Val: -v.float64Val)
       else: return Value(kind: vkNull)
     else:
-      let s = evalExpr(expr, row, ctx)
+      let s = evalExprLegacy(expr, row, ctx)
       return Value(kind: vkString, strVal: s)
   else:
-    let s = evalExpr(expr, row, ctx)
+    let s = evalExprLegacy(expr, row, ctx)
     return Value(kind: vkString, strVal: s)
 
-proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string =
+proc rowToStringTable(row: Row): Table[string, string] =
+  result = initTable[string, string]()
+  for k, v in row:
+    if v.kind == vkNull:
+      result[k] = "\\N"
+    else:
+      result[k] = valueToString(v)
+
+proc stringTableToValueRow(row: Table[string, string]): Row =
+  result = initTable[string, Value]()
+  for k, v in row:
+    result[k] = Value(kind: vkString, strVal: v)
+
+proc evalExprLegacy*(expr: IRExpr, row: Row, ctx: ExecutionContext = nil): string =
+  return evalExprOld(expr, rowToStringTable(row), ctx)
+
+proc evalExprLegacy*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string =
+  return evalExprOld(expr, row)
+
+proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext = nil): string =
   if expr == nil: return ""
   case expr.kind
   of irekLiteral:
@@ -1002,7 +1060,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
   of irekStar:
     return "*"
   of irekJsonPath:
-    let srcVal = evalExpr(expr.jpExpr, row, ctx)
+    let srcVal = evalExprOld(expr.jpExpr, row, ctx)
     if srcVal.len == 0 or isNull(srcVal): return "\\N"
     try:
       let node = parseJson(srcVal)
@@ -1025,8 +1083,8 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     except:
       return ""
   of irekBinary:
-    let left = evalExpr(expr.binLeft, row, ctx)
-    let right = evalExpr(expr.binRight, row, ctx)
+    let left = evalExprOld(expr.binLeft, row, ctx)
+    let right = evalExprOld(expr.binRight, row, ctx)
     case expr.binOp
     of irEq:
       if left == right: return "true"
@@ -1064,7 +1122,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if left == "true" or right == "true": return "true"
       return "false"
     of irAdd, irSub, irMul, irDiv, irMod, irPow:
-      let v = evalExprValue(expr, row, ctx)
+      let v = evalExpr(expr, stringTableToValueRow(row), ctx)
       case v.kind
       of vkInt64: return $v.int64Val
       of vkFloat64:
@@ -1112,7 +1170,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
           var found = false
           for k, v in row:
             if k.startsWith("$"): continue
-            firstVal = v
+            firstVal = valueToString(v)
             found = true
             break
           if found and firstVal == left: return "true"
@@ -1132,7 +1190,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
           var found = false
           for k, v in row:
             if k.startsWith("$"): continue
-            firstVal = v
+            firstVal = valueToString(v)
             found = true
             break
           if found and firstVal == left: return "false"
@@ -1260,16 +1318,16 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
   of irekUnary:
     case expr.unOp
     of irNot:
-      let v = evalExpr(expr.unExpr, row, ctx)
+      let v = evalExprOld(expr.unExpr, row, ctx)
       return if v == "true": "false" else: "true"
     of irIsNull:
-      let v = evalExpr(expr.unExpr, row, ctx)
+      let v = evalExprOld(expr.unExpr, row, ctx)
       return if isNull(v): "true" else: "false"
     of irIsNotNull:
-      let v = evalExpr(expr.unExpr, row, ctx)
+      let v = evalExprOld(expr.unExpr, row, ctx)
       return if not isNull(v): "true" else: "false"
     of irNeg:
-      let v = evalExprValue(expr.unExpr, row, ctx)
+      let v = evalExpr(expr.unExpr, stringTableToValueRow(row), ctx)
       case v.kind
       of vkInt64: return $(-v.int64Val)
       of vkFloat64:
@@ -1284,8 +1342,8 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     of "cosine_distance", "euclidean_distance", "inner_product", "l2_distance", "l1_distance":
       if expr.irFuncArgs.len < 2:
         return "0"
-      let left = evalExpr(expr.irFuncArgs[0], row, ctx)
-      let right = evalExpr(expr.irFuncArgs[1], row, ctx)
+      let left = evalExprOld(expr.irFuncArgs[0], row, ctx)
+      let right = evalExprOld(expr.irFuncArgs[1], row, ctx)
       let vecA = parseVectorString(left)
       let vecB = parseVectorString(right)
       if vecA.len == 0 or vecB.len == 0:
@@ -1301,13 +1359,13 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     of "vector_dims", "vector_dimension":
       if expr.irFuncArgs.len < 1:
         return "0"
-      let arg = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let arg = evalExprOld(expr.irFuncArgs[0], row, ctx)
       return $parseVectorString(arg).len
     of "json_has_key":
       if expr.irFuncArgs.len < 2:
         return "false"
-      let jsonStr = evalExpr(expr.irFuncArgs[0], row, ctx)
-      let key = evalExpr(expr.irFuncArgs[1], row, ctx)
+      let jsonStr = evalExprOld(expr.irFuncArgs[0], row, ctx)
+      let key = evalExprOld(expr.irFuncArgs[1], row, ctx)
       try:
         let node = parseJson(jsonStr)
         if node.kind == JObject:
@@ -1324,7 +1382,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     of "current_setting":
       if expr.irFuncArgs.len < 1:
         return ""
-      let key = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let key = evalExprOld(expr.irFuncArgs[0], row, ctx)
       if ctx != nil and key in ctx.sessionVars:
         return ctx.sessionVars[key]
       return ""
@@ -1336,12 +1394,12 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return ""
     of "hybrid_search":
       if expr.irFuncArgs.len < 6: return "[]"
-      let table = evalExpr(expr.irFuncArgs[0], row, ctx)
-      let vecCol = evalExpr(expr.irFuncArgs[1], row, ctx)
-      let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
-      let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
-      let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
-      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
+      let table = evalExprOld(expr.irFuncArgs[0], row, ctx)
+      let vecCol = evalExprOld(expr.irFuncArgs[1], row, ctx)
+      let textCol = evalExprOld(expr.irFuncArgs[2], row, ctx)
+      let queryText = evalExprOld(expr.irFuncArgs[3], row, ctx)
+      let queryVec = evalExprOld(expr.irFuncArgs[4], row, ctx)
+      let k = try: parseInt(evalExprOld(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
       let results = doHybridSearch(ctx, table, vecCol, textCol, queryText, queryVec, k)
       var jsonArr = newJArray()
       for (id, score) in results:
@@ -1352,12 +1410,12 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return $jsonArr
     of "hybrid_search_ids":
       if expr.irFuncArgs.len < 6: return ""
-      let table = evalExpr(expr.irFuncArgs[0], row, ctx)
-      let vecCol = evalExpr(expr.irFuncArgs[1], row, ctx)
-      let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
-      let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
-      let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
-      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
+      let table = evalExprOld(expr.irFuncArgs[0], row, ctx)
+      let vecCol = evalExprOld(expr.irFuncArgs[1], row, ctx)
+      let textCol = evalExprOld(expr.irFuncArgs[2], row, ctx)
+      let queryText = evalExprOld(expr.irFuncArgs[3], row, ctx)
+      let queryVec = evalExprOld(expr.irFuncArgs[4], row, ctx)
+      let k = try: parseInt(evalExprOld(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
       let results = doHybridSearch(ctx, table, vecCol, textCol, queryText, queryVec, k)
       var ids: seq[string] = @[]
       for (id, score) in results:
@@ -1365,14 +1423,14 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return ids.join(",")
     of "hybrid_search_filtered":
       if expr.irFuncArgs.len < 8: return "[]"
-      let table = evalExpr(expr.irFuncArgs[0], row, ctx)
-      let vecCol = evalExpr(expr.irFuncArgs[1], row, ctx)
-      let textCol = evalExpr(expr.irFuncArgs[2], row, ctx)
-      let queryText = evalExpr(expr.irFuncArgs[3], row, ctx)
-      let queryVec = evalExpr(expr.irFuncArgs[4], row, ctx)
-      let k = try: parseInt(evalExpr(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
-      let filterCol = evalExpr(expr.irFuncArgs[6], row, ctx)
-      let filterVal = evalExpr(expr.irFuncArgs[7], row, ctx)
+      let table = evalExprOld(expr.irFuncArgs[0], row, ctx)
+      let vecCol = evalExprOld(expr.irFuncArgs[1], row, ctx)
+      let textCol = evalExprOld(expr.irFuncArgs[2], row, ctx)
+      let queryText = evalExprOld(expr.irFuncArgs[3], row, ctx)
+      let queryVec = evalExprOld(expr.irFuncArgs[4], row, ctx)
+      let k = try: parseInt(evalExprOld(expr.irFuncArgs[5], row, ctx)) except ValueError: 10
+      let filterCol = evalExprOld(expr.irFuncArgs[6], row, ctx)
+      let filterVal = evalExprOld(expr.irFuncArgs[7], row, ctx)
       let results = doHybridSearchFiltered(ctx, table, vecCol, textCol, queryText, queryVec, k, filterCol, filterVal)
       var parts: seq[string] = @[]
       for (id, score) in results:
@@ -1380,8 +1438,8 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return "[" & parts.join(",") & "]"
     of "rerank":
       if expr.irFuncArgs.len < 2: return "[]"
-      let queryText = evalExpr(expr.irFuncArgs[0], row, ctx)
-      let resultsJson = evalExpr(expr.irFuncArgs[1], row, ctx)
+      let queryText = evalExprOld(expr.irFuncArgs[0], row, ctx)
+      let resultsJson = evalExprOld(expr.irFuncArgs[1], row, ctx)
       # Simple rerank: boost results that contain query terms
       try:
         let arr = parseJson(resultsJson)
@@ -1408,12 +1466,12 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         return resultsJson
     of "chunk":
       if expr.irFuncArgs.len < 1: return "[]"
-      let text = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let text = evalExprOld(expr.irFuncArgs[0], row, ctx)
       let maxSize = if expr.irFuncArgs.len >= 2:
-        try: parseInt(evalExpr(expr.irFuncArgs[1], row, ctx)) except ValueError: 1024
+        try: parseInt(evalExprOld(expr.irFuncArgs[1], row, ctx)) except ValueError: 1024
       else: 1024
       let overlap = if expr.irFuncArgs.len >= 3:
-        try: parseInt(evalExpr(expr.irFuncArgs[2], row, ctx)) except ValueError: 128
+        try: parseInt(evalExprOld(expr.irFuncArgs[2], row, ctx)) except ValueError: 128
       else: 128
       let cfg = chunkmod.ChunkConfig(maxChunkSize: maxSize, chunkOverlap: overlap,
                                      strategy: chunkmod.csRecursive, minChunkSize: 64)
@@ -1424,7 +1482,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return $(jsonChunks)
     of "embed_text":
       if expr.irFuncArgs.len < 1: return "[]"
-      let text = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let text = evalExprOld(expr.irFuncArgs[0], row, ctx)
       if ctx.embedder == nil or not ctx.embedder.config.enabled:
         return "[]"
       let vec = embedmod.embed(ctx.embedder, text)
@@ -1432,8 +1490,8 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return embedmod.vectorToJson(vec)
     of "nl_to_sql":
       if expr.irFuncArgs.len < 1: return ""
-      let question = evalExpr(expr.irFuncArgs[0], row, ctx)
-      let table = if expr.irFuncArgs.len >= 2: evalExpr(expr.irFuncArgs[1], row, ctx) else: ""
+      let question = evalExprOld(expr.irFuncArgs[0], row, ctx)
+      let table = if expr.irFuncArgs.len >= 2: evalExprOld(expr.irFuncArgs[1], row, ctx) else: ""
       if ctx.llmClient == nil or not ctx.llmClient.config.enabled:
         return ""
 
@@ -1503,7 +1561,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
         return sql
     of "schema_prompt":
       if expr.irFuncArgs.len < 1: return ""
-      let table = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let table = evalExprOld(expr.irFuncArgs[0], row, ctx)
       if table notin ctx.tables:
         return "Table '" & table & "' not found"
 
@@ -1530,7 +1588,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
           ddl.add("-- ")
           var parts: seq[string] = @[]
           for col in tbl.columns:
-            parts.add(col.name & "=" & rows[i].getOrDefault(col.name, ""))
+            parts.add(col.name & "=" & valueToString(rows[i].getOrDefault(col.name, Value(kind: vkNull))))
           ddl.add(parts.join(", "))
           ddl.add("\n")
       else:
@@ -1561,8 +1619,8 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return ddl
     of "similarity_nodes":
       if expr.irFuncArgs.len < 1: return "[]"
-      let graphName = evalExpr(expr.irFuncArgs[0], row, ctx)
-      let metric = if expr.irFuncArgs.len >= 2: evalExpr(expr.irFuncArgs[1], row, ctx).toLower() else: "jaccard"
+      let graphName = evalExprOld(expr.irFuncArgs[0], row, ctx)
+      let metric = if expr.irFuncArgs.len >= 2: evalExprOld(expr.irFuncArgs[1], row, ctx).toLower() else: "jaccard"
       if graphName notin ctx.graphs:
         return "[]"
       let g = ctx.graphs[graphName]
@@ -1574,9 +1632,9 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return $(arr)
     of "node2vec_embed":
       if expr.irFuncArgs.len < 1: return "[]"
-      let graphName = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let graphName = evalExprOld(expr.irFuncArgs[0], row, ctx)
       let dims = if expr.irFuncArgs.len >= 2:
-        try: parseInt(evalExpr(expr.irFuncArgs[1], row, ctx)) except ValueError: 64
+        try: parseInt(evalExprOld(expr.irFuncArgs[1], row, ctx)) except ValueError: 64
       else: 64
       if graphName notin ctx.graphs:
         return "[]"
@@ -1593,7 +1651,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return $(obj)
     of "cypher":
       if expr.irFuncArgs.len < 1: return "[]"
-      let cypherQuery = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let cypherQuery = evalExprOld(expr.irFuncArgs[0], row, ctx)
       let sql = cyphermod.cypherToSql(cypherQuery)
       if sql.len == 0: return "[]"
       let tokens = qlex.tokenize(sql)
@@ -1611,7 +1669,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return $(jsonRows)
     of "datetime":
       if expr.irFuncArgs.len > 0:
-        let arg = evalExpr(expr.irFuncArgs[0], row, ctx).toLower()
+        let arg = evalExprOld(expr.irFuncArgs[0], row, ctx).toLower()
         if arg == "now":
           return $now().format("yyyy-MM-dd HH:mm:ss")
         return arg
@@ -1635,7 +1693,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if expr.irFuncArgs.len < 1:
         return "0"
       if ctx == nil: return "0"
-      let seqName = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let seqName = evalExprOld(expr.irFuncArgs[0], row, ctx)
       var val: int64 = 0
       acquire(ctx.sharedLock.lock)
       try:
@@ -1650,7 +1708,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if expr.irFuncArgs.len < 1:
         return "0"
       if ctx == nil: return "0"
-      let seqName = evalExpr(expr.irFuncArgs[0], row, ctx)
+      let seqName = evalExprOld(expr.irFuncArgs[0], row, ctx)
       acquire(ctx.sharedLock.lock)
       try:
         if seqName in ctx.sequences:
@@ -1662,7 +1720,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       # Snowflake ID: timestamp_ms(41 bits) | node_id(10 bits) | sequence(12 bits)
       var nodeId: int64 = 0
       if expr.irFuncArgs.len > 0:
-        try: nodeId = parseInt(evalExpr(expr.irFuncArgs[0], row, ctx))
+        try: nodeId = parseInt(evalExprOld(expr.irFuncArgs[0], row, ctx))
         except ValueError: nodeId = 0
       nodeId = nodeId and 0x3FF  # 10 bits
       let ts = int64(epochTime() * 1000) and 0x1FFFFFFFFFF  # 41 bits
@@ -1671,8 +1729,8 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       return $snowflakeId
     of "strftime":
       if expr.irFuncArgs.len >= 2:
-        let fmt = evalExpr(expr.irFuncArgs[0], row, ctx)
-        let val = evalExpr(expr.irFuncArgs[1], row, ctx)
+        let fmt = evalExprOld(expr.irFuncArgs[0], row, ctx)
+        let val = evalExprOld(expr.irFuncArgs[1], row, ctx)
         if fmt == "%s":
           try:
             let dt = parse(val, "yyyy-MM-dd HH:mm:ss")
@@ -1689,10 +1747,10 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     else:
       # Unknown function: try to evaluate args and return first arg as fallback
       if expr.irFuncArgs.len > 0:
-        return evalExpr(expr.irFuncArgs[0], row, ctx)
+        return evalExprOld(expr.irFuncArgs[0], row, ctx)
       return ""
   of irekCast:
-    let val = evalExpr(expr.irCastExpr, row, ctx)
+    let val = evalExprOld(expr.irCastExpr, row, ctx)
     let castType = expr.irCastType.name.toLower()
     if castType.startsWith("vector"):
       let vec = parseVectorString(val)
@@ -1723,7 +1781,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
       if subRows.len > 0:
         for k, v in subRows[0]:
           if not k.startsWith("$"):
-            return v
+            return valueToString(v)
     return ""
   else: return ""
 
@@ -1759,7 +1817,7 @@ proc passesPolicy(ctx: ExecutionContext, tableName, command: string, row: Row): 
       continue
     if pol.usingExpr != nil:
       let expr = lowerExpr(pol.usingExpr)
-      if evalExpr(expr, row, ctx) != "true":
+      if valueToString(evalExpr(expr, row, ctx)) != "true":
         return false
   return true
 
@@ -1774,7 +1832,7 @@ proc checkInsertPolicy(ctx: ExecutionContext, tableName: string, row: Row): bool
       continue
     if pol.withCheckExpr != nil:
       let expr = lowerExpr(pol.withCheckExpr)
-      if evalExpr(expr, row, ctx) != "true":
+      if valueToString(evalExpr(expr, row, ctx)) != "true":
         return false
   return true
 
@@ -1791,7 +1849,7 @@ proc execScan(ctx: ExecutionContext, table: string): seq[Row] =
   for (key, value) in ctx.db.scanAll():
     if not key.startsWith(prefix): continue
     let rest = key[prefix.len..^1]
-    var row: Table[string, string]
+    var row: Row
     row["$key"] = rest
     let valStr = cast[string](value)
     row["$value"] = valStr
@@ -1827,7 +1885,7 @@ proc execPointRead(ctx: ExecutionContext, table: string, key: string): seq[Row] 
   let fullKey = table & "." & key
   let (found, val) = ctx.db.get(fullKey)
   if found:
-    var row: Table[string, string]
+    var row: Row
     row["$key"] = key
     let valStr = cast[string](val)
     row["$value"] = valStr
@@ -1871,7 +1929,7 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
     let fullKey = table & "." & key
 
     # Build row for RLS WITH CHECK
-    var row = initTable[string, string]()
+    var row = initTable[string, Value]()
     for i, f in fields:
       if i < rowVals.len:
         row[f] = rowVals[i]
@@ -1920,7 +1978,7 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
           meta["key"] = fullKey
           for col, val in row:
             if col.len > 0 and col != "$key" and col != "$value":
-              meta[col] = val
+              meta[col] = valueToString(val)
           vengine.insert(vecIdx, docId, vec, meta)
 
     # Auto-embed: if table has VECTOR column with null value but TEXT column
@@ -1966,7 +2024,7 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
                 meta["key"] = fullKey
                 for col, val in row:
                   if col.len > 0 and col != "$key" and col != "$value":
-                    meta[col] = val
+                    meta[col] = valueToString(val)
                 meta[vecCol] = vecStr2
                 vengine.insert(ctx.vectorIndexes[vecKey], docId, vec, meta)
 
@@ -2023,7 +2081,7 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string,
   let (found, existingVal) = ctx.db.get(fullKey)
   if found:
     # RLS USING check on existing row
-    var oldRow = parseRowData(cast[string](existingVal))
+    var oldRow = parseRowDataToValueRow(cast[string](existingVal))
     let eqPos = key.find('=')
     if eqPos >= 0:
       oldRow[key[0..<eqPos]] = key[eqPos+1..^1]
@@ -2042,7 +2100,7 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string,
         var oldVals: seq[string] = @[]
         for c in idxCols:
           if c in oldRow:
-            oldVals.add(oldRow[c])
+            oldVals.add(valueToString(oldRow[c]))
           else:
             oldVals.add("\\N")
         let oldIdxVal = oldVals.join("|")
@@ -2065,14 +2123,14 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
   let fullKey = table & "." & key
   let (found, existing) = ctx.db.get(fullKey)
   if not found: return 0
-  var oldRow = parseRowData(cast[string](existing))
+  var oldRow = parseRowDataToValueRow(cast[string](existing))
   let eqPos = key.find('=')
   if eqPos >= 0:
     oldRow[key[0..<eqPos]] = key[eqPos+1..^1]
   # RLS USING check on old row
   if not passesPolicy(ctx, table, "UPDATE", oldRow):
     return 0
-  var parsed = parseRowData(cast[string](existing))
+  var parsed = parseRowDataToValueRow(cast[string](existing))
   for col, val in sets:
     parsed[col] = val
   # RLS WITH CHECK on new row
@@ -2080,7 +2138,7 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
     return 0
   var parts: seq[string] = @[]
   for col, val in parsed:
-    parts.add(col & "=" & escapeRowVal(val))
+    parts.add(col & "=" & escapeRowVal(valueToString(val)))
   let newVal = parts.join(",")
   # Update indexes: remove old, insert new
   for colName in ctx.btrees.keys.toSeq():
@@ -2091,11 +2149,11 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
       var newVals: seq[string] = @[]
       for c in idxCols:
         if c in oldRow:
-          oldVals.add(oldRow[c])
+          oldVals.add(valueToString(oldRow[c]))
         else:
           oldVals.add("\\N")
         if c in parsed:
-          newVals.add(parsed[c])
+          newVals.add(valueToString(parsed[c]))
         else:
           newVals.add("\\N")
       let oldIdxVal = oldVals.join("|")
@@ -2117,16 +2175,16 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
         docId = docId * 31 + uint64(ord(ch))
       ftsIdx.removeDocument(docId)
       let colName = ftsKey[table.len + 1..^1]
-      let newText = if colName in parsed: parsed[colName] else: "\\N"
-      if newText.len > 0 and not isNull(newText):
-        ftsIdx.addDocument(docId, newText)
+      let newText = if colName in parsed: parsed[colName] else: Value(kind: vkNull)
+      if newText.kind == vkString and newText.strVal.len > 0:
+        ftsIdx.addDocument(docId, newText.strVal)
   # Update Vector indexes: add new vector (no remove support in current HNSW)
   for vecKey, vecIdx in ctx.vectorIndexes:
     if vecKey.startsWith(table & "."):
       let colName = vecKey[table.len + 1..^1]
-      let vecStr = if colName in parsed: parsed[colName] else: "\\N"
-      if not isNull(vecStr):
-        let vec = parseVectorString(vecStr)
+      let vecStr = if colName in parsed: parsed[colName] else: Value(kind: vkNull)
+      if vecStr.kind == vkString and vecStr.strVal.len > 0:
+        let vec = parseVectorString(vecStr.strVal)
         if vec.len > 0:
           var docId: uint64 = 0
           for ch in fullKey:
@@ -2143,7 +2201,7 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
 proc findReferencingRows(ctx: ExecutionContext, childTable: string, fkCol: string, fkValue: string): seq[Row] =
   result = @[]
   for row in execScan(ctx, childTable):
-    if fkCol in row and row[fkCol] == fkValue:
+    if fkCol in row and valueToString(row[fkCol]) == fkValue:
       result.add(row)
 
 proc enforceFkOnDelete(ctx: ExecutionContext, parentTable: string, parentCol: string, parentVal: string): (bool, string) =
@@ -2158,14 +2216,14 @@ proc enforceFkOnDelete(ctx: ExecutionContext, parentTable: string, parentCol: st
             for refRow in refs:
               if "$key" in refRow:
                 var dummy: seq[(string, seq[byte])] = @[]
-                discard execDelete(ctx, childTblName, refRow["$key"], dummy)
+                discard execDelete(ctx, childTblName, valueToString(refRow["$key"]), dummy)
           of "SET NULL":
             for refRow in refs:
               if "$key" in refRow:
                 var sets = initTable[string, string]()
                 sets[col.name] = "\\N"
                 var dummy: seq[(string, seq[byte])] = @[]
-                discard execUpdateRow(ctx, childTblName, refRow["$key"], sets, dummy)
+                discard execUpdateRow(ctx, childTblName, valueToString(refRow["$key"]), sets, dummy)
           of "RESTRICT", "NO ACTION":
             return (false, "FOREIGN KEY violation: row is referenced by " & childTblName & "." & col.name)
   return (true, "")
@@ -2184,14 +2242,14 @@ proc enforceFkOnUpdate(ctx: ExecutionContext, parentTable: string, parentCol: st
                 var sets = initTable[string, string]()
                 sets[col.name] = newVal
                 var dummy: seq[(string, seq[byte])] = @[]
-                discard execUpdateRow(ctx, childTblName, refRow["$key"], sets, dummy)
+                discard execUpdateRow(ctx, childTblName, valueToString(refRow["$key"]), sets, dummy)
           of "SET NULL":
             for refRow in refs:
               if "$key" in refRow:
                 var sets = initTable[string, string]()
                 sets[col.name] = "\\N"
                 var dummy: seq[(string, seq[byte])] = @[]
-                discard execUpdateRow(ctx, childTblName, refRow["$key"], sets, dummy)
+                discard execUpdateRow(ctx, childTblName, valueToString(refRow["$key"]), sets, dummy)
           of "RESTRICT", "NO ACTION":
             return (false, "FOREIGN KEY violation: row is referenced by " & childTblName & "." & col.name)
   return (true, "")
@@ -2270,7 +2328,7 @@ proc validateType*(colType: string, value: string): (bool, string) =
 proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValue] = @[]): ExecResult
 proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult
 
-proc fireTriggers*(ctx: ExecutionContext, tableName: string, timing: string, event: string, row: Table[string, string]) =
+proc fireTriggers*(ctx: ExecutionContext, tableName: string, timing: string, event: string, row: Row) =
   let tbl = ctx.getTableDef(tableName)
   for trig in tbl.triggers:
     if trig.timing == timing and trig.event == event:
@@ -2332,15 +2390,15 @@ proc validateConstraints*(ctx: ExecutionContext, tableName: string,
     # CHECK constraints
     for check in tbl.checks:
       if check.checkNode != nil:
-        var row = initTable[string, string]()
+        var row = initTable[string, Value]()
         for i, f in fields:
           if i < rowVals.len:
             row[f] = rowVals[i]
           else:
-            row[f] = "\\N"
+            row[f] = Value(kind: vkNull)
         let checkExpr = lowerExpr(check.checkNode)
         let checkResult = evalExpr(checkExpr, row, ctx)
-        if checkResult != "true":
+        if valueToString(checkResult) != "true":
           return (false, "CHECK constraint '" & check.name & "' violated")
 
   return (true, "")
@@ -2594,7 +2652,7 @@ proc lowerExpr*(node: Node): IRExpr =
 proc evalNodeToString(node: Node): string =
   ## Evaluate a simple AST node to a string value for INSERT/UPDATE.
   let ir = lowerExpr(node)
-  return evalExpr(ir, initTable[string, string](), nil)
+  return valueToString(evalExpr(ir, initTable[string, Value](), nil))
 
 proc lowerSelect*(node: Node): IRPlan =
   result = IRPlan(kind: irpkScan)
@@ -2775,7 +2833,7 @@ proc partitionKey(row: Row, partExprs: seq[IRExpr], ctx: ExecutionContext = nil)
   ## Compute a string partition key for a row
   result = ""
   for expr in partExprs:
-    result &= evalExpr(expr, row, ctx) & "|"
+    result &= valueToString(evalExpr(expr, row, ctx)) & "|"
 
 proc compareRowsByOrder(a, b: Row, orderExprs: seq[IRExpr], orderDirs: seq[bool], ctx: ExecutionContext = nil): int =
   ## Compare two rows by their ORDER BY expressions
@@ -2784,12 +2842,12 @@ proc compareRowsByOrder(a, b: Row, orderExprs: seq[IRExpr], orderDirs: seq[bool]
     let vb = evalExpr(expr, b, ctx)
     var cmpRes = 0
     try:
-      let fa = parseFloat(va)
-      let fb = parseFloat(vb)
+      let fa = parseFloat(valueToString(va))
+      let fb = parseFloat(valueToString(vb))
       if fa < fb: cmpRes = -1
       elif fa > fb: cmpRes = 1
     except:
-      cmpRes = cmp(va, vb)
+      cmpRes = cmp(valueToString(va), valueToString(vb))
     if cmpRes != 0:
       return if orderDirs.len > i and orderDirs[i]: -cmpRes else: cmpRes
   return 0
@@ -2884,7 +2942,7 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
     of "ntile":
       var n = 1
       if expr.wfArgs.len > 0:
-        try: n = parseInt(evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]], ctx)) except: n = 1
+        try: n = parseInt(valueToString(evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]], ctx))) except: n = 1
       if n < 1: n = 1
       let groupSize = sortedIdxs.len div n
       let remainder = sortedIdxs.len mod n
@@ -2903,36 +2961,36 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
       var offset = 1
       var defaultVal = ""
       if expr.wfArgs.len > 1:
-        try: offset = parseInt(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx)) except: offset = 1
+        try: offset = parseInt(valueToString(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx))) except: offset = 1
       if expr.wfArgs.len > 2:
-        defaultVal = evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]], ctx)
+        defaultVal = valueToString(evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]], ctx))
       for pos, rowIdx in sortedIdxs:
         let targetPos = pos + offset
         if targetPos < sortedIdxs.len:
-          result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]], ctx)
+          result[rowIdx] = valueToString(evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]], ctx))
         else:
           result[rowIdx] = defaultVal
     of "lag":
       var offset = 1
       var defaultVal = ""
       if expr.wfArgs.len > 1:
-        try: offset = parseInt(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx)) except: offset = 1
+        try: offset = parseInt(valueToString(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx))) except: offset = 1
       if expr.wfArgs.len > 2:
-        defaultVal = evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]], ctx)
+        defaultVal = valueToString(evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]], ctx))
       for pos, rowIdx in sortedIdxs:
         let targetPos = pos - offset
         if targetPos >= 0:
-          result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]], ctx)
+          result[rowIdx] = valueToString(evalExpr(expr.wfArgs[0], rows[sortedIdxs[targetPos]], ctx))
         else:
           result[rowIdx] = defaultVal
     of "first_value":
       for pos, rowIdx in sortedIdxs:
         let (fStart, _) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
-        result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[fStart]], ctx)
+        result[rowIdx] = valueToString(evalExpr(expr.wfArgs[0], rows[sortedIdxs[fStart]], ctx))
     of "last_value":
       for pos, rowIdx in sortedIdxs:
         let (_, fEnd) = resolveFrameBounds(pos, sortedIdxs.len, frameStart, frameEnd)
-        result[rowIdx] = evalExpr(expr.wfArgs[0], rows[sortedIdxs[fEnd]], ctx)
+        result[rowIdx] = valueToString(evalExpr(expr.wfArgs[0], rows[sortedIdxs[fEnd]], ctx))
     else:
       # Unknown window function — fill with null
       for rowIdx in sortedIdxs:
@@ -2955,7 +3013,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     result = @[]
     for row in sourceRows:
       let evalResult = evalExpr(plan.filterCond, row, ctx)
-      if evalResult == "true":
+      if valueToString(evalResult) == "true":
         result.add(row)
 
   of irpkProject:
@@ -2964,7 +3022,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     # Scalar SELECT (no FROM): create a dummy row so expressions can be evaluated
     if sourceRows.len == 0 and plan.projectSource != nil and
        plan.projectSource.kind == irpkScan and plan.projectSource.scanTable.len == 0:
-      sourceRows = @[initTable[string, string]()]
+      sourceRows = @[initTable[string, Value]()]
 
     # Check if this projection contains aggregates without GROUP BY
     var hasAggs = false
@@ -2991,7 +3049,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           winValues[i] = computeWindowValues(sourceRows, expr)
       result = @[]
       for rowIdx, row in sourceRows:
-        var newRow: Table[string, string]
+        var newRow: Row
         for i, alias in plan.projectAliases:
           if i < plan.projectExprs.len:
             let expr = plan.projectExprs[i]
@@ -3013,7 +3071,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
 
     if hasAggs:
       # Produce exactly one row with aggregate values
-      var newRow: Table[string, string]
+      var newRow: Row
       for i, alias in plan.projectAliases:
         if i < plan.projectExprs.len:
           let expr = plan.projectExprs[i]
@@ -3028,7 +3086,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             if expr.aggFilter != nil:
               filteredRows = @[]
               for row in sourceRows:
-                if evalExpr(expr.aggFilter, row, ctx) == "true":
+                if valueToString(evalExpr(expr.aggFilter, row, ctx)) == "true":
                   filteredRows.add(row)
             case expr.aggOp
             of irCount:
@@ -3038,50 +3096,50 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
                 var count = 0
                 for row in filteredRows:
                   let v = evalExpr(expr.aggArgs[0], row, ctx)
-                  if v.len > 0: count += 1
+                  if valueToString(v).len > 0: count += 1
                 newRow[alias] = $count
             of irSum:
               var sum = 0.0
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                try: sum += parseFloat(v) except: discard
+                try: sum += parseFloat(valueToString(v)) except: discard
               newRow[alias] = $sum
             of irAvg:
               var sum = 0.0
               var count = 0
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                try: sum += parseFloat(v); count += 1 except: discard
+                try: sum += parseFloat(valueToString(v)); count += 1 except: discard
               newRow[alias] = if count > 0: $(sum / float(count)) else: "0"
             of irMin:
               var minVal = ""
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                if v == "\\N": continue
-                if minVal == "" or cmpMin(v, minVal): minVal = v
+                if v.kind == vkNull: continue
+                if minVal == "" or cmpMin(valueToString(v), minVal): minVal = valueToString(v)
               newRow[alias] = minVal
             of irMax:
               var maxVal = ""
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                if v == "\\N": continue
-                if maxVal == "" or cmpMax(v, maxVal): maxVal = v
+                if v.kind == vkNull: continue
+                if maxVal == "" or cmpMax(valueToString(v), maxVal): maxVal = valueToString(v)
               newRow[alias] = maxVal
             of irArrayAgg:
               var arr: seq[string]
               for row in filteredRows:
                 if expr.aggArgs.len > 0:
-                  arr.add(evalExpr(expr.aggArgs[0], row, ctx))
+                  arr.add(valueToString(evalExpr(expr.aggArgs[0], row, ctx)))
               newRow[alias] = "[" & arr.join(", ") & "]"
             of irStringAgg:
               var parts: seq[string]
-              let delim = if expr.aggArgs.len > 1: evalExpr(expr.aggArgs[1], initTable[string, string](), ctx) else: ","
+              let delim = if expr.aggArgs.len > 1: evalExpr(expr.aggArgs[1], initTable[string, Value](), ctx) else: Value(kind: vkString, strVal: ",")
               for row in filteredRows:
                 if expr.aggArgs.len > 0:
-                  parts.add(evalExpr(expr.aggArgs[0], row, ctx))
-              newRow[alias] = parts.join(delim)
+                  parts.add(valueToString(evalExpr(expr.aggArgs[0], row, ctx)))
+              newRow[alias] = parts.join(valueToString(delim))
           else:
-            let val = evalExpr(expr, if sourceRows.len > 0: sourceRows[0] else: initTable[string, string](), ctx)
+            let val = evalExpr(expr, if sourceRows.len > 0: sourceRows[0] else: initTable[string, Value](), ctx)
             if alias.len > 0: newRow[alias] = val
             else: newRow["col" & $i] = val
       result = @[newRow]
@@ -3089,7 +3147,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
 
     result = @[]
     for row in sourceRows:
-      var newRow: Table[string, string]
+      var newRow: Row
       for i, alias in plan.projectAliases:
         if i < plan.projectExprs.len:
           let expr = plan.projectExprs[i]
@@ -3130,12 +3188,12 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         let vb = evalExpr(sortExpr, b, ctx)
         var cmpRes = 0
         try:
-          let fa = parseFloat(va)
-          let fb = parseFloat(vb)
+          let fa = parseFloat(valueToString(va))
+          let fb = parseFloat(valueToString(vb))
           if fa < fb: cmpRes = -1
           elif fa > fb: cmpRes = 1
         except:
-          cmpRes = cmp(va, vb)
+          cmpRes = cmp(valueToString(va), valueToString(vb))
         if not ascending: cmpRes = -cmpRes
         if cmpRes != 0: return cmpRes
       return 0
@@ -3186,12 +3244,12 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       for row in sourceRows:
         var groupKey = ""
         for gk in gkeys:
-          groupKey &= evalExpr(gk, row, ctx) & "|"
+          groupKey &= valueToString(evalExpr(gk, row, ctx)) & "|"
         if groupKey notin groups:
           groups[groupKey] = @[]
         groups[groupKey].add(row)
       for gk, groupRows in groups:
-        var aggRow: Table[string, string]
+        var aggRow: Row
         # Populate GROUP BY key columns
         for gkExpr in gkeys:
           if gkExpr.kind == irekField and gkExpr.fieldPath.len > 0:
@@ -3208,7 +3266,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           if aggExpr.aggFilter != nil:
             filteredRows = @[]
             for row in groupRows:
-              if evalExpr(aggExpr.aggFilter, row, ctx) == "true":
+              if valueToString(evalExpr(aggExpr.aggFilter, row, ctx)) == "true":
                 filteredRows.add(row)
           case aggExpr.aggOp
           of irCount:
@@ -3218,51 +3276,51 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               var count = 0
               for row in filteredRows:
                 let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-                if v.len > 0: count += 1
+                if valueToString(v).len > 0: count += 1
               aggRow[aggKey] = $count
           of irSum:
             var sum = 0.0
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              try: sum += parseFloat(v) except: discard
+              try: sum += parseFloat(valueToString(v)) except: discard
             aggRow[aggKey] = $sum
           of irAvg:
             var sum = 0.0
             var count = 0
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              try: sum += parseFloat(v); count += 1 except: discard
+              try: sum += parseFloat(valueToString(v)); count += 1 except: discard
             aggRow[aggKey] = if count > 0: $(sum / float(count)) else: "0"
           of irMin:
             var minVal = ""
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              if v == "\\N": continue
-              if minVal == "" or cmpMin(v, minVal): minVal = v
+              if v.kind == vkNull: continue
+              if minVal == "" or cmpMin(valueToString(v), minVal): minVal = valueToString(v)
             aggRow[aggKey] = minVal
           of irMax:
             var maxVal = ""
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              if v == "\\N": continue
-              if maxVal == "" or cmpMax(v, maxVal): maxVal = v
+              if v.kind == vkNull: continue
+              if maxVal == "" or cmpMax(valueToString(v), maxVal): maxVal = valueToString(v)
             aggRow[aggKey] = maxVal
           of irArrayAgg:
             var arr: seq[string]
             for row in filteredRows:
               if aggExpr.aggArgs.len > 0:
-                arr.add(evalExpr(aggExpr.aggArgs[0], row, ctx))
+                arr.add(valueToString(evalExpr(aggExpr.aggArgs[0], row, ctx)))
             aggRow[aggKey] = "[" & arr.join(", ") & "]"
           of irStringAgg:
             var parts: seq[string]
-            let delim = if aggExpr.aggArgs.len > 1: evalExpr(aggExpr.aggArgs[1], initTable[string, string](), ctx) else: ","
+            let delim = if aggExpr.aggArgs.len > 1: evalExpr(aggExpr.aggArgs[1], initTable[string, Value](), ctx) else: Value(kind: vkString, strVal: ",")
             for row in filteredRows:
               if aggExpr.aggArgs.len > 0:
-                parts.add(evalExpr(aggExpr.aggArgs[0], row, ctx))
-            aggRow[aggKey] = parts.join(delim)
+                parts.add(valueToString(evalExpr(aggExpr.aggArgs[0], row, ctx)))
+            aggRow[aggKey] = parts.join(valueToString(delim))
         # Apply HAVING filter
         if plan.groupHaving != nil:
-          if evalExpr(plan.groupHaving, aggRow, ctx) != "true":
+          if valueToString(evalExpr(plan.groupHaving, aggRow, ctx)) != "true":
             continue
         result.add(aggRow)
     return result
@@ -3286,7 +3344,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       else: ""
 
     proc mergeRow(left, right: Row, leftAlias, rightAlias, leftTable, rightTable: string): Row =
-      result = initTable[string, string]()
+      result = initTable[string, Value]()
       for k, v in left:
         if not k.startsWith("$"):
           result[k] = v
@@ -3351,9 +3409,9 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         var mergedRows: seq[Row]
         for r in rawRightRows:
           let merged = mergeRow(l, r, leftAlias, rightAlias, leftTable, getScanTable(plan.joinRight))
-          if rightFilter != nil and evalExpr(rightFilter, merged, ctx) != "true":
+          if rightFilter != nil and valueToString(evalExpr(rightFilter, merged, ctx)) != "true":
             continue
-          if plan.joinCond != nil and evalExpr(plan.joinCond, merged, ctx) != "true":
+          if plan.joinCond != nil and valueToString(evalExpr(plan.joinCond, merged, ctx)) != "true":
             continue
           mergedRows.add(merged)
 
@@ -3365,8 +3423,8 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               let bVal = evalExpr(sExpr, b, ctx)
               let asc = if i < rightSortDirs.len: rightSortDirs[i] else: true
               var cmp = 0
-              let aNum = parseFloat(aVal)
-              let bNum = parseFloat(bVal)
+              let aNum = parseFloat(valueToString(aVal))
+              let bNum = parseFloat(valueToString(bVal))
               if aNum < bNum: cmp = -1
               elif aNum > bNum: cmp = 1
               if cmp != 0:
@@ -3385,23 +3443,32 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             result.add(row)
         elif plan.joinKind == irjkLeft or plan.joinKind == irjkFull:
           var rightCols: seq[string]
-          for r in rawRightRows:
+          # Build rightCols from filtered rows if available, otherwise from raw rows
+          let sourceForCols = if mergedRows.len > 0: mergedRows else: rawRightRows
+          for r in sourceForCols:
             for k, _ in r:
               if not k.startsWith("$") and k notin rightCols:
                 rightCols.add(k)
-          var padded = initTable[string, string]()
+          # If still no right rows, get column names from table definition
+          if rightCols.len == 0 and rightScanPlan != nil and rightScanPlan.kind == irpkScan:
+            let rightTable = rightScanPlan.scanTable
+            if rightTable.len > 0:
+              let tbl = ctx.getTableDef(rightTable)
+              for col in tbl.columns:
+                rightCols.add(col.name)
+          var padded = initTable[string, Value]()
           for k, v in l:
             if not k.startsWith("$"):
               padded[k] = v
           for col in rightCols:
-            if col notin padded: padded[col] = "\\N"
+            if col notin padded: padded[col] = Value(kind: vkNull)
           if leftAlias.len > 0:
             for k, v in l:
               if not k.startsWith("$"):
                 padded[leftAlias & "." & k] = v
           if rightAlias.len > 0:
             for col in rightCols:
-              padded[rightAlias & "." & col] = "\\N"
+              padded[rightAlias & "." & col] = Value(kind: vkNull)
           result.add(padded)
       return result
 
@@ -3462,17 +3529,17 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
 
       var hashTable = initTable[string, seq[Row]]()
       for row in buildRows:
-        let key = if buildAlias.len > 0 and buildCol in row: row[buildCol]
-                  elif buildCol in row: row[buildCol]
+        let key = if buildAlias.len > 0 and buildCol in row: valueToString(row[buildCol])
+                  elif buildCol in row: valueToString(row[buildCol])
                   else: ""
-        if key.len > 0 and key != "\\N":
+        if key.len > 0 :
           if key notin hashTable: hashTable[key] = @[]
           hashTable[key].add(row)
 
       var matchedProbe = initTable[int, bool]()
       for i, prow in probeRows:
-        let key = if probeAlias.len > 0 and probeCol in prow: prow[probeCol]
-                  elif probeCol in prow: prow[probeCol]
+        let key = if probeAlias.len > 0 and probeCol in prow: valueToString(prow[probeCol])
+                  elif probeCol in prow: valueToString(prow[probeCol])
                   else: ""
         if key in hashTable:
           matchedProbe[i] = true
@@ -3486,32 +3553,32 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       if plan.joinKind == irjkLeft or plan.joinKind == irjkFull or plan.joinKind == irjkRight:
         for i, prow in probeRows:
           if not matchedProbe.getOrDefault(i, false):
-            var padded = initTable[string, string]()
+            var padded = initTable[string, Value]()
             for k, v in prow:
               if not k.startsWith("$"):
                 padded[k] = v
             if buildIsLeft:
               # probe is right side
               for col in leftCols:
-                if col notin padded: padded[col] = "\\N"
+                if col notin padded: padded[col] = Value(kind: vkNull)
               if probeAlias.len > 0:
                 for k, v in prow:
                   if not k.startsWith("$"):
                     padded[probeAlias & "." & k] = v
               if leftAlias.len > 0:
                 for col in leftCols:
-                  padded[leftAlias & "." & col] = "\\N"
+                  padded[leftAlias & "." & col] = Value(kind: vkNull)
             else:
               # probe is left side
               for col in rightCols:
-                if col notin padded: padded[col] = "\\N"
+                if col notin padded: padded[col] = Value(kind: vkNull)
               if probeAlias.len > 0:
                 for k, v in prow:
                   if not k.startsWith("$"):
                     padded[probeAlias & "." & k] = v
               if rightAlias.len > 0:
                 for col in rightCols:
-                  padded[rightAlias & "." & col] = "\\N"
+                  padded[rightAlias & "." & col] = Value(kind: vkNull)
             result.add(padded)
 
       # RIGHT / FULL padding for non-matching build rows
@@ -3519,40 +3586,40 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         for i, brow in buildRows:
           var found = false
           for j, prow in probeRows:
-            let pkey = if probeAlias.len > 0 and probeCol in prow: prow[probeCol]
-                       elif probeCol in prow: prow[probeCol]
+            let pkey = if probeAlias.len > 0 and probeCol in prow: valueToString(prow[probeCol])
+                       elif probeCol in prow: valueToString(prow[probeCol])
                        else: ""
-            let bkey = if buildAlias.len > 0 and buildCol in brow: brow[buildCol]
-                       elif buildCol in brow: brow[buildCol]
+            let bkey = if buildAlias.len > 0 and buildCol in brow: valueToString(brow[buildCol])
+                       elif buildCol in brow: valueToString(brow[buildCol])
                        else: ""
             if pkey == bkey and bkey.len > 0:
               found = true
               break
           if not found:
-            var padded = initTable[string, string]()
+            var padded = initTable[string, Value]()
             for k, v in brow:
               if not k.startsWith("$"):
                 padded[k] = v
             if buildIsLeft:
               for col in rightCols:
-                if col notin padded: padded[col] = "\\N"
+                if col notin padded: padded[col] = Value(kind: vkNull)
               if leftAlias.len > 0:
                 for k, v in brow:
                   if not k.startsWith("$"):
                     padded[leftAlias & "." & k] = v
               if rightAlias.len > 0:
                 for col in rightCols:
-                  padded[rightAlias & "." & col] = "\\N"
+                  padded[rightAlias & "." & col] = Value(kind: vkNull)
             else:
               for col in leftCols:
-                if col notin padded: padded[col] = "\\N"
+                if col notin padded: padded[col] = Value(kind: vkNull)
               if rightAlias.len > 0:
                 for k, v in brow:
                   if not k.startsWith("$"):
                     padded[rightAlias & "." & k] = v
               if leftAlias.len > 0:
                 for col in leftCols:
-                  padded[leftAlias & "." & col] = "\\N"
+                  padded[leftAlias & "." & col] = Value(kind: vkNull)
             result.add(padded)
 
     of irjsIndexNestedLoop:
@@ -3588,13 +3655,13 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         let btree = ctx.btrees[idxName]
         var matchedOuter = initTable[int, bool]()
         for i, orow in outerRows:
-          let key = if orow.hasKey(outerCol): orow[outerCol] else: ""
-          if key.len > 0 and key != "\\N":
+          let key = if orow.hasKey(outerCol): valueToString(orow[outerCol]) else: ""
+          if key.len > 0 :
             let entries = btree.get(key)
             if entries.len > 0:
               matchedOuter[i] = true
             for entry in entries:
-              let parsed = parseRowData(entry.rowValue)
+              let parsed = parseRowDataToValueRow(entry.rowValue)
               if outerIsLeft:
                 result.add(mergeRow(orow, parsed, leftAlias, rightAlias, leftTable, rightTable))
               else:
@@ -3606,30 +3673,30 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         if plan.joinKind == irjkLeft or plan.joinKind == irjkRight or plan.joinKind == irjkFull:
           for i, orow in outerRows:
             if not matchedOuter.getOrDefault(i, false):
-              var padded = initTable[string, string]()
+              var padded = initTable[string, Value]()
               for k, v in orow:
                 if not k.startsWith("$"):
                   padded[k] = v
               if outerIsLeft:
                 for col in rightCols:
-                  if col notin padded: padded[col] = "\\N"
+                  if col notin padded: padded[col] = Value(kind: vkNull)
                 if leftAlias.len > 0:
                   for k, v in orow:
                     if not k.startsWith("$"):
                       padded[leftAlias & "." & k] = v
                 if rightAlias.len > 0:
                   for col in rightCols:
-                    padded[rightAlias & "." & col] = "\\N"
+                    padded[rightAlias & "." & col] = Value(kind: vkNull)
               else:
                 for col in leftCols:
-                  if col notin padded: padded[col] = "\\N"
+                  if col notin padded: padded[col] = Value(kind: vkNull)
                 if rightAlias.len > 0:
                   for k, v in orow:
                     if not k.startsWith("$"):
                       padded[rightAlias & "." & k] = v
                 if leftAlias.len > 0:
                   for col in leftCols:
-                    padded[leftAlias & "." & col] = "\\N"
+                    padded[leftAlias & "." & col] = Value(kind: vkNull)
               result.add(padded)
         return result
 
@@ -3638,23 +3705,23 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         var matched = false
         for r in rightRows:
           let merged = mergeRow(l, r, leftAlias, rightAlias, leftTable, rightTable)
-          if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
+          if plan.joinCond == nil or valueToString(evalExpr(plan.joinCond, merged, ctx)) == "true":
             result.add(merged)
             matched = true
         if not matched and (plan.joinKind == irjkLeft or plan.joinKind == irjkFull):
-          var padded = initTable[string, string]()
+          var padded = initTable[string, Value]()
           for k, v in l:
             if not k.startsWith("$"):
               padded[k] = v
           for col in rightCols:
-            if col notin padded: padded[col] = "\\N"
+            if col notin padded: padded[col] = Value(kind: vkNull)
           if leftAlias.len > 0:
             for k, v in l:
               if not k.startsWith("$"):
                 padded[leftAlias & "." & k] = v
           if rightAlias.len > 0:
             for col in rightCols:
-              padded[rightAlias & "." & col] = "\\N"
+              padded[rightAlias & "." & col] = Value(kind: vkNull)
           result.add(padded)
 
       if plan.joinKind == irjkRight or plan.joinKind == irjkFull:
@@ -3662,23 +3729,23 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           var found = false
           for l in leftRows:
             let merged = mergeRow(l, r, leftAlias, rightAlias, leftTable, rightTable)
-            if plan.joinCond == nil or evalExpr(plan.joinCond, merged, ctx) == "true":
+            if plan.joinCond == nil or valueToString(evalExpr(plan.joinCond, merged, ctx)) == "true":
               found = true
               break
           if not found:
-            var padded = initTable[string, string]()
+            var padded = initTable[string, Value]()
             for k, v in r:
               if not k.startsWith("$"):
                 padded[k] = v
             for col in leftCols:
-              if col notin padded: padded[col] = "\\N"
+              if col notin padded: padded[col] = Value(kind: vkNull)
             if rightAlias.len > 0:
               for k, v in r:
                 if not k.startsWith("$"):
                   padded[rightAlias & "." & k] = v
             if leftAlias.len > 0:
               for col in leftCols:
-                padded[leftAlias & "." & col] = "\\N"
+                padded[leftAlias & "." & col] = Value(kind: vkNull)
             result.add(padded)
 
     return result
@@ -3704,13 +3771,13 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     for row in sourceRows:
       var groupKey = ""
       for col in groupCols:
-        groupKey &= (if col in row: row[col] else: "") & "|"
+        groupKey &= (if col in row: valueToString(row[col]) else: "") & "|"
       if groupKey notin groups:
         groups[groupKey] = @[]
       groups[groupKey].add(row)
     # For each group, create a pivoted row
     for gk, groupRows in groups:
-      var newRow: Table[string, string]
+      var newRow: Row
       for col in groupCols:
         if col in groupRows[0]:
           newRow[col] = groupRows[0][col]
@@ -3718,7 +3785,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       for pivotVal in plan.pivotInValues:
         var matchingRows: seq[Row]
         for row in groupRows:
-          if plan.pivotForCol in row and row[plan.pivotForCol] == pivotVal:
+          if plan.pivotForCol in row and valueToString(row[plan.pivotForCol]) == pivotVal:
             matchingRows.add(row)
         # Compute aggregate
         var aggResult = ""
@@ -3731,34 +3798,34 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               var count = 0
               for row in matchingRows:
                 let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-                if v.len > 0: count += 1
+                if valueToString(v).len > 0: count += 1
               aggResult = $count
           of irSum:
             var sum = 0.0
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              try: sum += parseFloat(v) except: discard
+              try: sum += parseFloat(valueToString(v)) except: discard
             aggResult = $sum
           of irAvg:
             var sum = 0.0
             var count = 0
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              try: sum += parseFloat(v); count += 1 except: discard
+              try: sum += parseFloat(valueToString(v)); count += 1 except: discard
             aggResult = if count > 0: $(sum / float(count)) else: "0"
           of irMin:
             var minVal = ""
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              if v == "\\N": continue
-              if minVal == "" or cmpMin(v, minVal): minVal = v
+              if v.kind == vkNull: continue
+              if minVal == "" or cmpMin(valueToString(v), minVal): minVal = valueToString(v)
             aggResult = minVal
           of irMax:
             var maxVal = ""
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              if v == "\\N": continue
-              if maxVal == "" or cmpMax(v, maxVal): maxVal = v
+              if v.kind == vkNull: continue
+              if maxVal == "" or cmpMax(valueToString(v), maxVal): maxVal = valueToString(v)
             aggResult = maxVal
           else: discard
         # Clean pivot value (remove quotes)
@@ -3779,12 +3846,12 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     # For each source row, create one row per IN column
     for row in sourceRows:
       for inCol in plan.unpivotInCols:
-        var newRow: Table[string, string]
+        var newRow: Row
         for col in identityCols:
           if col in row:
             newRow[col] = row[col]
         newRow[plan.unpivotForCol] = inCol
-        newRow[plan.unpivotValueCol] = (if inCol in row: row[inCol] else: "\\N")
+        newRow[plan.unpivotValueCol] = (if inCol in row: row[inCol] else: Value(kind: vkNull))
         result.add(newRow)
     return result
 
@@ -3811,7 +3878,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       let maxDepth = if plan.graphMaxDepth >= 0: plan.graphMaxDepth else: -1
       let traverseResult = gengine.bfs(g, startId, maxDepth)
       for nodeId in traverseResult:
-        var row = initTable[string, string]()
+        var row = initTable[string, Value]()
         let nid = uint64(nodeId)
         row["_node_id"] = $nid
         if nodeId in g.nodes:
@@ -3831,7 +3898,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
       let maxDepth = if plan.graphMaxDepth >= 0: plan.graphMaxDepth else: -1
       let traverseResult = gengine.dfs(g, startId, maxDepth)
       for nodeId in traverseResult:
-        var row = initTable[string, string]()
+        var row = initTable[string, Value]()
         let nid = uint64(nodeId)
         row["_node_id"] = $nid
         if nodeId in g.nodes:
@@ -3854,7 +3921,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         let vb = prResult.getOrDefault(b, 0.0)
         if va > vb: return -1 elif va < vb: return 1 else: return 0)
       for nodeId in sortedNodes:
-        var row = initTable[string, string]()
+        var row = initTable[string, Value]()
         let nid = uint64(nodeId)
         row["_node_id"] = $nid
         row["rank"] = $prResult.getOrDefault(nodeId, 0.0)
@@ -3873,7 +3940,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         let endId = gengine.NodeId(explicitEnd)
         let path = gengine.shortestPath(g, startId, endId)
         for nodeId in path:
-          var row = initTable[string, string]()
+          var row = initTable[string, Value]()
           let nid = uint64(nodeId)
           row["_node_id"] = $nid
           if nodeId in g.nodes:
@@ -3891,7 +3958,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         let startId = gengine.NodeId(explicitStart)
         let dists = gengine.dijkstra(g, startId)
         for nodeId, dist in dists:
-          var row = initTable[string, string]()
+          var row = initTable[string, Value]()
           row["_node_id"] = $(uint64(nodeId))
           row["distance"] = $dist
           if nodeId in g.nodes:
@@ -3903,7 +3970,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     of "community", "community_detect", "louvain":
       let louvainResult = gcomm.louvain(g)
       for nodeId, communityId in louvainResult.communities:
-        var row = initTable[string, string]()
+        var row = initTable[string, Value]()
         row["_node_id"] = $(uint64(nodeId))
         row["community"] = $communityId
         if nodeId in g.nodes:
@@ -3912,7 +3979,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
 
     else:
       for nodeId in g.nodes.keys:
-        var row = initTable[string, string]()
+        var row = initTable[string, Value]()
         let nid = uint64(nodeId)
         row["_node_id"] = $nid
         row["_node_label"] = g.nodes[nodeId].label
@@ -4156,11 +4223,11 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                 # UNION: deduplicate against all already-accumulated rows
                 var seen = initTable[string, bool]()
                 for existing in allRows:
-                  let key = if "$value" in existing: existing["$value"] else: $existing
+                  let key = if "$value" in existing: valueToString(existing["$value"]) else: $existing
                   if key.len > 0:
                     seen[key] = true
                 for row in rightRes.rows:
-                  let key = if "$value" in row: row["$value"] else: $row
+                  let key = if "$value" in row: valueToString(row["$value"]) else: $row
                   if not seen.getOrDefault(key, false):
                     if key.len > 0:
                       seen[key] = true
@@ -4210,7 +4277,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
           let whereIr = lowerExpr(stmt.selWhere.whereExpr)
           var tmp: seq[Row] = @[]
           for row in filteredRows:
-            if evalExpr(whereIr, row, ctx) == "true":
+            if valueToString(evalExpr(whereIr, row, ctx)) == "true":
               tmp.add(row)
           filteredRows = tmp
         if stmt.selOrderBy.len > 0:
@@ -4220,13 +4287,13 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
             let va = evalExpr(sortExpr, a, ctx)
             let vb = evalExpr(sortExpr, b, ctx)
             try:
-              let fa = parseFloat(va)
-              let fb = parseFloat(vb)
+              let fa = parseFloat(valueToString(va))
+              let fb = parseFloat(valueToString(vb))
               if fa < fb: return -1
               if fa > fb: return 1
               return 0
             except:
-              return cmp(va, vb)
+              return cmp(valueToString(va), valueToString(vb))
           filteredRows.sort(sortCmp, if asc: Ascending else: Descending)
         if stmt.selLimit != nil:
           let limitVal = if stmt.selLimit.limitExpr.kind == nkIntLit:
@@ -4269,7 +4336,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               for entry in entries:
                 let (found, val) = ctx.db.get(entry.lsmKey)
                 if found:
-                  rows.add(parseRowData(cast[string](val)))
+                  rows.add(parseRowDataToValueRow(cast[string](val)))
               let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
               var cols: seq[string] = @[]
               for c in tbl.columns: cols.add(c.name)
@@ -4309,7 +4376,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               for entry in entries:
                 let (found, val) = ctx.db.get(entry.lsmKey)
                 if found:
-                  rows.add(parseRowData(cast[string](val)))
+                  rows.add(parseRowDataToValueRow(cast[string](val)))
             let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
             var cols: seq[string] = @[]
             for c in tbl.columns: cols.add(c.name)
@@ -4335,7 +4402,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                 if isCovered and coveredCols.len > 0:
                   var rows: seq[Row] = @[]
                   for entry in entries:
-                    var row = initTable[string, string]()
+                    var row = initTable[string, Value]()
                     row[colName] = w.binRight.strVal
                     rows.add(row)
                   return okResult(rows, coveredCols)
@@ -4359,7 +4426,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                 for entry in entries:
                   let (found, val) = ctx.db.get(entry.lsmKey)
                   if found:
-                    rows.add(parseRowData(cast[string](val)))
+                    rows.add(parseRowDataToValueRow(cast[string](val)))
               let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
               var cols: seq[string] = @[]
               for c in tbl.columns: cols.add(c.name)
@@ -4394,7 +4461,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                 for entry in entries:
                   let (found, val) = ctx.db.get(entry.lsmKey)
                   if found:
-                    rows.add(parseRowData(cast[string](val)))
+                    rows.add(parseRowDataToValueRow(cast[string](val)))
               let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
               var cols: seq[string] = @[]
               for c in tbl.columns: cols.add(c.name)
@@ -4450,28 +4517,28 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         # UNION: deduplicate
         var seen: Table[string, bool]
         for row in leftRes.rows:
-          seen[row["$value"]] = true
+          seen[valueToString(row["$value"])] = true
         for row in rightRes.rows:
-          if not seen.getOrDefault(row["$value"], false):
-            seen[row["$value"]] = true
+          if not seen.getOrDefault(valueToString(row["$value"]), false):
+            seen[valueToString(row["$value"])] = true
             rows.add(row)
 
     of sdkIntersect:
       var leftSet: Table[string, bool]
       for row in leftRes.rows:
-        leftSet[row["$value"]] = true
+        leftSet[valueToString(row["$value"])] = true
       for row in rightRes.rows:
-        if leftSet.getOrDefault(row["$value"], false):
+        if leftSet.getOrDefault(valueToString(row["$value"]), false):
           rows.add(row)
           if not stmt.setOpAll:
-            leftSet.del(row["$value"])  # remove to prevent duplicates for INTERSECT (not ALL)
+            leftSet.del(valueToString(row["$value"]))  # remove to prevent duplicates for INTERSECT (not ALL)
 
     of sdkExcept:
       var rightSet: Table[string, bool]
       for row in rightRes.rows:
-        rightSet[row["$value"]] = true
+        rightSet[valueToString(row["$value"])] = true
       for row in leftRes.rows:
-        if not rightSet.getOrDefault(row["$value"], false):
+        if not rightSet.getOrDefault(valueToString(row["$value"]), false):
           rows.add(row)
 
     return okResult(rows, cols)
@@ -4550,7 +4617,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     if not valid: return errResult(errMsg)
 
     # Fire BEFORE INSERT triggers
-    var row = initTable[string, string]()
+    var row = initTable[string, Value]()
     if mutableValues.len > 0:
       for i, f in mutableFields:
         if i < mutableValues[0].len:
@@ -4581,11 +4648,11 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         else:
           returnCols.add("col" & $returnCols.len)
       for rowVals in mutableValues:
-        var rowMap = initTable[string, string]()
+        var rowMap = initTable[string, Value]()
         for i, f in mutableFields:
           if i < rowVals.len:
             rowMap[f] = rowVals[i]
-        var returnRow = initTable[string, string]()
+        var returnRow = initTable[string, Value]()
         for i, retExpr in stmt.insReturning:
           let ir = lowerExpr(retExpr)
           let val = evalExpr(ir, rowMap, ctx)
@@ -4621,15 +4688,15 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                       elif s.binRight.kind == nkFloatLit: $s.binRight.floatVal
                       elif s.binRight.kind == nkBoolLit: $s.binRight.boolVal
                       elif s.binRight.kind == nkNullLit: "\\N"
-                      else: evalExpr(lowerExpr(s.binRight), row, ctx)
+                      else: valueToString(evalExpr(lowerExpr(s.binRight), row, ctx))
             sets[s.binLeft.identName] = val
       # Check WHERE
       if stmt.updWhere != nil and stmt.updWhere.whereExpr != nil:
         let whereExpr = lowerExpr(stmt.updWhere.whereExpr)
-        if evalExpr(whereExpr, row, ctx) != "true": continue
+        if valueToString(evalExpr(whereExpr, row, ctx)) != "true": continue
       # Get key from row
       if "$key" in row:
-        let old = row["$key"]
+        let old = valueToString(row["$key"])
         # Build updated row for constraint validation
         var updFields: seq[string] = @[]
         var updValues: seq[string] = @[]
@@ -4638,7 +4705,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
           if col.name in sets:
             updValues.add(sets[col.name])
           elif col.name in row:
-            updValues.add(row[col.name])
+            updValues.add(valueToString(row[col.name]))
           else:
             updValues.add("\\N")
         let (valid, errMsg) = validateConstraints(ctx, stmt.updTarget, updFields, @[updValues], skipPkCheck = true)
@@ -4651,7 +4718,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               refCols.add(col.fkColumn)
         for refCol in refCols:
           if refCol in sets and refCol in row:
-            let (fkOk, fkErr) = enforceFkOnUpdate(ctx, stmt.updTarget, refCol, row[refCol], sets[refCol])
+            let (fkOk, fkErr) = enforceFkOnUpdate(ctx, stmt.updTarget, refCol, valueToString(row[refCol]), sets[refCol])
             if not fkOk:
               return errResult(fkErr)
         # FK ON UPDATE enforcement (child side — validate new FK values)
@@ -4663,10 +4730,10 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         var oldRow = row
         var newRow = row
         for col, val in sets:
-          newRow[col] = val
+          newRow[col] = Value(kind: vkString, strVal: val)
         fireTriggers(ctx, stmt.updTarget, "before", "update", oldRow)
 
-        count += execUpdateRow(ctx, stmt.updTarget, row["$key"], sets, kvPairs)
+        count += execUpdateRow(ctx, stmt.updTarget, valueToString(row["$key"]), sets, kvPairs)
 
         # Fire AFTER UPDATE triggers
         fireTriggers(ctx, stmt.updTarget, "after", "update", newRow)
@@ -4683,9 +4750,9 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     for row in rows:
       if stmt.delWhere != nil and stmt.delWhere.whereExpr != nil:
         let whereExpr = lowerExpr(stmt.delWhere.whereExpr)
-        if evalExpr(whereExpr, row, ctx) != "true": continue
+        if valueToString(evalExpr(whereExpr, row, ctx)) != "true": continue
       if "$key" in row:
-        let old = row["$key"]
+        let old = valueToString(row["$key"])
         # Fire BEFORE DELETE triggers
         fireTriggers(ctx, stmt.delTarget, "before", "delete", row)
 
@@ -4697,11 +4764,11 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               refCols.add(col.fkColumn)
         for refCol in refCols:
           if refCol in row:
-            let (fkOk, fkErr) = enforceFkOnDelete(ctx, stmt.delTarget, refCol, row[refCol])
+            let (fkOk, fkErr) = enforceFkOnDelete(ctx, stmt.delTarget, refCol, valueToString(row[refCol]))
             if not fkOk:
               return errResult(fkErr)
 
-        count += execDelete(ctx, stmt.delTarget, row["$key"], kvPairs)
+        count += execDelete(ctx, stmt.delTarget, valueToString(row["$key"]), kvPairs)
 
         # Fire AFTER DELETE triggers
         fireTriggers(ctx, stmt.delTarget, "after", "delete", row)
@@ -4735,7 +4802,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         for k, v in tgtRow:
           rowWithTarget[stmt.mergeTargetAlias & "." & k] = v
         let onExpr = lowerExpr(stmt.mergeOn)
-        if evalExpr(onExpr, rowWithTarget, ctx) == "true":
+        if valueToString(evalExpr(onExpr, rowWithTarget, ctx)) == "true":
           matched = true
           if stmt.mergeMatchedUpdate.len > 0 and "$key" in tgtRow:
             var updateSets = initTable[string, string]()
@@ -4743,15 +4810,15 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               if s.kind == nkBinOp and s.binOp == bkAssign:
                 if s.binLeft.kind == nkIdent:
                   let valExpr = lowerExpr(s.binRight)
-                  updateSets[s.binLeft.identName] = evalExpr(valExpr, rowWithTarget, ctx)
+                  updateSets[s.binLeft.identName] = valueToString(evalExpr(valExpr, rowWithTarget, ctx))
             var newRow = tgtRow
             for col, val in updateSets:
-              newRow[col] = val
+              newRow[col] = Value(kind: vkString, strVal: val)
             fireTriggers(ctx, stmt.mergeTarget, "before", "update", tgtRow)
-            count += execUpdateRow(ctx, stmt.mergeTarget, tgtRow["$key"], updateSets, kvPairs)
+            count += execUpdateRow(ctx, stmt.mergeTarget, valueToString(tgtRow["$key"]), updateSets, kvPairs)
             fireTriggers(ctx, stmt.mergeTarget, "after", "update", newRow)
             if ctx.onChange != nil:
-              ctx.onChange(ChangeEvent(table: stmt.mergeTarget, kind: ckUpdate, key: tgtRow["$key"], data: ""))
+              ctx.onChange(ChangeEvent(table: stmt.mergeTarget, kind: ckUpdate, key: valueToString(tgtRow["$key"]), data: ""))
           break
 
       if not matched and stmt.mergeNotMatchedInsert.len > 0:
@@ -4763,13 +4830,13 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
             if i < stmt.mergeNotMatchedValues.len:
               let v = stmt.mergeNotMatchedValues[i]
               let valExpr = lowerExpr(v)
-              values.add(evalExpr(valExpr, combinedRow, ctx))
+              values.add(valueToString(evalExpr(valExpr, combinedRow, ctx)))
             else:
               values.add("\\N")
         if fields.len > 0:
-          var row = initTable[string, string]()
+          var row = initTable[string, Value]()
           for i, f in fields:
-            if i < values.len: row[f] = values[i]
+            if i < values.len: row[f] = Value(kind: vkString, strVal: values[i])
           fireTriggers(ctx, stmt.mergeTarget, "before", "insert", row)
           var insKvPairs: seq[(string, seq[byte])]
           count += execInsert(ctx, stmt.mergeTarget, fields, @[values], insKvPairs)
@@ -5094,7 +5161,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     for name in listMigrations(ctx):
       let applied = isMigrationApplied(ctx, name)
       let rec = getMigrationRecord(ctx, name)
-      var row = initTable[string, string]()
+      var row = initTable[string, Value]()
       row["name"] = name
       row["status"] = if applied: "applied" else: "pending"
       row["applied_at"] = if rec.appliedAt > 0: $rec.appliedAt else: ""
@@ -5207,13 +5274,13 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       var ftsIdx = fts.newInvertedIndex()
       let rows = execScan(ctx, stmt.ciTarget)
       for row in rows:
-        let lsmKey = if "$key" in row: row["$key"] else: ""
+        let lsmKey = if "$key" in row: valueToString(row["$key"]) else: ""
         let docKey = stmt.ciTarget & "." & lsmKey
         var docId: uint64 = 0
         for ch in docKey:
           docId = docId * 31 + uint64(ord(ch))
         for col in stmt.ciColumns:
-          let text = if col in row: row[col] else: ""
+          let text = if col in row: valueToString(row[col]) else: ""
           if text.len > 0:
             ftsIdx.addDocument(docId, text)
       ctx.ftsIndexes[colKey] = ftsIdx
@@ -5226,7 +5293,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       for row in rows:
         for col in stmt.ciColumns:
           if col in row:
-            let vec = parseVectorString(row[col])
+            let vec = parseVectorString(valueToString(row[col]))
             if vec.len > 0:
               dimensions = vec.len
               break
@@ -5237,15 +5304,15 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       for row in rows:
         for col in stmt.ciColumns:
           if col in row:
-            let vec = parseVectorString(row[col])
+            let vec = parseVectorString(valueToString(row[col]))
             if vec.len > 0:
               var meta = initTable[string, string]()
               if "$key" in row:
-                meta["key"] = row["$key"]
+                meta["key"] = valueToString(row["$key"])
               for col, val in row:
                 if col.len > 0 and col != "$key" and col != "$value":
-                  meta[col] = val
-              let fullKey = stmt.ciTarget & "." & row["$key"]
+                  meta[col] = valueToString(val)
+              let fullKey = stmt.ciTarget & "." & valueToString(row["$key"])
               var docId: uint64 = 0
               for ch in fullKey:
                 docId = docId * 31 + uint64(ord(ch))
@@ -5260,12 +5327,12 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       var colVals: seq[string] = @[]
       for col in stmt.ciColumns:
         if col in row:
-          colVals.add(row[col])
+          colVals.add(valueToString(row[col]))
         else:
           colVals.add("\\N")
       let idxVal = colVals.join("|")
       if idxVal.len > 0 and not isNull(idxVal):
-        let lsmKey = if "$key" in row: stmt.ciTarget & "." & row["$key"] else: ""
+        let lsmKey = if "$key" in row: stmt.ciTarget & "." & valueToString(row["$key"]) else: ""
         ctx.btrees[colKey].insert(idxVal, IndexEntry(lsmKey: lsmKey, rowValue: ""))
     return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget)
 
@@ -5428,7 +5495,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       return errResult("Multi-database support not enabled")
     var rows: seq[Row] = @[]
     for dbName in listDatabases(ctx.registry):
-      var row = initTable[string, string]()
+      var row = initTable[string, Value]()
       row["name"] = dbName
       rows.add(row)
     return okResult(rows, @["name"])

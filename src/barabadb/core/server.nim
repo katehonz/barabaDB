@@ -4,7 +4,6 @@ import std/asyncnet
 import std/strutils
 import std/sequtils
 import std/tables
-import std/os
 import std/endians
 import std/monotimes
 import std/locks
@@ -28,6 +27,7 @@ import ../core/replication
 import ../core/sharding
 import ../core/gossip
 import ../protocol/ratelimit
+import ../core/registry
 import jwt as jwtlib
 
 type
@@ -36,6 +36,7 @@ type
     running*: bool
     db*: LSMTree
     ctx*: ExecutionContext
+    registry*: DatabaseRegistry
     txnManager*: TxnManager
     distTxnManager*: DistTxnManager
     replicationManager*: ReplicationManager
@@ -47,8 +48,10 @@ type
     activeConnections*: int
     activeConnectionsLock*: Lock
 
-proc newServerWithDb*(config: BaraConfig, db: LSMTree): Server =
-  let ctx = newExecutionContext(db)
+proc newServerWithRegistry*(config: BaraConfig, registry: DatabaseRegistry): Server =
+  let dbInfo = getOrCreateDatabase(registry, "default")
+  let db = dbInfo.db
+  let ctx = cast[ExecutionContext](cast[pointer](dbInfo.ctx))
   ctx.txnManager = newTxnManager()
   var tls: TLSContext = nil
   if config.tlsEnabled and config.certFile.len > 0 and config.keyFile.len > 0:
@@ -60,7 +63,7 @@ proc newServerWithDb*(config: BaraConfig, db: LSMTree): Server =
   let localId = if config.raftNodeId.len > 0: config.raftNodeId else: "node-" & $config.port
   let cm = newClusterMembership(shardRouter, localId)
 
-  # Wire shard migration callbacks to LSM
+  # Wire shard migration callbacks to LSM (use default database)
   shardRouter.iterateKeys = proc(shardId: int): seq[(string, seq[byte])] {.gcsafe.} =
     var entries: seq[(string, seq[byte])] = @[]
     for (key, value) in db.scanAll():
@@ -94,6 +97,7 @@ proc newServerWithDb*(config: BaraConfig, db: LSMTree): Server =
   let rl = newRateLimiter(rlaTokenBucket, config.rateLimitGlobal, config.rateLimitPerClient)
 
   result = Server(config: config, running: false, db: db, ctx: ctx,
+         registry: registry,
          txnManager: ctx.txnManager, distTxnManager: newDistTxnManager(),
          replicationManager: newReplicationManager(),
          shardRouter: shardRouter,
@@ -103,10 +107,22 @@ proc newServerWithDb*(config: BaraConfig, db: LSMTree): Server =
          rateLimiter: rl)
   initLock(result.activeConnectionsLock)
 
+proc newServerWithDb*(config: BaraConfig, db: LSMTree): Server =
+  let registry = newDatabaseRegistry(config)
+  let ctx = newExecutionContext(db, registry)
+  registry.setContextFactory(proc(d: LSMTree, r: DatabaseRegistry): ContextRef {.closure.} =
+    cast[ContextRef](cast[pointer](newExecutionContext(d, r))))
+  # Use the existing db for default
+  registry.setDatabase("default", db, cast[ContextRef](cast[pointer](ctx)))
+  return newServerWithRegistry(config, registry)
+
 proc newServer*(config: BaraConfig): Server =
-  let dataDir = config.dataDir / "server"
-  let db = newLSMTree(dataDir)
-  return newServerWithDb(config, db)
+  let registry = newDatabaseRegistry(config)
+  registry.setContextFactory(proc(d: LSMTree, r: DatabaseRegistry): ContextRef {.closure.} =
+    cast[ContextRef](cast[pointer](newExecutionContext(d, r))))
+  registry.loadExistingDatabases()
+  registry.ensureDefaultDatabase()
+  return newServerWithRegistry(config, registry)
 
 # ----------------------------------------------------------------------
 # Wire Protocol Helpers
@@ -230,7 +246,7 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
       for row in res.rows:
         var wireRow: seq[WireValue] = @[]
         for i, col in res.columns:
-          let val = if col in row: row[col] else: "\\N"
+          let val = if col in row: valueToString(row[col]) else: "\\N"
           let cType = if i < colTypes.len: colTypes[i] else: ""
           wireRow.add(valueToWire(val, cType))
         qr.rows.add(wireRow)
@@ -312,16 +328,17 @@ proc slowQueryLog(logPath: string, query: string, durationMs: int, clientId: int
     f.write(line)
   except IOError: discard
 
-proc verifyToken(secret, tokenStr: string): (bool, string, string) =
+proc verifyToken(secret, tokenStr: string): (bool, string, string, string) =
   try:
     let token = tokenStr.toJWT()
     if not token.verify(secret, HS256):
-      return (false, "", "")
+      return (false, "", "", "")
     let userId = token.claims["sub"].node.str
     let role = if "role" in token.claims: token.claims["role"].node.str else: "user"
-    return (true, userId, role)
+    let database = if "database" in token.claims: token.claims["database"].node.str else: ""
+    return (true, userId, role, database)
   except ValueError, KeyError:
-    return (false, "", "")
+    return (false, "", "", "")
 
 proc recvWithTimeout(client: AsyncSocket, size: int, timeoutMs: int): Future[string] {.async.} =
   if timeoutMs <= 0:
@@ -475,7 +492,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
       case header.kind
       of mkAuth:
         let tokenStr = parseAuthMessage(stringToBytes(payload))
-        let (valid, userId, role) = verifyToken(secret, tokenStr)
+        let (valid, userId, role, jwtDatabase) = verifyToken(secret, tokenStr)
         if valid:
           authenticated = true
           connCtx.currentUser = userId
@@ -483,6 +500,24 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           let okMsg = makeAuthOkMessage(header.requestId)
           await client.send(bytesToString(okMsg))
           info("Client " & $clientId & " authenticated as " & userId)
+          # Switch to database from JWT claim if provided
+          if jwtDatabase.len > 0 and server.registry != nil and isValidDbName(jwtDatabase):
+            let info = getDatabaseInfo(server.registry, jwtDatabase)
+            if info != nil:
+              let targetCtx = cast[ExecutionContext](cast[pointer](info.ctx))
+              connCtx.db = info.db
+              connCtx.tables = targetCtx.tables
+              connCtx.btrees = targetCtx.btrees
+              connCtx.views = targetCtx.views
+              connCtx.ftsIndexes = targetCtx.ftsIndexes
+              connCtx.vectorIndexes = targetCtx.vectorIndexes
+              connCtx.users = targetCtx.users
+              connCtx.policies = targetCtx.policies
+              connCtx.graphs = targetCtx.graphs
+              connCtx.autoIncCounters = targetCtx.autoIncCounters
+              connCtx.sequences = targetCtx.sequences
+              connCtx.currentDatabase = jwtDatabase
+              incrementConnections(server.registry, jwtDatabase)
         else:
           let err = makeErrorMessage(header.requestId, 403, "Invalid token")
           await client.send(bytesToString(err))
@@ -510,7 +545,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
         if shardCheck:
           let startTicks = getMonoTime().ticks()
-          let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, replication=server.replicationManager)
+          let (success, result, errorMsg) = executeQuery(connCtx.db, connCtx, queryStr, replication=server.replicationManager)
           let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
           if durationMs >= slowThreshold:
@@ -530,7 +565,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         info("[" & $clientId & "] QueryParams: " & queryStr & " (" & $params.len & " params)")
 
         let startTicks = getMonoTime().ticks()
-        let (success, result, errorMsg) = executeQuery(server.db, connCtx, queryStr, params, replication=server.replicationManager)
+        let (success, result, errorMsg) = executeQuery(connCtx.db, connCtx, queryStr, params, replication=server.replicationManager)
         let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
         if durationMs >= slowThreshold:
@@ -562,6 +597,9 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
   except Exception as e:
     errorMsg("Client " & $clientId & " error: " & e.msg)
   finally:
+    # Decrement database connection counter
+    if server.registry != nil and connCtx.currentDatabase.len > 0:
+      decrementConnections(server.registry, connCtx.currentDatabase)
     acquire(server.activeConnectionsLock)
     try:
       if server.activeConnections > 0:
@@ -629,4 +667,7 @@ proc stop*(server: Server) =
   server.running = false
   if server.gossipProtocol != nil:
     server.gossipProtocol.stop()
-  server.db.close()
+  if server.registry != nil:
+    server.registry.closeAll()
+  else:
+    server.db.close()

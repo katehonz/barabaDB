@@ -17,9 +17,11 @@ import barabadb/protocol/ssl
 import barabadb/storage/lsm
 import barabadb/storage/compaction
 import barabadb/core/raft
+import barabadb/query/executor
 import barabadb/core/gossip
 import barabadb/core/replication
 import barabadb/core/disttxn
+import barabadb/core/registry
 import barabadb/tools/repair
 import barabadb/tools/migrate
 
@@ -27,6 +29,10 @@ type
   CompactionManager* = ref object
     db*: LSMTree
     strategy*: compaction.CompactionStrategy
+
+  MultiCompactionManager = ref object
+    registry: DatabaseRegistry
+    strategies: Table[string, compaction.CompactionStrategy]
 
 proc newCompactionManager*(db: LSMTree): CompactionManager =
   result = CompactionManager(db: db, strategy: compaction.newCompactionStrategy(db.dir))
@@ -87,6 +93,95 @@ proc startCompactionLoop*(cm: CompactionManager, intervalMs: int = 60000) {.asyn
   while true:
     await sleepAsync(intervalMs)
     cm.compact()
+
+proc newMultiCompactionManager*(registry: DatabaseRegistry): MultiCompactionManager =
+  result = MultiCompactionManager(registry: registry, strategies: initTable[string, compaction.CompactionStrategy]())
+
+  # Initialize strategies for each existing database
+  for name in listDatabases(registry):
+    let info = getDatabaseInfo(registry, name)
+    if info != nil:
+      result.strategies[name] = compaction.newCompactionStrategy(info.db.dir)
+      for sst in info.db.sstables:
+        let meta = compaction.SSTableMeta(
+          path: sst.path, level: sst.level, minKey: sst.minKey, maxKey: sst.maxKey,
+          entryCount: sst.entryCount, sizeBytes: sst.entryCount * 64, createdAt: 0)
+        result.strategies[name].addTable(meta)
+
+proc compactAll(mcm: MultiCompactionManager) =
+  for name in listDatabases(mcm.registry):
+    let info = getDatabaseInfo(mcm.registry, name)
+    if info == nil: continue
+    let db = info.db
+
+    # Initialize strategy if not already
+    if name notin mcm.strategies:
+      mcm.strategies[name] = compaction.newCompactionStrategy(db.dir)
+      for sst in db.sstables:
+        let meta = compaction.SSTableMeta(
+          path: sst.path, level: sst.level, minKey: sst.minKey, maxKey: sst.maxKey,
+          entryCount: sst.entryCount, sizeBytes: sst.entryCount * 64, createdAt: 0)
+        mcm.strategies[name].addTable(meta)
+
+    let strategy = mcm.strategies[name]
+    acquire(db.lock)
+    try:
+      for level in 0 ..< compaction.MaxLevel:
+        if strategy.needsCompaction(level):
+          let result = strategy.compact(level)
+          if result.outputTables.len == 0: continue
+
+          var newSSTables: seq[SSTable] = @[]
+          var removedPaths = initTable[string, bool]()
+          for t in result.inputTables:
+            removedPaths[t.path] = true
+          for sst in db.sstables:
+            if sst.path notin removedPaths:
+              newSSTables.add(sst)
+
+          for meta in result.outputTables:
+            try:
+              var sst = loadSSTable(meta.path)
+              let sstName = splitFile(meta.path).name
+              sst.id = try: parseInt(sstName) except: db.nextSSTableId
+              sst.level = meta.level
+              newSSTables.add(sst)
+              db.nextSSTableId = max(db.nextSSTableId, sst.id + 1)
+            except CatchableError as e:
+              warn("Compaction output SSTable failed to load: " & meta.path & " - " & e.msg)
+
+          newSSTables.sort(proc(a, b: SSTable): int = cmp(a.id, b.id))
+          db.sstables = newSSTables
+          inc db.manifestSequence
+          try:
+            writeManifest(db)
+          except CatchableError as e:
+            warn("Failed to write MANIFEST after compaction: " & e.msg)
+    finally:
+      release(db.lock)
+
+proc startMultiCompactionLoop*(mcm: MultiCompactionManager, intervalMs: int = 60000) {.async.} =
+  while true:
+    await sleepAsync(intervalMs)
+    mcm.compactAll()
+
+proc migrateLegacyData(registry: DatabaseRegistry, config: BaraConfig) =
+  let legacyDir = config.dataDir / "server"
+  let defaultDir = registry.dataRoot / "default"
+  if dirExists(legacyDir / "sstables") and not dirExists(defaultDir):
+    info("Migrating legacy data from " & legacyDir & " to " & defaultDir)
+    createDir(defaultDir / "sstables")
+    createDir(defaultDir / "wal")
+    for kind, path in walkDir(legacyDir / "sstables"):
+      if kind == pcFile:
+        copyFile(path, defaultDir / "sstables" / splitPath(path).tail)
+    for kind, path in walkDir(legacyDir / "wal"):
+      if kind == pcFile:
+        copyFile(path, defaultDir / "wal" / splitPath(path).tail)
+    if fileExists(legacyDir / "MANIFEST"):
+      copyFile(legacyDir / "MANIFEST", defaultDir / "MANIFEST")
+    moveDir(legacyDir, legacyDir & ".migrated")
+    info("Legacy data migration complete. Original renamed to " & legacyDir & ".migrated")
 
 proc runTcpServer(config: BaraConfig) {.async.} =
   info("BaraDB TCP listening on " & config.address & ":" & $config.port)
@@ -230,34 +325,45 @@ proc main() =
         warn("Failed to generate self-signed certificate. TLS disabled.")
         config.tlsEnabled = false
 
-  # Shared LSMTree instance for both TCP and HTTP servers
-  let dataDir = config.dataDir / "server"
-  let sharedDb = newLSMTree(dataDir)
+  # Create database registry with multi-database support
+  let registry = newDatabaseRegistry    (config)
+  registry.setContextFactory(proc(db: LSMTree, reg: DatabaseRegistry): ContextRef {.closure.} =
+    cast[ContextRef](cast[pointer](newExecutionContext(db, reg))))
+
+  # Migrate legacy data from old single-DB layout
+  migrateLegacyData(registry, config)
+
+  # Load existing databases and ensure default
+  registry.loadExistingDatabases()
+  registry.ensureDefaultDatabase()
+
+  info("Databases loaded: " & $listDatabases(registry).join(", "))
 
   # Start HTTP server (blocking, multi-threaded via hunos) in background thread
-  var httpServer = newHttpServerWithDb(config, sharedDb)
+  var httpServer = newHttpServerWithRegistry(config, registry)
   spawn httpServer.run(config.port + 440)  # HTTP port = TCP port + 440
 
-  # Start background compaction loop
-  let cm = newCompactionManager(sharedDb)
-  asyncCheck cm.startCompactionLoop()
+  # Start background compaction loop for all databases
+  let mcm = newMultiCompactionManager(registry)
+  asyncCheck mcm.startMultiCompactionLoop()
 
   # Create TCP server (initialization is synchronous, run is async)
   let localId {.used.} = if config.raftNodeId.len > 0: config.raftNodeId else: "node-" & $config.port
-  var tcpServer = newServerWithDb(config, sharedDb)
+  var tcpServer = newServerWithRegistry(config, registry)
 
   # Start Raft cluster if enabled
   if config.raftEnabled:
     info("Starting Raft node " & config.raftNodeId & " on port " & $config.raftPort)
     var raftNode = newRaftNode(config.raftNodeId, config.raftPeers, config.raftPort)
-    # Wire state machine to apply committed entries to the database
+    # Wire state machine to apply committed entries to the default database
+    let defaultDbInfo = getDatabaseInfo(registry, "default")
     raftNode.applyCommand = proc(cmd: string, data: seq[byte]) {.gcsafe.} =
       if cmd == "put":
         let parts = cast[string](data).split("\x00")
         if parts.len >= 2:
-          sharedDb.put(parts[0], cast[seq[byte]](parts[1]))
+          defaultDbInfo.db.put(parts[0], cast[seq[byte]](parts[1]))
       elif cmd == "delete":
-        sharedDb.delete(cast[string](data))
+        defaultDbInfo.db.delete(cast[string](data))
 
     # Wire RAFT ↔ DistTxn
     wireRaftDistTxn(raftNode, tcpServer)
@@ -291,6 +397,7 @@ proc main() =
 
   # Shutdown
   httpServer.stop()
+  tcpServer.stop()
   if tcpServer.gossipProtocol != nil:
     tcpServer.gossipProtocol.stop()
 

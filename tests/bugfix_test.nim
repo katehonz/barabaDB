@@ -3,6 +3,7 @@ import std/strutils
 import std/os
 import std/tables
 import ../src/barabadb/query/[parser, executor, lexer, ast]
+import ../src/barabadb/core/types
 import ../src/barabadb/storage/lsm
 
 const testDir = "/tmp/baradb_bugfix_test"
@@ -73,7 +74,7 @@ suite "Bug fixes — IN list, nkPath exprToSql, multi-table joins":
     check r.success
     check r.rows.len == 1
     # Column is "t.id" (qualified by alias)
-    check r.rows[0]["t.id"] == "42"
+    check valueToString(r.rows[0]["t.id"]) == "42"
 
   test "IN (list) executes with actual data":
     var ctx = setupCtx()
@@ -123,9 +124,9 @@ suite "Bug fixes — IN list, nkPath exprToSql, multi-table joins":
     check r.success
     check r.rows.len == 1
     # Verify qualified column references resolve correctly
-    check r.rows[0]["post.id"] == "100"
-    check r.rows[0]["users.name"] == "Alice"
-    check r.rows[0]["post.thread"] == "5"
+    check valueToString(r.rows[0]["post.id"]) == "100"
+    check valueToString(r.rows[0]["users.name"]) == "Alice"
+    check valueToString(r.rows[0]["post.thread"]) == "5"
     # Check column names don't contain "nkPath"
     for col in r.columns:
       check not col.contains("nkPath")
@@ -178,10 +179,10 @@ suite "Bug fixes — IN list, nkPath exprToSql, multi-table joins":
     check r.rows.len == 4
     # After sorting by name ASC, then id DESC within same name:
     # alice(3), alice(1), bob(2), charlie(4)
-    check r.rows[0]["id"] == "3"
-    check r.rows[1]["id"] == "1"
-    check r.rows[2]["id"] == "2"
-    check r.rows[3]["id"] == "4"
+    check valueToString(r.rows[0]["id"]) == "3"
+    check valueToString(r.rows[1]["id"]) == "1"
+    check valueToString(r.rows[2]["id"]) == "2"
+    check valueToString(r.rows[3]["id"]) == "4"
 
   test "Numeric != comparison is consistent with =":
     var ctx = setupCtx()
@@ -203,7 +204,7 @@ suite "Bug fixes — IN list, nkPath exprToSql, multi-table joins":
     # Column names should match the full path "posts.id", "posts.title"
     check r.columns == @["posts.id", "posts.title"]
     # Data should be accessible via both qualified and unqualified names
-    check r.rows[0]["posts.id"] == "1"
+    check valueToString(r.rows[0]["posts.id"]) == "1"
 
   test "DELETE inside transaction actually removes row":
     var ctx = setupCtx()
@@ -244,8 +245,8 @@ suite "Bug fixes — IN list, nkPath exprToSql, multi-table joins":
     let rmin = executeQuery(ctx, parse("SELECT MIN(val) AS m FROM scores"))
     check rmin.success
     check rmin.rows.len == 1
-    check rmin.rows[0]["m"] == "10"
+    check valueToString(rmin.rows[0]["m"]) == "10"
     let rmax = executeQuery(ctx, parse("SELECT MAX(val) AS m FROM scores"))
     check rmax.success
     check rmax.rows.len == 1
-    check rmax.rows[0]["m"] == "30"
+    check valueToString(rmax.rows[0]["m"]) == "30"

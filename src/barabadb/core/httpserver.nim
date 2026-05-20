@@ -6,13 +6,13 @@ import hunos/context
 import json
 import tables
 import strutils
-import os
 import times
 import std/asyncdispatch
 import config
 import ../query/lexer
 import ../query/parser
 import ../query/executor
+import ../core/types
 import ../storage/lsm
 import ../core/mvcc
 import ../protocol/wire
@@ -20,6 +20,7 @@ import ../core/websocket
 import jwt as jwtlib
 import ../protocol/auth
 import ../protocol/ratelimit
+import ../core/registry
 
 type
   HttpServer* = ref object
@@ -27,6 +28,7 @@ type
     running: bool
     db*: LSMTree
     ctx: ExecutionContext
+    registry*: DatabaseRegistry
     metrics*: Metrics
     secretKey*: string
     authManager*: AuthManager
@@ -40,8 +42,10 @@ type
     selectCount*: int
     activeConnections*: int
 
-proc newHttpServerWithDb*(config: BaraConfig, db: LSMTree): HttpServer =
-  let ctx = newExecutionContext(db)
+proc newHttpServerWithRegistry*(config: BaraConfig, registry: DatabaseRegistry): HttpServer =
+  let dbInfo = getOrCreateDatabase(registry, "default")
+  let db = dbInfo.db
+  let ctx = cast[ExecutionContext](cast[pointer](dbInfo.ctx))
   ctx.txnManager = newTxnManager()
   let secret = config.getEffectiveJwtSecret()
   let ws = newWsServer(config, secret)
@@ -51,15 +55,27 @@ proc newHttpServerWithDb*(config: BaraConfig, db: LSMTree): HttpServer =
     asyncCheck ws.broadcastToTable(ev.table, msg)
   let am = newAuthManager(secret)
   HttpServer(config: config, running: false, db: db, ctx: ctx,
+             registry: registry,
              secretKey: secret,
              authManager: am,
              rateLimiter: rl,
              metrics: Metrics(), ws: ws)
 
+proc newHttpServerWithDb*(config: BaraConfig, db: LSMTree): HttpServer =
+  let registry = newDatabaseRegistry(config)
+  registry.setContextFactory(proc(d: LSMTree, r: DatabaseRegistry): ContextRef {.closure.} =
+    cast[ContextRef](cast[pointer](newExecutionContext(d, r))))
+  let ctx = newExecutionContext(db, registry)
+  registry.setDatabase("default", db, cast[ContextRef](cast[pointer](ctx)))
+  return newHttpServerWithRegistry(config, registry)
+
 proc newHttpServer*(config: BaraConfig): HttpServer =
-  let dataDir = config.dataDir / "server"
-  let db = newLSMTree(dataDir)
-  return newHttpServerWithDb(config, db)
+  let registry = newDatabaseRegistry(config)
+  registry.setContextFactory(proc(d: LSMTree, r: DatabaseRegistry): ContextRef {.closure.} =
+    cast[ContextRef](cast[pointer](newExecutionContext(d, r))))
+  registry.loadExistingDatabases()
+  registry.ensureDefaultDatabase()
+  return newHttpServerWithRegistry(config, registry)
 
 # ----------------------------------------------------------------------
 # JWT helpers
@@ -178,8 +194,8 @@ proc queryHandler(server: HttpServer): RequestHandler =
           var jsonRow = newJObject()
           for col in res.columns:
             let key = col
-            if key in row and not isNull(row[key]):
-              jsonRow[key] = %row[key]
+            if key in row and row[key].kind != vkNull:
+              jsonRow[key] = %valueToString(row[key])
             else:
               jsonRow[key] = newJNull()
           jsonRows.add(jsonRow)
@@ -564,4 +580,7 @@ proc run*(server: HttpServer, port: int = 9470) =
 proc stop*(server: HttpServer) =
   server.running = false
   server.ws.stop()
-  server.db.close()
+  if server.registry != nil:
+    server.registry.closeAll()
+  else:
+    server.db.close()
