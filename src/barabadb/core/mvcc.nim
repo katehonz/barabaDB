@@ -25,6 +25,7 @@ type
     xmin*: TxnId  # creating transaction
     xmax*: TxnId  # deleting transaction (0 = not deleted)
     lsn*: Lsn
+    isDelete*: bool
 
   Transaction* = ref object
     id*: TxnId
@@ -147,7 +148,7 @@ proc read*(tm: TxnManager, txn: Transaction, key: string): (bool, seq[byte]) =
   if key in txn.writeSet:
     let version = txn.writeSet[key]
     release(tm.lock)
-    if version.value == @[]:
+    if version.isDelete or version.value == @[]:
       return (false, @[])
     return (true, version.value)
 
@@ -230,7 +231,61 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
   return true
 
 proc delete*(tm: TxnManager, txn: Transaction, key: string): bool =
-  return tm.write(txn, key, @[])
+  acquire(tm.lock)
+  if txn.state != tsActive:
+    release(tm.lock)
+    return false
+
+  # Timeout-based deadlock detection: abort stale transactions
+  let now = getMonoTime().ticks()
+  for otherId, otherTxn in tm.activeTxns:
+    if otherId != txn.id and otherTxn.state == tsActive:
+      if now - otherTxn.startTime > tm.txnTimeoutMs * 1_000_000:
+        otherTxn.state = tsAborted
+        tm.activeTxns.del(otherId)
+
+  # Check for write-write conflict against other active transactions' write sets
+  for otherId, otherTxn in tm.activeTxns:
+    if otherId != txn.id and otherTxn.state == tsActive:
+      if key in otherTxn.writeSet:
+        tm.deadlockDetector.addWait(uint64(txn.id), uint64(otherId))
+        if tm.deadlockDetector.hasDeadlock():
+          let victimId = TxnId(tm.deadlockDetector.findDeadlockVictim())
+          tm.deadlockDetector.removeTxn(uint64(victimId))
+          if victimId in tm.activeTxns:
+            tm.activeTxns[victimId].state = tsAborted
+            tm.activeTxns.del(victimId)
+        release(tm.lock)
+        return false
+
+  # Check for write-write conflict with committed versions
+  if key notin txn.writeSet:
+    if key in tm.globalVersions:
+      for version in tm.globalVersions[key]:
+        if version.xmax == TxnId(0):
+          let creator = version.xmin
+          if creator != txn.id:
+            if creator in txn.snapshotTxns or uint64(creator) > uint64(txn.snapshotMaxTxn):
+              if creator in tm.activeTxns:
+                if tm.activeTxns[creator].state == tsCommitted:
+                  release(tm.lock)
+                  return false
+              else:
+                release(tm.lock)
+                return false
+
+  let lsn = tm.allocLsn()
+  let version = VersionedRecord(
+    key: key,
+    value: @[],
+    xmin: txn.id,
+    xmax: TxnId(0),
+    lsn: lsn,
+    isDelete: true,
+  )
+  txn.writeSet[key] = version
+  release(tm.lock)
+  return true
 
 proc compactVersions*(tm: TxnManager)
 

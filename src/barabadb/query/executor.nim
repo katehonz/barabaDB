@@ -24,6 +24,7 @@ import ../storage/wal
 import ../core/mvcc
 import ../core/tracing
 import ../fts/engine as fts
+import ../core/registry
 
 proc cmpMax(a, b: string): bool =
   var fa, fb: float
@@ -108,6 +109,8 @@ type
     sharedLock*: SharedLock  # shared across cloned contexts — protects tables, views, btrees, ftsIndexes, users, policies, autoIncCounters, sequences
     outerRow*: Table[string, string]  # outer query row for correlated subqueries
     subqueryPlan*: IRPlan  # current subquery plan being evaluated (for correlation in execScan)
+    currentDatabase*: string  # name of the currently selected database
+    registry*: DatabaseRegistry  # reference to the database registry (nil for single-DB mode)
 
   MigrationRecord* = object
     name*: string
@@ -183,7 +186,7 @@ proc errResult*(msg: string): ExecResult =
 proc evalNodeToString(node: Node): string
 proc restoreSchema(ctx: ExecutionContext)
 
-proc newExecutionContext*(db: LSMTree): ExecutionContext =
+proc newExecutionContext*(db: LSMTree, registry: DatabaseRegistry = nil): ExecutionContext =
   result = ExecutionContext(db: db, tables: initTable[string, TableDef](),
                    btrees: initTable[string, BTreeIndex[string, IndexEntry]](),
                    views: initTable[string, Node](),
@@ -196,7 +199,10 @@ proc newExecutionContext*(db: LSMTree): ExecutionContext =
                    sessionVars: initTable[string, string](),
                    autoIncCounters: initTable[string, int64](),
                     sequences: initTable[string, int64](),
-                    onChange: nil)
+                    txnManager: newTxnManager(),
+                    onChange: nil,
+                    currentDatabase: "default",
+                    registry: registry)
   result.sharedLock = SharedLock()
   initLock(result.sharedLock.lock)
   restoreSchema(result)
@@ -402,7 +408,9 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
                    sessionVars: svCopy,
                    autoIncCounters: ctx.autoIncCounters,
                     sequences: ctx.sequences,
-                    pendingTxn: nil, onChange: ctx.onChange)
+                    pendingTxn: nil, onChange: ctx.onChange,
+                    currentDatabase: ctx.currentDatabase,
+                    registry: ctx.registry)
   result.sharedLock = ctx.sharedLock
 
 # ----------------------------------------------------------------------
@@ -1704,7 +1712,7 @@ proc evalExpr*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContext =
     return ""
   of irekSubquery:
     # Execute subquery and return scalar value (first column of first row)
-    if ctx != nil:
+    if ctx != nil and expr.subqueryPlan != nil:
       let savedOuter = ctx.outerRow
       let savedPlan = ctx.subqueryPlan
       ctx.outerRow = row
@@ -2722,23 +2730,32 @@ proc lowerSelect*(node: Node): IRPlan =
   projectPlan.projectSource = result
   projectPlan.projectExprs = @[]
   projectPlan.projectAliases = @[]
+  var seenAliases = initTable[string, int]()
   for i, e in node.selResult:
     projectPlan.projectExprs.add(lowerExpr(e))
+    var alias = ""
     if e.exprAlias.len > 0:
-      projectPlan.projectAliases.add(e.exprAlias)
+      alias = e.exprAlias
     elif e.kind == nkIdent:
-      projectPlan.projectAliases.add(e.identName)
+      alias = e.identName
     elif e.kind == nkPath and e.pathParts.len > 0:
-      projectPlan.projectAliases.add(e.pathParts.join("."))
+      alias = e.pathParts.join(".")
     elif e.kind == nkFuncCall:
       var aliasArgs: seq[string] = @[]
       for arg in e.funcArgs:
         aliasArgs.add(exprToSql(arg))
-      projectPlan.projectAliases.add(e.funcName & "(" & aliasArgs.join(", ") & ")")
+      alias = e.funcName & "(" & aliasArgs.join(", ") & ")"
     elif e.kind == nkStar:
-      projectPlan.projectAliases.add("*")
+      alias = "*"
     else:
-      projectPlan.projectAliases.add("col" & $i)
+      alias = "col" & $i
+    # Deduplicate aliases
+    if alias in seenAliases:
+      seenAliases[alias] += 1
+      alias = alias & "_" & $seenAliases[alias]
+    else:
+      seenAliases[alias] = 0
+    projectPlan.projectAliases.add(alias)
   result = projectPlan
 
   if node.selLimit != nil or node.selOffset != nil:
@@ -3040,14 +3057,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               var minVal = ""
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                if v == "\\\\N": continue
+                if v == "\\N": continue
                 if minVal == "" or cmpMin(v, minVal): minVal = v
               newRow[alias] = minVal
             of irMax:
               var maxVal = ""
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                if v == "\\\\N": continue
+                if v == "\\N": continue
                 if maxVal == "" or cmpMax(v, maxVal): maxVal = v
               newRow[alias] = maxVal
             of irArrayAgg:
@@ -3220,14 +3237,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             var minVal = ""
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              if v == "\\\\N": continue
+              if v == "\\N": continue
               if minVal == "" or cmpMin(v, minVal): minVal = v
             aggRow[aggKey] = minVal
           of irMax:
             var maxVal = ""
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              if v == "\\\\N": continue
+              if v == "\\N": continue
               if maxVal == "" or cmpMax(v, maxVal): maxVal = v
             aggRow[aggKey] = maxVal
           of irArrayAgg:
@@ -3733,14 +3750,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             var minVal = ""
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              if v == "\\\\N": continue
+              if v == "\\N": continue
               if minVal == "" or cmpMin(v, minVal): minVal = v
             aggResult = minVal
           of irMax:
             var maxVal = ""
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              if v == "\\\\N": continue
+              if v == "\\N": continue
               if maxVal == "" or cmpMax(v, maxVal): maxVal = v
             aggResult = maxVal
           else: discard
@@ -4039,22 +4056,30 @@ proc bindParams*(node: Node, params: seq[WireValue]): Node =
 proc getSelectColumns(stmt: Node): seq[string] =
   result = @[]
   if stmt.kind != nkSelect: return result
+  var seenAliases = initTable[string, int]()
   for i, e in stmt.selResult:
+    var alias = ""
     if e.exprAlias.len > 0:
-      result.add(e.exprAlias)
+      alias = e.exprAlias
     elif e.kind == nkIdent:
-      result.add(e.identName)
+      alias = e.identName
     elif e.kind == nkPath and e.pathParts.len > 0:
-      result.add(e.pathParts.join("."))
+      alias = e.pathParts.join(".")
     elif e.kind == nkFuncCall:
       var aliasArgs: seq[string] = @[]
       for arg in e.funcArgs:
         aliasArgs.add(exprToSql(arg))
-      result.add(e.funcName & "(" & aliasArgs.join(", ") & ")")
+      alias = e.funcName & "(" & aliasArgs.join(", ") & ")"
     elif e.kind == nkStar:
-      result.add("*")
+      alias = "*"
     else:
-      result.add("col" & $i)
+      alias = "col" & $i
+    if alias in seenAliases:
+      seenAliases[alias] += 1
+      alias = alias & "_" & $seenAliases[alias]
+    else:
+      seenAliases[alias] = 0
+    result.add(alias)
 
 proc isDDL(stmt: Node): bool =
   case stmt.kind
@@ -4065,6 +4090,7 @@ proc isDDL(stmt: Node): bool =
      nkCreateUser, nkDropUser,
      nkCreatePolicy, nkDropPolicy,
      nkCreateGraph, nkDropGraph,
+     nkCreateDatabase, nkDropDatabase,
      nkGrant, nkRevoke,
      nkEnableRLS, nkDisableRLS:
     result = true
@@ -4907,7 +4933,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
       var kvPairs: seq[(string, seq[byte])]
       for key, version in ctx.pendingTxn.writeSet:
-        if version.value == @[] and version.xmax != TxnId(0):
+        if version.isDelete:
           ctx.db.delete(key)
         else:
           ctx.db.put(key, version.value)
@@ -5332,6 +5358,80 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
   of nkSetVar:
     ctx.sessionVars[stmt.svName] = stmt.svValue
     return okResult(msg="SET " & stmt.svName & " = " & stmt.svValue)
+
+  of nkCreateDatabase:
+    if ctx.registry == nil:
+      return errResult("Multi-database support not enabled")
+    if not isValidDbName(stmt.cdDbName):
+      return errResult("Invalid database name: " & stmt.cdDbName)
+    if databaseExists(ctx.registry, stmt.cdDbName) and not stmt.cdIfNotExists:
+      return errResult("Database already exists: " & stmt.cdDbName)
+    if databaseExists(ctx.registry, stmt.cdDbName) and stmt.cdIfNotExists:
+      return okResult(msg="CREATE DATABASE " & stmt.cdDbName)
+    try:
+      discard getOrCreateDatabase(ctx.registry, stmt.cdDbName)
+      let dbKey = "_schema:databases:" & stmt.cdDbName
+      ctx.db.put(dbKey, cast[seq[byte]]("created"))
+      return okResult(msg="CREATE DATABASE " & stmt.cdDbName)
+    except CatchableError as e:
+      return errResult("CREATE DATABASE failed: " & e.msg)
+
+  of nkDropDatabase:
+    if ctx.registry == nil:
+      return errResult("Multi-database support not enabled")
+    if stmt.ddDbName == "default":
+      return errResult("Cannot drop the default database")
+    try:
+      let count = getConnectionCount(ctx.registry, stmt.ddDbName)
+      if count > 0:
+        return errResult("Cannot drop database '" & stmt.ddDbName &
+                         "': " & $count & " active connections")
+      let dbKey = "_schema:databases:" & stmt.ddDbName
+      ctx.db.delete(dbKey)
+      if dropDatabase(ctx.registry, stmt.ddDbName):
+        return okResult(msg="DROP DATABASE " & stmt.ddDbName)
+      elif stmt.ddIfExists:
+        return okResult(msg="DROP DATABASE " & stmt.ddDbName)
+      else:
+        return errResult("Database not found: " & stmt.ddDbName)
+    except CatchableError as e:
+      return errResult("DROP DATABASE failed: " & e.msg)
+
+  of nkUseDatabase:
+    if ctx.registry == nil:
+      return errResult("Multi-database support not enabled")
+    if ctx.pendingTxn != nil:
+      return errResult("Cannot switch database inside a transaction. Commit or rollback first.")
+    let info = getDatabaseInfo(ctx.registry, stmt.udDbName)
+    if info == nil:
+      return errResult("Database not found: " & stmt.udDbName)
+    let targetCtx = cast[ExecutionContext](cast[pointer](info.ctx))
+    let oldDb = ctx.currentDatabase
+    ctx.db = info.db
+    ctx.tables = targetCtx.tables
+    ctx.btrees = targetCtx.btrees
+    ctx.views = targetCtx.views
+    ctx.ftsIndexes = targetCtx.ftsIndexes
+    ctx.vectorIndexes = targetCtx.vectorIndexes
+    ctx.users = targetCtx.users
+    ctx.policies = targetCtx.policies
+    ctx.graphs = targetCtx.graphs
+    ctx.autoIncCounters = targetCtx.autoIncCounters
+    ctx.sequences = targetCtx.sequences
+    ctx.currentDatabase = stmt.udDbName
+    decrementConnections(ctx.registry, oldDb)
+    incrementConnections(ctx.registry, stmt.udDbName)
+    return okResult(msg="Changed to database '" & stmt.udDbName & "'")
+
+  of nkShowDatabases:
+    if ctx.registry == nil:
+      return errResult("Multi-database support not enabled")
+    var rows: seq[Row] = @[]
+    for dbName in listDatabases(ctx.registry):
+      var row = initTable[string, string]()
+      row["name"] = dbName
+      rows.add(row)
+    return okResult(rows, @["name"])
 
   else:
     return errResult("Unsupported statement type: " & $stmt.kind)
