@@ -3000,6 +3000,25 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
 # IR Plan Execution (with actual filter/sort/projection)
 # ----------------------------------------------------------------------
 
+proc expandStarRow(row: Row): Row =
+  result = initTable[string, Value]()
+  var seenCols = initTable[string, bool]()
+  var qualifiedCount = initTable[string, int]()
+  for k, v in row:
+    if not k.startsWith("$") and k.contains("."):
+      let parts = k.split(".")
+      if parts.len == 2:
+        qualifiedCount[parts[1]] = qualifiedCount.getOrDefault(parts[1], 0) + 1
+  for k, v in row:
+    if not k.startsWith("$") and not k.contains("."):
+      result[k] = v
+      seenCols[k] = true
+  for k, v in row:
+    if not k.startsWith("$") and k.contains("."):
+      let parts = k.split(".")
+      if parts.len == 2 and parts[1] in seenCols and qualifiedCount.getOrDefault(parts[1], 0) > 1:
+        result[k] = v
+
 proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
   if plan == nil: return @[]
 
@@ -3056,9 +3075,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             if expr.kind == irekWindowFunc:
               newRow[alias] = winValues[i][rowIdx]
             elif expr.kind == irekStar:
-              for k, v in row:
-                if not k.startsWith("$") and not k.contains("."):
-                  newRow[k] = v
+              newRow = expandStarRow(row)
             else:
               let val = evalExpr(expr, row, ctx)
               if alias.len > 0: newRow[alias] = val
@@ -3077,9 +3094,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           let expr = plan.projectExprs[i]
           if expr.kind == irekStar:
             if sourceRows.len > 0:
-              for k, v in sourceRows[0]:
-                if not k.startsWith("$") and not k.contains("."):
-                  newRow[k] = v
+              newRow = expandStarRow(sourceRows[0])
           elif expr.kind == irekAggregate:
             # Apply FILTER (WHERE ...) if present
             var filteredRows = sourceRows
@@ -3152,10 +3167,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
         if i < plan.projectExprs.len:
           let expr = plan.projectExprs[i]
           if expr.kind == irekStar:
-            # Expand star to all columns in the row (excluding internal keys)
-            for k, v in row:
-              if not k.startsWith("$") and not k.contains("."):
-                newRow[k] = v
+            newRow = expandStarRow(row)
           elif expr.kind == irekAggregate and sourceIsGroupBy:
             # Look up pre-computed aggregate from GroupBy row
             let aggKey = "$agg_" & $expr.aggOp
@@ -4475,11 +4487,29 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     # Expand star to table columns
     if "*" in cols:
       var expandedCols: seq[string] = @[]
-      let tbl = ctx.getTableDef(if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromTable else: "")
+      var seenColNames = initTable[string, bool]()
+      let fromTable = if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromTable else: ""
+      let fromAlias = if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromAlias else: ""
       for c in cols:
         if c == "*":
-          for tc in tbl.columns:
-            expandedCols.add(tc.name)
+          if fromTable.len > 0:
+            let tbl = ctx.getTableDef(fromTable)
+            for tc in tbl.columns:
+              expandedCols.add(tc.name)
+              seenColNames[tc.name] = true
+          for j in stmt.selJoins:
+            if j.kind == nkJoin and j.joinTarget != nil and j.joinTarget.kind == nkFrom:
+              let joinTbl = ctx.getTableDef(j.joinTarget.fromTable)
+              let alias = j.joinTarget.fromAlias
+              for tc in joinTbl.columns:
+                if tc.name in seenColNames:
+                  if alias.len > 0:
+                    expandedCols.add(alias & "." & tc.name)
+                  else:
+                    expandedCols.add(j.joinTarget.fromTable & "." & tc.name)
+                else:
+                  expandedCols.add(tc.name)
+                  seenColNames[tc.name] = true
         else:
           expandedCols.add(c)
       cols = expandedCols
