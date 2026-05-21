@@ -407,11 +407,12 @@ proc incrementalBackupDataDir*(dataDir: string, output: string, verbose: bool = 
     let manifest = parseJson(readFile(manifestPath))
     for node in manifest{"sstables"}:
       let sstPath = node{"path"}.getStr()
-      if fileExists(sstPath):
-        filesToInclude.add(sstPath)
+      let absSstPath = if isAbsolute(sstPath): sstPath else: dataDir / sstPath
+      if fileExists(absSstPath):
+        filesToInclude.add(absSstPath)
       else:
         if verbose:
-          echo "WARNING: SSTable missing: ", sstPath
+          echo "WARNING: SSTable missing: ", absSstPath
   except CatchableError as e:
     echo "ERROR: Failed to parse MANIFEST: ", e.msg
     return false
