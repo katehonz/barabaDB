@@ -5,13 +5,7 @@
 ## Documentation Languages
 
 - [English](en/)
-- [العربية (Arabic)](ar/)
 - [Български (Bulgarian)](bg/)
-- [Deutsch (German)](de/)
-- [فارسی (Farsi)](fa/)
-- [Русский (Russian)](ru/)
-- [Türkçe (Turkish)](tr/)
-- [中文 (Chinese)](zh/)
 
 ---
 
@@ -67,4 +61,4 @@
 
 ---
 
-*To add a new language, create a new folder in `docs/` with the language code (e.g., `docs/de/`) and add a link above.*
+*To add a new language, create a new folder in `docs/` with the language code and add a link above.*

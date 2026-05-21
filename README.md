@@ -5,12 +5,12 @@
 **A multimodal database engine written in Nim — 100% native, zero dependencies.**
 
 [![Version](https://img.shields.io/badge/version-1.1.6-blue.svg)](baradadb.nimble)
-[![Documentation](https://img.shields.io/badge/docs-7_languages-blue.svg)](docs/index.md)
+[![Documentation](https://img.shields.io/badge/docs-2_languages-blue.svg)](docs/index.md)
 [![Stars](https://img.shields.io/github/stars/katehonz/barabaDB?style=social)](https://github.com/katehonz/barabaDB)
 
 ## Documentation
 
-📖 **[Read the documentation in your language](docs/index.md)** — English, Български, Русский, فارسی, 中文, Türkçe, العربية
+📖 **[Read the documentation in your language](docs/index.md)** — English, Български
 
 BaraDB combines document, graph, vector, columnar, and full-text search storage
 in a single engine with a unified query language (BaraQL). It compiles to a
@@ -112,7 +112,7 @@ nimble bench
 
 ## BaraQL — Query Language
 
-BaraQL is SQL-compatible with extensions for graph, vector, and document queries.
+BaraQL implements partial SQL:2023 coverage with extensions for graph, vector, and document queries.
 
 ### Basic Queries
 

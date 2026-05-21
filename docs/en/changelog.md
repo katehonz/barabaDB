@@ -53,7 +53,7 @@ All notable changes to BaraDB are documented in this file.
 - **Cypher Compatibility Layer**:
   - `cypher()` SQL function — translates `MATCH (a)-[r]->(b) RETURN ...` to GRAPH_TABLE
   - Automatic Cypher → BaraQL conversion
-- **German Documentation** — Full documentation set in German (`docs/de/`)
+- **Bulgarian Documentation** — Full documentation set in Bulgarian (`docs/bg/`) (replaces removed German, Russian, Arabic, Farsi, Turkish, and Chinese docs)
 
 ### Changed
 
