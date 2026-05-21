@@ -107,3 +107,15 @@ suite "JOIN execution":
     let r = execSql(ctx,
       "SELECT u.name, x.total FROM users u CROSS JOIN LATERAL (SELECT o.total FROM orders o WHERE o.user_id = u.id) AS x")
     check r.rows.len == 2  # Alice has 2 orders, Bob has 0
+
+  test "SELECT * with duplicate column names preserves both sides":
+    let r = execSql(ctx, "SELECT * FROM users u JOIN orders o ON u.id = o.user_id")
+    check r.rows.len == 2
+    # Both tables have 'id' — left value should be accessible bare,
+    # right value should be accessible via alias.
+    check r.rows[0]["id"] == "1"          # users.id (left side wins bare name)
+    check r.rows[0]["o.id"] == "10"       # orders.id (qualified)
+    check r.rows[0]["name"] == "Alice"
+    check r.rows[0]["total"] == "99.5"
+    check "o.id" in r.columns
+    check "u.id" notin r.columns          # left id stays bare, not duplicated as u.id
