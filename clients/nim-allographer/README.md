@@ -1,5 +1,10 @@
-allographer
+allographer (BaraDB Fork)
 ===
+
+> **⚠️ This is a fork of [itsumura-h/nim-allographer](https://github.com/itsumura-h/nim-allographer) with added [BaraDB](https://github.com/katehonz/barabaDB) driver support.**  
+> The original library supports SQLite3, PostgreSQL, MySQL, MariaDB and SurrealDB. This fork adds a pure-Nim BaraDB driver using the native wire protocol.
+
+---
 
 [![nimble](https://raw.githubusercontent.com/yglukhov/nimble-tag/master/nimble.png)](https://github.com/yglukhov/nimble-tag)  
 ![Build Status](https://github.com/itsumura-h/nim-allographer/workflows/Build%20and%20test%20Nim/badge.svg)
