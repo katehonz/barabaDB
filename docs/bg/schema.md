@@ -26,6 +26,32 @@ s.addType("default", employee)
 let resolved = s.resolveInheritance(employee)
 ```
 
+## SQL Миграции
+
+BaraDB поддържа SQL миграции, изпълнявани чрез BaraQL:
+
+```sql
+-- Създаване на миграционна таблица
+CREATE MIGRATION TABLE my_migration;
+
+-- Прилагане на чакащи миграции
+MIGRATION UP;
+
+-- Rollback на последната миграция
+MIGRATION DOWN;
+
+-- Прилагане на всички чакащи миграции наведнъж
+MIGRATION UP BATCH;
+
+-- Dry-run за преглед на промените
+MIGRATION DRYRUN;
+
+-- Проверка на статуса
+MIGRATION STATUS;
+```
+
+Миграционните скриптове се съхраняват вътре в LSMTree на всяка база данни и са изолирани per database. При използване на множество бази, изпълнете `USE DATABASE <име>` преди миграционните команди.
+
 ## Типове Полета
 
 | Тип | Описание |

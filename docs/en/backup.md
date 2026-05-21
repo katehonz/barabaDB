@@ -2,6 +2,9 @@
 
 BaraDB provides multiple backup strategies ranging from full snapshots to incremental and online consistent backups.
 
+> ⚠️ **Multi-Database Setup**
+> BaraDB supports multiple databases (`CREATE DATABASE`). Each database has its own isolated data directory (e.g. `data/databases/<name>/`). Backup, repair, checkpoint, and migration commands operate on **one directory at a time**. If you use multiple databases, run the commands for each database separately or back up the entire `data/databases/` parent directory.
+
 ## Architecture
 
 ```
@@ -15,6 +18,14 @@ BaraDB provides multiple backup strategies ranging from full snapshots to increm
 │      ├── wal.log       (active segment) │
 │      └── wal_archive/  (rotated segments│
 └─────────────────────────────────────────┘
+```
+
+## Backup Tool
+
+The backup tool is shipped as `src/barabadb/core/backup.nim`. Build it before use:
+
+```bash
+nim c -o:build/backup src/barabadb/core/backup.nim
 ```
 
 ## SSTable Integrity (v3 CRC Footer)
@@ -37,24 +48,24 @@ This enables independent verification of each SSTable:
 ```bash
 # Via Nim API
 import barabadb/storage/lsm
-let (ok, msg) = verifySSTable("data/sstables/1.sst")
+let (ok, msg) = verifySSTable("data/databases/default/sstables/1.sst")
 ```
 
-## Storage Repair (`baradb repair`)
+## Storage Repair (`baradadb repair`)
 
-If corruption is suspected, run the repair tool:
+If corruption is suspected, run the repair tool against a specific database directory:
 
 ```bash
 # Dry run — preview only
-./build/baradadb repair --data-dir=./data --dry-run
+./build/baradadb repair --data-dir=./data/databases/default --dry-run
 
 # Full repair — verify, move corrupt files, replay WAL
-./build/baradadb repair --data-dir=./data
+./build/baradadb repair --data-dir=./data/databases/default
 ```
 
 **What repair does:**
 1. Scans all `sstables/*.sst` and verifies CRC
-2. Moves corrupt SSTables to `data/corrupt/`
+2. Moves corrupt SSTables to `<data-dir>/corrupt/`
 3. Replays WAL to recover unflushed committed data
 4. Reports results
 
@@ -78,6 +89,8 @@ Benefits:
 - **Fast startup** — load from MANIFEST instead of directory scan
 - **Orphan detection** — `checkStorageConsistency()` reports extra/missing files
 
+In a multi-database setup, each database maintains its own independent MANIFEST inside its data directory.
+
 ## WAL Rotation
 
 The Write-Ahead Log rotates when it reaches 64MB:
@@ -99,7 +112,7 @@ Rotation happens:
 A checkpoint creates a consistent storage boundary without stopping the server:
 
 ```bash
-./build/baradadb checkpoint --data-dir=./data
+./build/baradadb checkpoint --data-dir=./data/databases/default
 ```
 
 **How it works:**
@@ -112,18 +125,20 @@ The freeze takes **< 1ms**; the flush proceeds concurrently with writes.
 
 ## Backup Commands
 
+> Build the backup tool first: `nim c -o:build/backup src/barabadb/core/backup.nim`
+
 ### Full Backup (tar.gz)
 
 ```bash
-./build/backup backup --data-dir=./data --output=backup_$(date +%s).tar.gz
+./build/backup backup --data-dir=./data/databases/default --output=backup_$(date +%s).tar.gz
 ```
 
-Archives the entire data directory.
+Archives the entire data directory of the specified database.
 
 ### Incremental Backup
 
 ```bash
-./build/backup incremental --data-dir=./data --output=backup_inc_$(date +%s).tar.gz
+./build/backup incremental --data-dir=./data/databases/default --output=backup_inc_$(date +%s).tar.gz
 ```
 
 Includes only:
@@ -137,25 +152,25 @@ All SSTables are **CRC-verified** before archiving.
 ### Online Consistent Backup
 
 ```bash
-./build/baradadb backup --online --output=backup_online_$(date +%s).tar.gz
+./build/backup backup --online --data-dir=./data/databases/default --output=backup_online_$(date +%s).tar.gz
 ```
 
 Equivalent to:
 1. `checkpoint`
 2. `incremental backup`
 
-**Safe to run while the server is stopped.** If the server is running, use `backup incremental` instead.
+Safe to run while the server is running. The checkpoint creates a consistent snapshot, then the incremental backup archives it.
 
 ## SSTable Version Migration
 
-If you have legacy v1/v2 SSTables, migrate them to v3:
+If you have legacy v1/v2 SSTables, migrate them to v3 per database:
 
 ```bash
 # Preview
-./build/baradadb migrate --data-dir=./data --dry-run
+./build/baradadb migrate --data-dir=./data/databases/default --dry-run
 
 # Migrate
-./build/baradadb migrate --data-dir=./data
+./build/baradadb migrate --data-dir=./data/databases/default
 ```
 
 Migration rewrites each legacy SSTable with the current v3 format (CRC footer) and updates the MANIFEST.
@@ -166,31 +181,35 @@ Migration rewrites each legacy SSTable with the current v3 format (CRC footer) a
 
 ```bash
 # Repair moves corrupt files and replays WAL
-./build/baradadb repair --data-dir=./data
+./build/baradadb repair --data-dir=./data/databases/default
 
 # Verify consistency
-./build/baradadb repair --data-dir=./data --dry-run
+./build/baradadb repair --data-dir=./data/databases/default --dry-run
 ```
 
-### Scenario 2: Restore from Backup
+### Scenario 2: Restore from Backup (Single Database)
 
 ```bash
 # Stop the server
-# Extract backup
-tar -xzf backup_1234567890.tar.gz -C ./data
+# Extract backup into the database directory
+tar -xzf backup_1234567890.tar.gz -C ./data/databases/default
 
 # Restart — LSMTree loads from MANIFEST
 ./build/baradadb
 ```
 
-### Scenario 3: Complete Data Loss
+### Scenario 3: Restore All Databases
+
+If you back up the entire `data/databases/` tree:
 
 ```bash
 # 1. Extract latest backup
 tar -xzf backup_latest.tar.gz -C ./data
 
-# 2. Run repair to replay any available WAL
-./build/baradadb repair --data-dir=./data
+# 2. Run repair for each database to replay any available WAL
+for db in ./data/databases/*/; do
+  ./build/baradadb repair --data-dir="$db" --dry-run
+done
 
 # 3. Start server
 ./build/baradadb

@@ -6,12 +6,15 @@ BaraDB provides multiple storage engines optimized for different access patterns
 
 The primary storage engine with write-optimized append-only log structure.
 
+> **Multi-Database Note**
+> Each database gets its own isolated data directory (e.g. `data/databases/<name>/`). The examples below use `./data` as a placeholder — substitute with your actual database path.
+
 ### Usage
 
 ```nim
 import barabadb/storage/lsm
 
-var db = newLSMTree("./data")
+var db = newLSMTree("./data/databases/default")
 db.put("key1", cast[seq[byte]]("value1"))
 let (found, value) = db.get("key1")
 db.close()

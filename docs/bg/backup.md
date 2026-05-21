@@ -2,6 +2,9 @@
 
 BaraDB предоставя няколко стратегии за backup — от пълни snapshot-ове до инкрементални и online consistent backups.
 
+> ⚠️ **Настройка с множество бази данни**
+> BaraDB поддържа множество бази данни (`CREATE DATABASE`). Всяка база има собствена изолирана data директория (напр. `data/databases/<име>/`). Командите за backup, repair, checkpoint и migration работят върху **една директория наведнъж**. Ако използвате множество бази, пускайте командите за всяка база отделно или архивирайте цялата `data/databases/` директория.
+
 ## Архитектура
 
 ```
@@ -15,6 +18,14 @@ BaraDB предоставя няколко стратегии за backup — о
 │      ├── wal.log       (активен сегмент)│
 │      └── wal_archive/  (ротирани сегменти
 └─────────────────────────────────────────┘
+```
+
+## Backup Инструмент
+
+Backup инструментът е в `src/barabadb/core/backup.nim`. Компилирайте го преди употреба:
+
+```bash
+nim c -o:build/backup src/barabadb/core/backup.nim
 ```
 
 ## SSTable Integrity (v3 CRC Footer)
@@ -37,24 +48,24 @@ BaraDB предоставя няколко стратегии за backup — о
 ```bash
 # Чрез Nim API
 import barabadb/storage/lsm
-let (ok, msg) = verifySSTable("data/sstables/1.sst")
+let (ok, msg) = verifySSTable("data/databases/default/sstables/1.sst")
 ```
 
-## Storage Repair (`baradb repair`)
+## Storage Repair (`baradadb repair`)
 
-При съмнение за повреда, пуснете repair инструмента:
+При съмнение за повреда, пуснете repair инструмента за конкретна база данни:
 
 ```bash
 # Dry run — само преглед
-./build/baradadb repair --data-dir=./data --dry-run
+./build/baradadb repair --data-dir=./data/databases/default --dry-run
 
 # Пълен ремонт — проверка, преместване на битите файлове, WAL replay
-./build/baradadb repair --data-dir=./data
+./build/baradadb repair --data-dir=./data/databases/default
 ```
 
 **Какво прави repair:**
 1. Сканира всички `sstables/*.sst` и проверява CRC
-2. Премества корумпираните SSTables в `data/corrupt/`
+2. Премества корумпираните SSTables в `<data-dir>/corrupt/`
 3. Пуска WAL replay за възстановяване на незаписани данни
 4. Докладва резултати
 
@@ -78,6 +89,8 @@ let (ok, msg) = verifySSTable("data/sstables/1.sst")
 - **Бързо стартиране** — зарежда от MANIFEST вместо scan на директория
 - **Откриване на orphans** — `checkStorageConsistency()` докладва излишни/липсващи файлове
 
+При настройка с множество бази данни, всяка база поддържа собствен независим MANIFEST в своята data директория.
+
 ## WAL Ротация
 
 Write-Ahead Log се ротира при достигане на 64MB:
@@ -99,7 +112,7 @@ wal/wal_archive/
 Checkpoint създава консистентна граница на storage без спиране на сървъра:
 
 ```bash
-./build/baradadb checkpoint --data-dir=./data
+./build/baradadb checkpoint --data-dir=./data/databases/default
 ```
 
 **Как работи:**
@@ -112,18 +125,20 @@ Freeze-ът отнема **< 1ms**; flush-ът продължава парале
 
 ## Backup Команди
 
+> Компилирайте backup инструмента първо: `nim c -o:build/backup src/barabadb/core/backup.nim`
+
 ### Пълен Backup (tar.gz)
 
 ```bash
-./build/backup backup --data-dir=./data --output=backup_$(date +%s).tar.gz
+./build/backup backup --data-dir=./data/databases/default --output=backup_$(date +%s).tar.gz
 ```
 
-Архивира цялата data директория.
+Архивира цялата data директория на посочената база данни.
 
 ### Инкрементален Backup
 
 ```bash
-./build/backup incremental --data-dir=./data --output=backup_inc_$(date +%s).tar.gz
+./build/backup incremental --data-dir=./data/databases/default --output=backup_inc_$(date +%s).tar.gz
 ```
 
 Включва само:
@@ -137,25 +152,25 @@ Freeze-ът отнема **< 1ms**; flush-ът продължава парале
 ### Online Consistent Backup
 
 ```bash
-./build/baradadb backup --online --output=backup_online_$(date +%s).tar.gz
+./build/backup backup --online --data-dir=./data/databases/default --output=backup_online_$(date +%s).tar.gz
 ```
 
 Еквивалентно на:
 1. `checkpoint`
 2. `incremental backup`
 
-**Безопасно за пускане, когато сървърът е спрян.** Ако сървърът работи, използвайте `backup incremental`.
+Безопасно за пускане докато сървърът работи. Checkpoint-ът създава консистентен snapshot, след което инкременталният backup го архивира.
 
 ## Миграция на SSTable Версии
 
-Ако имате legacy v1/v2 SSTables, мигрирайте ги към v3:
+Ако имате legacy v1/v2 SSTables, мигрирайте ги към v3 за всяка база данни:
 
 ```bash
 # Преглед
-./build/baradadb migrate --data-dir=./data --dry-run
+./build/baradadb migrate --data-dir=./data/databases/default --dry-run
 
 # Миграция
-./build/baradadb migrate --data-dir=./data
+./build/baradadb migrate --data-dir=./data/databases/default
 ```
 
 Миграцията пренаписва всеки legacy SSTable в текущия v3 формат (CRC footer) и обновява MANIFEST.
@@ -166,31 +181,35 @@ Freeze-ът отнема **< 1ms**; flush-ът продължава парале
 
 ```bash
 # Repair премества битите файлове и пуска WAL replay
-./build/baradadb repair --data-dir=./data
+./build/baradadb repair --data-dir=./data/databases/default
 
 # Проверка на консистентност
-./build/baradadb repair --data-dir=./data --dry-run
+./build/baradadb repair --data-dir=./data/databases/default --dry-run
 ```
 
-### Сценарий 2: Възстановяване от Backup
+### Сценарий 2: Възстановяване от Backup (Единична База)
 
 ```bash
 # Спиране на сървъра
-# Разархивиране на backup
-tar -xzf backup_1234567890.tar.gz -C ./data
+# Разархивиране на backup в директорията на базата
+tar -xzf backup_1234567890.tar.gz -C ./data/databases/default
 
 # Рестарт — LSMTree зарежда от MANIFEST
 ./build/baradadb
 ```
 
-### Сценарий 3: Пълна Загуба на Данни
+### Сценарий 3: Възстановяване на Всички Бази
+
+Ако сте архивирали цялото `data/databases/` дърво:
 
 ```bash
 # 1. Разархивиране на последния backup
 tar -xzf backup_latest.tar.gz -C ./data
 
-# 2. Repair за replay на наличния WAL
-./build/baradadb repair --data-dir=./data
+# 2. Repair за всяка база за replay на наличния WAL
+for db in ./data/databases/*/; do
+  ./build/baradadb repair --data-dir="$db" --dry-run
+done
 
 # 3. Стартиране на сървъра
 ./build/baradadb

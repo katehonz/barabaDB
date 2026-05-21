@@ -41,6 +41,32 @@ let diff = s.diff(oldSchema, newSchema)
 
 Schema changes are tracked and can generate migration scripts.
 
+## SQL Migrations
+
+BaraDB supports SQL-level migrations executed through BaraQL:
+
+```sql
+-- Create a migration table
+CREATE MIGRATION TABLE my_migration;
+
+-- Apply pending migrations
+MIGRATION UP;
+
+-- Rollback last migration
+MIGRATION DOWN;
+
+-- Apply all pending migrations in batch
+MIGRATION UP BATCH;
+
+-- Dry-run to preview changes
+MIGRATION DRYRUN;
+
+-- Check migration status
+MIGRATION STATUS;
+```
+
+Migration scripts are stored inside each database's LSMTree and are isolated per database. When using multiple databases, run `USE DATABASE <name>` before executing migration commands.
+
 ## Property Types
 
 | Type | Description |
