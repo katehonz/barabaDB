@@ -380,12 +380,8 @@ proc insertId(self: BaradbQuery, queryString: string, key: string): Future[strin
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
-  let sql = formatSql(queryString, self.placeHolder)
-  discard await self.pools.conns[connI].client.exec(sql)
-
-  let table = self.query["table"].getStr
-  let idSql = &"SELECT MAX(\"{key}\") FROM \"{table}\""
-  let qr = await self.pools.conns[connI].client.query(idSql)
+  let sql = formatSql(queryString, self.placeHolder) & &" RETURNING `{key}`"
+  let qr = await self.pools.conns[connI].client.query(sql)
   if qr.rowCount > 0 and qr.rows[0].len > 0:
     return qr.rows[0][0]
   return ""

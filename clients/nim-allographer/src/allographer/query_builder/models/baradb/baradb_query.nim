@@ -291,11 +291,13 @@ proc whereNotIn*(self: BaradbQuery, column: string, width: seq[int|float|string]
 proc whereNull*(self: BaradbQuery, column: string): BaradbQuery =
   if self.query.hasKey("where_null") == false:
     self.query["where_null"] = %*[{
-      "column": column
+      "column": column,
+      "symbol": "is"
     }]
   else:
     self.query["where_null"].add(%*{
-      "column": column
+      "column": column,
+      "symbol": "is"
     })
   return self
 

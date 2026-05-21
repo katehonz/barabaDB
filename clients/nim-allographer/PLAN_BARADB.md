@@ -13,8 +13,8 @@
 |------|-----------|---------|
 | 1. Инфраструктура и типове | **ГОТОВО** | `env.nim`, `connection.nim`, `query_builder.nim`, `schema_builder.nim` — всичко е интегрирано |
 | 2. Query Builder — SQL генерация | **ГОТОВО** | `baradb_generator.nim` (397 реда), `baradb_builder.nim` (237 реда) — всички CRUD + агрегати |
-| 3. Query Builder — execution | **ГОТОВО** (с бележки) | `baradb_exec.nim` (716 реда) — всички операции работят, но `insertId` използва `SELECT MAX` вместо `RETURNING` |
-| 4. Schema Builder | **СКЕЛЕТ** | Flow-ът е налице, но column type mapping е 24 реда вместо 466 (PostgreSQL) |
+| 3. Query Builder — execution | **ГОТОВО** | `baradb_exec.nim` (716 реда) — всички операции работят, `insertId` използва `RETURNING` |
+| 4. Schema Builder | **ГОТОВО** | Пълен `RdbTypeKind` → SQL mapping, CREATE/ALTER/DROP table + column flow |
 | 5. Тестове и документация | **МИНИМАЛНО** | Само `test_open.nim` и `test_query.nim` |
 
 ---
@@ -102,103 +102,59 @@
 
 ---
 
-### 2. RETURNING id за INSERT — използва SELECT MAX (race condition)
+### 2. RETURNING id за INSERT — ✅ ИЗПРАВЕНО
 
-**Текущо състояние в `baradb_exec.nim`:**
-```nim
-discard await self.pools.conns[connI].client.exec(sql)
-let idSql = &"SELECT MAX(\"{key}\") FROM \"{table}\""
-let qr = await self.pools.conns[connI].client.query(idSql)
-```
-
-**Проблем:** Race condition при конкурентни INSERT-и — друг INSERT може да мине между двете заявки.
-
-**Варианти:**
-1. **`INSERT ... RETURNING id`** — ако BaraDB го поддържа (за предпочитане, атомарно)
-2. **`last_insert_rowid()`** — ако BaraDB има такава функция (както SQLite)
-3. **`SELECT LAST_INSERT_ID()`** — MySQL-стил
-4. **CTE с `INSERT ... RETURNING`** — `WITH inserted AS (INSERT ...) SELECT id FROM inserted`
-
-**План:**
-```
-Файл: baradb_exec.nim — insertId proc
-- [ ] Проверка дали BaraDB поддържа RETURNING
-- [ ] Ако да: INSERT ... RETURNING "id" (като PostgreSQL)
-- [ ] Ако не: използване на заявката за последно вмъкнат ID от wire protocol-а
-- [ ] Премахване на SELECT MAX workaround
-```
+**Статус:** `insertId` вече използва `INSERT ... RETURNING \`id\`` вместо `SELECT MAX`. BaraDB поддържа `RETURNING` — проверено в lexer/parser.
 
 ---
 
-### 3. Schema Builder — Column Type Mapping е СКЕЛЕТ
+### 3. Schema Builder — Column Type Mapping ✅ ИЗПРАВЕНО
 
-**Текущо състояние в `queries/baradb/sub/create_column_query.nim` (24 реда):**
-```nim
-query.add(&"`{column.name}` {column.typ}")
-# Само: NOT NULL, UNIQUE, DEFAULT
-```
-
-**Проблем:** Изкарва raw `RdbTypeKind` enum стойности (`rdbIncrements`, `rdbString`) вместо SQL типове (`SERIAL`, `VARCHAR(256)`).
-
-**Референция:** PostgreSQL `sub/create_column_query.nim` — **466 реда**, обработва всички `RdbTypeKind`:
+**Статус:** Пълен `RdbTypeKind` → SQL mapping е имплементиран в `create_column_query.nim` (~350 реда):
 - `rdbIncrements` → `SERIAL PRIMARY KEY`
-- `rdbBigIncrements` → `BIGSERIAL PRIMARY KEY`
-- `rdbInteger` → `INTEGER`
-- `rdbBigInteger` → `BIGINT`
+- `rdbInteger` → `INTEGER` (+ auto-increment → `SERIAL`)
+- `rdbBigInteger` → `BIGINT` (+ auto-increment → `BIGSERIAL`)
 - `rdbBoolean` → `BOOLEAN`
 - `rdbString(n)` → `VARCHAR(n)` (default 255)
 - `rdbText` → `TEXT`
-- `rdbFloat` → `DOUBLE PRECISION`
+- `rdbFloat` → `REAL`
+- `rdbDouble` → `DOUBLE PRECISION`
 - `rdbDecimal(p,s)` → `DECIMAL(p,s)`
 - `rdbDate` → `DATE`
 - `rdbDateTime` / `rdbTimestamp` → `TIMESTAMP`
-- `rdbTimestampz` → `TIMESTAMPTZ`
 - `rdbTime` → `TIME`
 - `rdbBinary` → `BYTEA`
 - `rdbUuid` → `UUID`
-- `rdbJson` / `rdbJsonb` → `JSON` / `JSONB`
-- `rdbEnum` → `VARCHAR(255)` + CHECK constraint
-- Foreign keys: `REFERENCES "table"("column") ON DELETE/UPDATE CASCADE/SET NULL/...`
-- Indexes, comments, unsigned
+- `rdbJson` → `JSON`
+- `rdbEnumField` → `VARCHAR(255)`
+- `rdbForeign` → `INTEGER` + `REFERENCES ... ON DELETE ...`
+- `rdbStrForeign` → `VARCHAR(255)` + `REFERENCES ... ON DELETE ...`
+- `rdbTimestamps` → `created_at` + `updated_at`
+- `rdbSoftDelete` → `deleted_at`
 
-**План:**
-```
-Файл: queries/baradb/sub/create_column_query.nim
-- [ ] Пълен mapping на RdbTypeKind → SQL тип (по PostgreSQL референцията)
-- [ ] Auto-increment: SERIAL / BIGSERIAL PRIMARY KEY
-- [ ] String/Text: VARCHAR(n), TEXT с default 255
-- [ ] Числови: INTEGER, BIGINT, SMALLINT, DOUBLE PRECISION, DECIMAL(p,s)
-- [ ] Дати: DATE, TIME, TIMESTAMP, TIMESTAMPTZ
-- [ ] Бинарни: BYTEA
-- [ ] Специални: UUID, JSON, JSONB, BOOLEAN, ENUM
-- [ ] Foreign key constraints: REFERENCES ... ON DELETE/UPDATE
-- [ ] Index генерация
-- [ ] Column comments
-
-Файл: queries/baradb/create_table.nim
-- [ ] Да използва create_column_query вместо raw {column.typ}
-
-Файлове: rename_column.nim, rename_table.nim
-- [ ] Fix: `changeTo` → `previousName` (ако е bug)
-
-Файл: create_migration_table.nim
-- [ ] Консистентност: backtick quoting вместо double-quote
-
-Файл: schema_utils.nim
-- [ ] shouldRun() — checksum-based skip (вместо винаги true)
-```
+`create_table.nim`, `add_column.nim`, `change_column.nim` вече използват `createColumnString`.
 
 ---
 
-### 4. SQL Quoting Inconsistency
+### 4. SQL Quoting Inconsistency ✅ ИЗПРАВЕНО
 
-**Проблем:** `baradb_generator.nim` използва backtick `` ` ``, но `create_migration_table.nim` използва double-quote `"`. Трябва да е консистентно.
-
-**Въпрос:** Какво използва BaraDB сървърът? Ако поддържа и двете — изберем едно. Ако само едно — коригираме навсякъде.
+**Статус:** Всички schema builder query файлове вече използват backtick `` ` `` quoting. `create_migration_table.nim` беше поправен.
 
 ---
 
-### 5. Database URL Support — липсва
+### 5. rename_column / rename_table bug ✅ ИЗПРАВЕНО
+
+**Статус:** `changeTo` → `previousName` в `rename_column.nim` и `rename_table.nim`.
+
+---
+
+### 6. whereNull Bug ✅ ИЗПРАВЕНО
+
+**Статус:** `whereNull` вече добавя `"symbol": "is"` в JSON обекта.
+
+---
+
+### 7. Database URL Support — липсва
 
 PostgreSQL/MySQL/MariaDB драйверите поддържат `databaseUrl = asDatabaseUrl("postgresql://...")`. BaraDB `dbOpen` приема само позиционни параметри.
 
@@ -210,7 +166,7 @@ PostgreSQL/MySQL/MariaDB драйверите поддържат `databaseUrl = 
 
 ---
 
-### 6. Paginate / fastPaginate — липсват
+### 8. Paginate / fastPaginate — липсват
 
 Налични в други драйвери, липсват в BaraDB query builder.
 
@@ -222,13 +178,11 @@ PostgreSQL/MySQL/MariaDB драйверите поддържат `databaseUrl = 
 
 ---
 
-### 7. whereNull Bug
-
-**Проблем:** `baradb_generator.nim:205` — `whereNullSql` референцира `row["symbol"]`, но `baradb_query.nim` `whereNull` не задава `"symbol"` ключ. Ще даде runtime crash.
+### 9. Schema utils checksum
 
 ```
-Файл: baradb_query.nim — whereNull proc
-- [ ] Добавяне на "symbol": "IS" или "IS NOT" в JSON а
+Файл: schema_utils.nim
+- [ ] shouldRun() — checksum-based skip (вместо винаги true)
 ```
 
 ---
@@ -251,14 +205,15 @@ PostgreSQL/MySQL/MariaDB драйверите поддържат `databaseUrl = 
 
 | # | Подобрение | Сложност | Ефект | Приоритет |
 |---|-----------|----------|-------|-----------|
-| 1 | Schema Builder column mapping | Средна | Без него migrations не работят | **ВИСОК** |
-| 2 | INSERT RETURNING id | Ниска | Премахва race condition | **ВИСОК** |
+| 1 | Schema Builder column mapping | Средна | Без него migrations не работят | ✅ ГОТОВО |
+| 2 | INSERT RETURNING id | Ниска | Премахва race condition | ✅ ГОТОВО |
 | 3 | Prepared Statements | Висока | Security + performance | **СРЕДЕН** |
 | 4 | Database URL support | Ниска | UX удобство | **НИСЪК** |
 | 5 | Paginate / fastPaginate | Ниска | Feature parity | **НИСЪК** |
-| 6 | whereNull fix | Ниска | Bug fix | **ВИСОК** |
-| 7 | SQL quoting консистентност | Ниска | Потенциален runtime error | **СРЕДЕН** |
-| 8 | Schema utils checksum | Ниска | Migration skip optimization | **НИСЪК** |
+| 6 | whereNull fix | Ниска | Bug fix | ✅ ГОТОВО |
+| 7 | SQL quoting консистентност | Ниска | Потенциален runtime error | ✅ ГОТОВО |
+| 8 | rename_column / rename_table bug | Ниска | Bug fix | ✅ ГОТОВО |
+| 9 | Schema utils checksum | Ниска | Migration skip optimization | **НИСЪК** |
 
 ---
 
@@ -288,20 +243,20 @@ src/allographer/
 ├── schema_builder/
 │   ├── queries/baradb/
 │   │   ├── baradb_query_type.nim    # Типове (14 реда) ✅
-│   │   ├── create_table.nim         # CREATE TABLE (16 реда) ⚠️ skeletal
-│   │   ├── add_column.nim           # ADD COLUMN (8 реда) ⚠️ minimal
-│   │   ├── change_column.nim        # ALTER COLUMN (8 реда) ⚠️ minimal
+│   │   ├── create_table.nim         # CREATE TABLE ✅
+│   │   ├── add_column.nim           # ADD COLUMN ✅
+│   │   ├── change_column.nim        # ALTER COLUMN ✅
 │   │   ├── drop_column.nim          # DROP COLUMN (8 реда) ✅
 │   │   ├── drop_table.nim           # DROP TABLE (7 реда) ✅
-│   │   ├── rename_column.nim        # RENAME COLUMN (8 реда) ⚠️ possible bug
-│   │   ├── rename_table.nim         # RENAME TABLE (7 реда) ⚠️ possible bug
+│   │   ├── rename_column.nim        # RENAME COLUMN ✅
+│   │   ├── rename_table.nim         # RENAME TABLE ✅
 │   │   ├── reset_table.nim          # DELETE FROM (7 реда) ✅
-│   │   ├── create_migration_table.nim (12 реда) ⚠️ quoting inconsistency
+│   │   ├── create_migration_table.nim ✅
 │   │   ├── schema_utils.nim         # shouldRun (12 реда) ⚠️ always true
 │   │   └── sub/
-│   │       ├── create_column_query.nim  # (24 реда) ❌ skeletal
-│   │       ├── add_column_query.nim     # (8 реда) ⚠️ minimal
-│   │       └── change_column_query.nim  # (6 реда) ⚠️ minimal
+│   │       ├── create_column_query.nim  # ✅ пълен mapping
+│   │       ├── add_column_query.nim     # ✅
+│   │       └── change_column_query.nim  # ✅
 │   │
 │   └── usecases/baradb/
 │       ├── create.nim               # Table creation flow (24 реда) ✅
@@ -328,23 +283,23 @@ tests/baradb/
 
 ## Краткосрочен план (следващи стъпки)
 
-### Седмица 1: Schema Builder + Bug fixes
-1. `sub/create_column_query.nim` — пълен RdbTypeKind → SQL mapping (по PostgreSQL референция)
-2. `create_table.nim` — да използва column query вместо raw тип
-3. Fix `whereNull` bug в `baradb_query.nim`
-4. Fix quoting inconsistency в `create_migration_table.nim`
-5. Fix `rename_column.nim` / `rename_table.nim` ако `changeTo` не съществува
+### ✅ Седмица 1: Schema Builder + Bug fixes — ИЗПЪЛНЕНО
+1. ~~`sub/create_column_query.nim` — пълен RdbTypeKind → SQL mapping~~ ✅
+2. ~~`create_table.nim` — да използва column query вместо raw тип~~ ✅
+3. ~~Fix `whereNull` bug в `baradb_query.nim`~~ ✅
+4. ~~Fix quoting inconsistency в `create_migration_table.nim`~~ ✅
+5. ~~Fix `rename_column.nim` / `rename_table.nim` ако `changeTo` не съществува~~ ✅
 
-### Седмица 2: INSERT RETURNING + Prepared Statements (част 1)
-1. `insertId` — проучване дали BaraDB поддържа RETURNING, имплементация
-2. `prepare()` / `ensureStmt()` — prepared statement кеш
-3. `preparedGet()` / `preparedExec()` — изпълнение през `mkQueryParams`
+### ✅ Седмица 2: INSERT RETURNING — ИЗПЪЛНЕНО
+1. ~~`insertId` — проучване дали BaraDB поддържа RETURNING, имплементация~~ ✅
 
-### Седмица 3: Тестове + Prepared Statements (част 2)
-1. `test_schema.nim` — schema builder тестове
-2. `test_prepared_statement.nim` — prepared statement тестове
-3. `test_transaction.nim` — transaction тестове
-4. `test_pool_wait.nim` — pool timeout тестове
+### Седмица 3: Prepared Statements + Тестове
+1. `prepare()` / `ensureStmt()` — prepared statement кеш
+2. `preparedGet()` / `preparedExec()` — изпълнение през `mkQueryParams`
+3. `test_prepared_statement.nim` — prepared statement тестове
+4. `test_schema.nim` — schema builder тестове
+5. `test_transaction.nim` — transaction тестове
+6. `test_pool_wait.nim` — pool timeout тестове
 
 ### Седмица 4: Polish
 1. Database URL support

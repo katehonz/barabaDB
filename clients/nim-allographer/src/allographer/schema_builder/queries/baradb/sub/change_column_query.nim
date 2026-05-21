@@ -1,6 +1,7 @@
 import std/strformat
 import ../../models/table
 import ../../models/column
+import ./create_column_query
 
 proc changeColumnString*(table: Table, column: Column): string =
-  result = &"`{column.name}` {column.typ}"
+  result = createColumnString(table, column)
