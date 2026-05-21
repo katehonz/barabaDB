@@ -270,6 +270,23 @@ with pool.connection() as conn:
     result = conn.query("SELECT 1")
 ```
 
+## Миграция между Бази Данни (Nim)
+
+Nim allographer клиентът включва engine за миграция между бази данни:
+
+```nim
+import allographer/migrate_data
+
+let pg = dbOpen(PostgreSQL, "sourcedb", "user", "pass", "localhost", 5432)
+let bdb = dbOpen(Baradb, "targetdb", "admin", "", "127.0.0.1", 9472)
+
+let report = waitFor migrate(pg, bdb, batchSize = 5000)
+echo report  # Tables: 12/12, Rows: 45230, Time: 3.2s
+```
+
+Поддържани източници: PostgreSQL, MySQL, MariaDB, SQLite, SurrealDB.
+Виж [Миграции и Импорт/Експорт](migration.md) за детайли.
+
 ## Съответствие на Типове Данни
 
 | BaraDB Тип | JavaScript | Python | Nim | Rust |

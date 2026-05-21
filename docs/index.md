@@ -44,6 +44,7 @@
 - [Security Guide](en/security.md)
 - [Monitoring & Observability](en/monitoring.md)
 - [Backup & Recovery](en/backup.md)
+- [Migrations & Import/Export](en/migration.md)
 - [Troubleshooting](en/troubleshooting.md)
 
 ### Advanced

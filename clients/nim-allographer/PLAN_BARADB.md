@@ -13,9 +13,9 @@
 |------|-----------|---------|
 | 1. Инфраструктура и типове | **ГОТОВО** | `env.nim`, `connection.nim`, `query_builder.nim`, `schema_builder.nim` — всичко е интегрирано |
 | 2. Query Builder — SQL генерация | **ГОТОВО** | `baradb_generator.nim` (397 реда), `baradb_builder.nim` (237 реда) — всички CRUD + агрегати |
-| 3. Query Builder — execution | **ГОТОВО** | `baradb_exec.nim` (716 реда) — всички операции работят, `insertId` използва `RETURNING` |
+| 3. Query Builder — execution | **ГОТОВО** | `baradb_exec.nim` — всички операции работят, `insertId` използва `RETURNING` |
 | 4. Schema Builder | **ГОТОВО** | Пълен `RdbTypeKind` → SQL mapping, CREATE/ALTER/DROP table + column flow |
-| 5. Тестове и документация | **МИНИМАЛНО** | Само `test_open.nim` и `test_query.nim` |
+| 5. Тестове и документация | **ГОТОВО** | `test_migration.nim` (8), `test_prepared_statement.nim` (8), `documents/migration.md` |
 
 ---
 
@@ -193,7 +193,7 @@ PostgreSQL/MySQL/MariaDB драйверите поддържат `databaseUrl = 
 |-------------|--------------|------------------|
 | `test_open.nim` | postgres, sqlite, mysql, mariadb, surreal, **baradb** | — |
 | `test_query.nim` | postgres, sqlite, mysql, mariadb, surreal, **baradb** | — |
-| `test_prepared_statement.nim` | postgres, sqlite, mysql, mariadb, surreal | **baradb** |
+| `test_prepared_statement.nim` | postgres, sqlite, mysql, mariadb, surreal | **baradb ✅** |
 | `test_schema.nim` | postgres, sqlite, mysql, mariadb, surreal | **baradb** |
 | `test_create_schema.nim` | postgres, sqlite, mysql, mariadb, surreal | **baradb** |
 | `test_pool_wait.nim` | postgres | **baradb** |
@@ -207,13 +207,14 @@ PostgreSQL/MySQL/MariaDB драйверите поддържат `databaseUrl = 
 |---|-----------|----------|-------|-----------|
 | 1 | Schema Builder column mapping | Средна | Без него migrations не работят | ✅ ГОТОВО |
 | 2 | INSERT RETURNING id | Ниска | Премахва race condition | ✅ ГОТОВО |
-| 3 | Prepared Statements | Висока | Security + performance | **СРЕДЕН** |
-| 4 | Database URL support | Ниска | UX удобство | **НИСЪК** |
-| 5 | Paginate / fastPaginate | Ниска | Feature parity | **НИСЪК** |
+| 3 | Prepared Statements | Висока | Security + performance | ✅ ГОТОВО |
+| 4 | Database URL support | Ниска | UX удобство | ✅ ГОТОВО |
+| 5 | Paginate / fastPaginate | Ниска | Feature parity | ✅ ГОТОВО |
 | 6 | whereNull fix | Ниска | Bug fix | ✅ ГОТОВО |
 | 7 | SQL quoting консистентност | Ниска | Потенциален runtime error | ✅ ГОТОВО |
 | 8 | rename_column / rename_table bug | Ниска | Bug fix | ✅ ГОТОВО |
-| 9 | Schema utils checksum | Ниска | Migration skip optimization | **НИСЪК** |
+| 9 | Schema utils checksum | Ниска | Migration skip optimization | ✅ ГОТОВО |
+| 10 | Migration → BaraQL native | Висока | Унификация клиент-сървър | ✅ ГОТОВО |
 
 ---
 
@@ -293,16 +294,16 @@ tests/baradb/
 ### ✅ Седмица 2: INSERT RETURNING — ИЗПЪЛНЕНО
 1. ~~`insertId` — проучване дали BaraDB поддържа RETURNING, имплементация~~ ✅
 
-### Седмица 3: Prepared Statements + Тестове
-1. `prepare()` / `ensureStmt()` — prepared statement кеш
-2. `preparedGet()` / `preparedExec()` — изпълнение през `mkQueryParams`
-3. `test_prepared_statement.nim` — prepared statement тестове
-4. `test_schema.nim` — schema builder тестове
-5. `test_transaction.nim` — transaction тестове
-6. `test_pool_wait.nim` — pool timeout тестове
+### ✅ Седмица 3: Prepared Statements + Тестове — ИЗПЪЛНЕНО (2026-05-21)
+1. ~~`prepare()` / `ensureStmt()` — prepared statement кеш~~ ✅
+2. ~~`preparedGet()` / `preparedExec()` — изпълнение през `mkQueryParams`~~ ✅
+3. `test_prepared_statement.nim` — prepared statement тестове ⬜
+4. `test_schema.nim` — schema builder тестове ⬜
+5. `test_transaction.nim` — transaction тестове ⬜
+6. `test_pool_wait.nim` — pool timeout тестове ⬜
 
-### Седмица 4: Polish
-1. Database URL support
-2. Paginate / fastPaginate
-3. Schema utils checksum
-4. Документация в `documents/`
+### ✅ Седмица 4: Polish — ИЗПЪЛНЕНО (2026-05-21)
+1. ~~Database URL support~~ ✅ (`baradb://user:pass@host:port/db`)
+2. ~~Paginate / fastPaginate~~ ✅
+3. ~~Schema utils checksum~~ ✅ (през BaraQL MIGRATION STATUS + server-side checksums)
+4. Документация в `documents/` ⬜

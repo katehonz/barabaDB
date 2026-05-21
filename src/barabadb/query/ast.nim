@@ -31,6 +31,8 @@ type
     nkMigrationStatus
     nkMigrationUp
     nkMigrationDown
+    nkImportFrom
+    nkExportTo
     nkMigrationDryRun
     nkCreateUser
     nkDropUser
@@ -363,6 +365,19 @@ type
       mdCount*: int  # 0 = 1, N = rollback N migrations
     of nkMigrationDryRun:
       mdrName*: string  # migration name to dry-run
+    of nkImportFrom:
+      impPath*: string
+      impTable*: string
+      impFormat*: string  # "csv", "json", "ndjson"
+      impDelimiter*: char
+      impHasHeader*: bool
+      impBatchSize*: int
+    of nkExportTo:
+      expPath*: string
+      expTable*: string
+      expFormat*: string
+      expDelimiter*: char
+      expIncludeHeader*: bool
     of nkCreateIndex:
       ciTarget*: string
       ciName*: string

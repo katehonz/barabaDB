@@ -4,6 +4,7 @@ import std/json
 import std/tables
 import std/times
 import ../../libs/baradb/baradb_client
+import ../../libs/database_url
 import ../../log
 import ./baradb_types
 
@@ -50,3 +51,18 @@ proc dbOpen*(_: type Baradb, database: string, user: string, password: string,
     pools: pools,
     log: LogSetting(shouldDisplayLog: shouldDisplayLog, shouldOutputLogFile: shouldOutputLogFile, logDir: logDir)
   )
+
+proc dbOpen*(_: type Baradb, databaseUrl: DatabaseUrl,
+              maxConnections = 1, timeout = 30,
+              shouldDisplayLog = false, shouldOutputLogFile = false, logDir = "",
+              maxConnectionLifetime = DEFAULT_CONN_MAX_LIFETIME_SECONDS,
+              maxConnectionIdleTime = DEFAULT_CONN_MAX_IDLE_SECONDS): BaradbConnections =
+  ## Open a BaraDB connection using a URL: baradb://user:pass@host:port/database
+  let parsed = parseDatabaseUrl(databaseUrl)
+  requireDatabaseUrlScheme(parsed, ["baradb"], "BaraDB")
+  let database = parsed.path.stripLeadingSlash()
+  let host = if parsed.hostname.len > 0: parsed.hostname else: "127.0.0.1"
+  let port = if parsed.hasPort: parsed.port else: 9472
+  return Baradb.dbOpen(database, parsed.username, parsed.password, host, port,
+                        maxConnections, timeout, shouldDisplayLog, shouldOutputLogFile,
+                        logDir, maxConnectionLifetime, maxConnectionIdleTime)

@@ -1494,6 +1494,63 @@ proc parseMigrationDryRun(p: var Parser): Node =
   let name = p.expect(tkIdent).value
   result = Node(kind: nkMigrationDryRun, mdrName: name, line: tok.line, col: tok.col)
 
+proc parseImportFrom(p: var Parser): Node =
+  let tok = p.expect(tkImport)
+  discard p.expect(tkFrom)
+  let path = p.expect(tkStringLit).value
+  discard p.expect(tkInto)
+  let table = p.expect(tkIdent).value
+  var format = "csv"
+  var delimiter = ','
+  var hasHeader = true
+  var batchSize = 1000
+  while p.peek().kind in {tkFormat, tkDelimiter, tkHeader, tkBatch}:
+    let kw = p.advance()
+    case kw.kind
+    of tkFormat:
+      let fmt = p.expect(tkIdent).value.toLower()
+      format = fmt
+    of tkDelimiter:
+      let delim = p.expect(tkStringLit).value
+      if delim.len > 0: delimiter = delim[0]
+    of tkHeader:
+      let hdr = p.expect(tkIdent).value.toLower()
+      hasHeader = hdr == "true" or hdr == "yes"
+    of tkBatch:
+      batchSize = parseInt(p.expect(tkIntLit).value)
+    else: discard
+  result = Node(kind: nkImportFrom, impPath: path, impTable: table,
+                impFormat: format, impDelimiter: delimiter,
+                impHasHeader: hasHeader, impBatchSize: batchSize,
+                line: tok.line, col: tok.col)
+
+proc parseExportTo(p: var Parser): Node =
+  let tok = p.expect(tkExport)
+  discard p.expect(tkTo)
+  let path = p.expect(tkStringLit).value
+  discard p.expect(tkFrom)
+  let table = p.expect(tkIdent).value
+  var format = "csv"
+  var delimiter = ','
+  var includeHeader = true
+  while p.peek().kind in {tkFormat, tkDelimiter, tkHeader}:
+    let kw = p.advance()
+    case kw.kind
+    of tkFormat:
+      let fmt = p.expect(tkIdent).value.toLower()
+      format = fmt
+    of tkDelimiter:
+      let delim = p.expect(tkStringLit).value
+      if delim.len > 0: delimiter = delim[0]
+    of tkHeader:
+      let hdr = p.expect(tkIdent).value.toLower()
+      includeHeader = hdr == "true" or hdr == "yes"
+    else: discard
+  result = Node(kind: nkExportTo, expPath: path, expTable: table,
+                expFormat: format, expDelimiter: delimiter,
+                expIncludeHeader: includeHeader,
+                line: tok.line, col: tok.col)
+
 proc parseCreateUser(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkUser)
@@ -1701,6 +1758,8 @@ proc parseStatement*(p: var Parser): Node =
   case p.peek().kind
   of tkWith, tkSelect: p.parseSelect()
   of tkInsert: p.parseInsert()
+  of tkImport: p.parseImportFrom()
+  of tkExport: p.parseExportTo()
   of tkUpdate: p.parseUpdate()
   of tkDelete: p.parseDelete()
   of tkMerge: p.parseMerge()

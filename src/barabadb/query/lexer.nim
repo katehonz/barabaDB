@@ -102,6 +102,15 @@ type
     tkAfter
     tkInstead
     tkOf
+    tkImport
+    tkExport
+    tkFormat
+    tkDelimiter
+    tkHeader
+    tkBatch
+    tkCsv
+    tkJsonFmt
+    tkNdjson
     tkMigration
     tkApply
     tkStatus
@@ -334,6 +343,15 @@ const keywords*: Table[string, TokenKind] = {
   "after": tkAfter,
   "instead": tkInstead,
   "of": tkOf,
+  "import": tkImport,
+  "export": tkExport,
+  "format": tkFormat,
+  "delimiter": tkDelimiter,
+  "header": tkHeader,
+  "batch": tkBatch,
+  "csv": tkCsv,
+  "json": tkJsonFmt,
+  "ndjson": tkNdjson,
   "migration": tkMigration,
   "apply": tkApply,
   "status": tkStatus,

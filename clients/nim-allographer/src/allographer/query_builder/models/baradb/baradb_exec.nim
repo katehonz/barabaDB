@@ -699,6 +699,183 @@ proc firstPlain*(self: RawBaradbQuery): Future[seq[string]] {.async.} =
   return await self.getRowPlain(self.queryString, self.placeHolder)
 
 
+# ================================================================================
+# Pagination (cursor-based and offset-based)
+# ================================================================================
+
+type
+  PaginateResult* = object
+    rows*: seq[JsonNode]
+    total*: int
+    page*: int
+    perPage*: int
+    hasMore*: bool
+
+proc paginate*(self: BaradbQuery, page: int = 1, perPage: int = 20): Future[PaginateResult] {.async.} =
+  ## Offset-based pagination. Returns rows for the given page plus metadata.
+  let total = await self.count()
+  let offset = (page - 1) * perPage
+  self.limit(perPage)
+  self.offset(offset)
+  let rows = await self.get()
+  let qr = PaginateResult(
+    rows: rows,
+    total: total,
+    page: page,
+    perPage: perPage,
+    hasMore: offset + perPage < total
+  )
+  return qr
+
+proc fastPaginate*(self: BaradbQuery, cursorColumn: string, perPage: int = 20,
+                    afterId: string = ""): Future[PaginateResult] {.async.} =
+  ## Cursor-based pagination (keyset). More efficient than offset for large tables.
+  ## Requires a unique, ordered column (usually the primary key).
+  let total = await self.count()
+  self.limit(perPage)
+  self.orderBy(cursorColumn, Asc)
+  if afterId.len > 0:
+    self.where(cursorColumn, ">", afterId)
+  let rows = await self.get()
+  var hasMore = rows.len == perPage
+  let qr = PaginateResult(
+    rows: rows,
+    total: total,
+    page: 0,  # cursor-based has no page number
+    perPage: perPage,
+    hasMore: hasMore
+  )
+  return qr
+
+# ================================================================================
+# Migration API (BaraQL native — server handles checksums, locks, rollback)
+# ================================================================================
+
+proc createMigration*(self: BaradbConnections, name: string, upBody: string,
+                      downBody: string = ""): Future[QueryResult] {.async.} =
+  ## Register a migration on the server. The server computes checksums, stores
+  ## the UP/DOWN bodies, and manages the migration lifecycle.
+  var connI = getFreeConn(self).await
+  defer: self.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(self)
+  return await self.pools.conns[connI].client.createMigration(name, upBody, downBody)
+
+proc applyMigration*(self: BaradbConnections, name: string): Future[QueryResult] {.async.} =
+  var connI = getFreeConn(self).await
+  defer: self.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(self)
+  return await self.pools.conns[connI].client.applyMigration(name)
+
+proc migrateUp*(self: BaradbConnections, count: int = 0): Future[QueryResult] {.async.} =
+  var connI = getFreeConn(self).await
+  defer: self.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(self)
+  return await self.pools.conns[connI].client.migrateUp(count)
+
+proc migrateDown*(self: BaradbConnections, count: int = 1): Future[QueryResult] {.async.} =
+  var connI = getFreeConn(self).await
+  defer: self.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(self)
+  return await self.pools.conns[connI].client.migrateDown(count)
+
+proc migrationStatus*(self: BaradbConnections): Future[seq[JsonNode]] {.async.} =
+  var connI = getFreeConn(self).await
+  defer: self.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(self)
+  let qr = await self.pools.conns[connI].client.migrationStatus()
+  return toJson(qr)
+
+proc migrationDryRun*(self: BaradbConnections, name: string): Future[QueryResult] {.async.} =
+  var connI = getFreeConn(self).await
+  defer: self.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(self)
+  return await self.pools.conns[connI].client.migrationDryRun(name)
+
+proc isMigrationApplied*(self: BaradbConnections, name: string): Future[bool] {.async.} =
+  let status = await self.migrationStatus()
+  for row in status:
+    if row["name"].getStr() == name and row["status"].getStr() == "applied":
+      return true
+  return false
+
+# ================================================================================
+# Prepared Statements (server-side parameterized queries via mkQueryParams)
+# ================================================================================
+
+proc sendPrepared(client: BaraClient, sql: string, params: seq[WireValue]): Future[QueryResult] {.async.} =
+  if not client.connected:
+    raise newException(IOError, "Not connected")
+  let msg = makeQueryParamsMessage(client.nextId(), sql, params)
+  let msgStr = toString(msg)
+  await client.socket.send(msgStr)
+  return await client.readQueryResponse()
+
+proc prepare*(self: BaradbConnections, sql: string, nArgs: int = 0): Future[BaradbPreparedStatement] {.async.} =
+  ## Create a server-side prepared statement. Subsequent calls reuse the cached entry.
+  let entryKey = sql & ":" & $nArgs
+  if entryKey in self.pools.preparedCache:
+    let entry = self.pools.preparedCache[entryKey]
+    inc entry.refCount
+    entry.lastUsedAt = nowUnix()
+    return BaradbPreparedStatement(owner: self, entry: entry, sql: sql,
+                                    nArgs: nArgs, isClosed: false)
+  let entry = BaradbPreparedEntry(sql: sql, nArgs: nArgs, refCount: 1,
+                                   lastUsedAt: nowUnix())
+  self.pools.preparedCache[entryKey] = entry
+  return BaradbPreparedStatement(owner: self, entry: entry, sql: sql,
+                                  nArgs: nArgs, isClosed: false)
+
+proc ensureStmt*(self: BaradbConnections, sql: string, nArgs: int): BaradbPreparedEntry =
+  let entryKey = sql & ":" & $nArgs
+  if entryKey in self.pools.preparedCache:
+    let entry = self.pools.preparedCache[entryKey]
+    entry.lastUsedAt = nowUnix()
+    return entry
+  let entry = BaradbPreparedEntry(sql: sql, nArgs: nArgs, refCount: 0,
+                                   lastUsedAt: nowUnix())
+  self.pools.preparedCache[entryKey] = entry
+  return entry
+
+proc preparedGet*(stmt: BaradbPreparedStatement, args: seq[WireValue]): Future[seq[JsonNode]] {.async.} =
+  if stmt.isClosed:
+    raise newException(IOError, "Prepared statement is closed")
+  var connI = getFreeConn(stmt.owner).await
+  defer: stmt.owner.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(stmt.owner)
+  let qr = await sendPrepared(stmt.owner.pools.conns[connI].client, stmt.sql, args)
+  return toJson(qr)
+
+proc preparedExec*(stmt: BaradbPreparedStatement, args: seq[WireValue]): Future[int] {.async.} =
+  if stmt.isClosed:
+    raise newException(IOError, "Prepared statement is closed")
+  var connI = getFreeConn(stmt.owner).await
+  defer: stmt.owner.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(stmt.owner)
+  let qr = await sendPrepared(stmt.owner.pools.conns[connI].client, stmt.sql, args)
+  return qr.affectedRows
+
+proc flushStmt*(stmt: BaradbPreparedStatement) =
+  stmt.isClosed = true
+  dec stmt.entry.refCount
+
+proc clearStmtCache*(self: BaradbConnections) =
+  self.pools.preparedCache.clear()
+
+proc withConn*(self: BaradbConnections, callback: proc(connI: int): Future[void] {.gcsafe.}): Future[void] {.async.} =
+  let connI = getFreeConn(self).await
+  defer: self.returnConn(connI).await
+  if connI == errorConnectionNum:
+    raisePoolTimeout(self)
+  await callback(connI)
+
 # seeder templates
 template seeder*(rdb: BaradbConnections, tableName: string, body: untyped): untyped =
   block:

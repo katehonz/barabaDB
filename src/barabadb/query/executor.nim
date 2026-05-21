@@ -23,6 +23,7 @@ import ../storage/btree
 import ../storage/wal
 import ../core/mvcc
 import ../core/tracing
+import ../client/fileops
 import ../fts/engine as fts
 import ../core/registry
 
@@ -218,6 +219,24 @@ proc sqlEscapeIdent*(ident: string): string =
 proc sqlEscapeString*(s: string): string =
   ## Escape SQL string literals by doubling single-quotes.
   result = s.replace("'", "''")
+
+proc buildInsertSql*(table: string, columns: seq[string], rows: seq[seq[string]]): string =
+  ## Build a multi-row INSERT statement for bulk import.
+  result = "INSERT INTO \"" & sqlEscapeIdent(table) & "\" ("
+  for i, col in columns:
+    if i > 0: result &= ", "
+    result &= "\"" & sqlEscapeIdent(col) & "\""
+  result &= ") VALUES "
+  for ri, row in rows:
+    if ri > 0: result &= ", "
+    result &= "("
+    for ci, val in row:
+      if ci > 0: result &= ", "
+      if val.len == 0 or val == "\\N":
+        result &= "NULL"
+      else:
+        result &= "'" & sqlEscapeString(val) & "'"
+    result &= ")"
 
 proc exprToSql(node: Node): string =
   if node == nil:
@@ -5278,6 +5297,87 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       rolledBackCount.inc
 
     return okResult(msg="Rolled back " & $rolledBackCount & " migrations")
+
+  of nkImportFrom:
+    let path = stmt.impPath
+    let table = stmt.impTable
+    let format = stmt.impFormat
+    if not fileExists(path):
+      return errResult("File not found: " & path)
+    let content = readFile(path)
+    var columns: seq[string] = @[]
+    var rows: seq[seq[string]] = @[]
+    case format
+    of "csv":
+      (columns, rows) = parseCsvTable(content, stmt.impDelimiter, stmt.impHasHeader)
+    of "json":
+      (columns, rows) = parseJsonTable(content)
+    of "ndjson":
+      (columns, rows) = parseNdjsonTable(content)
+    else:
+      return errResult("Unsupported import format: " & format)
+    if columns.len == 0:
+      return errResult("No columns found in import file")
+    var inserted = 0
+    let batchSize = stmt.impBatchSize
+    var batchRows: seq[seq[string]] = @[]
+    for row in rows:
+      batchRows.add(row)
+      if batchRows.len >= batchSize:
+        # Generate INSERT INTO t (c1,c2) VALUES (...),(...) and execute
+        let sql = buildInsertSql(table, columns, batchRows)
+        let tokens = qlex.tokenize(sql)
+        let astNode = qpar.parse(tokens)
+        if astNode.stmts.len > 0:
+          let insResult = executeQueryImpl(ctx, astNode)
+          if insResult.success:
+            inserted += batchRows.len
+        batchRows.setLen(0)
+    if batchRows.len > 0:
+      let sql = buildInsertSql(table, columns, batchRows)
+      let tokens = qlex.tokenize(sql)
+      let astNode = qpar.parse(tokens)
+      if astNode.stmts.len > 0:
+        let insResult = executeQueryImpl(ctx, astNode)
+        if insResult.success:
+          inserted += batchRows.len
+    return okResult(msg="IMPORTED " & $inserted & " rows into " & table)
+
+  of nkExportTo:
+    let path = stmt.expPath
+    let table = stmt.expTable
+    let format = stmt.expFormat
+    var rows: seq[Row] = @[]
+    var cols: seq[string] = @[]
+    let scanResult = execScan(ctx, table)
+    if scanResult.len == 0:
+      let tbl = ctx.getTableDef(table)
+      if tbl.columns.len == 0:
+        return errResult("Table not found: " & table)
+      for col in tbl.columns:
+        cols.add(col.name)
+    else:
+      for k, v in scanResult[0].pairs:
+        cols.add(k)
+      rows = scanResult
+    var content = ""
+    var strRows: seq[seq[string]] = @[]
+    for row in rows:
+      var strRow: seq[string] = @[]
+      for col in cols:
+        strRow.add(if col in row: valueToString(row[col]) else: "")
+      strRows.add(strRow)
+    case format
+    of "csv":
+      content = toCsv(cols, strRows, stmt.expDelimiter, stmt.expIncludeHeader)
+    of "json":
+      content = toJson(cols, strRows)
+    of "ndjson":
+      content = toNdjson(cols, strRows)
+    else:
+      return errResult("Unsupported export format: " & format)
+    writeFile(path, content)
+    return okResult(msg="EXPORTED " & $strRows.len & " rows to " & path)
 
   of nkMigrationDryRun:
     let (found, upBody, downBody) = getMigrationBody(ctx, stmt.mdrName)

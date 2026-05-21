@@ -410,6 +410,35 @@ proc exec*(client: BaraClient, sql: string): Future[int] {.async.} =
   let qr = await client.query(sql)
   return qr.affectedRows
 
+# === Migration API (BaraQL native) ===
+
+proc createMigration*(client: BaraClient, name: string, upBody: string,
+                      downBody: string = ""): Future[QueryResult] {.async.} =
+  ## Send CREATE MIGRATION via BaraQL. Server handles checksums, locking, rollback.
+  var sql = "CREATE MIGRATION " & name & " { UP: " & upBody & ";"
+  if downBody.len > 0:
+    sql &= " DOWN: " & downBody & ";"
+  sql &= " }"
+  return await client.query(sql)
+
+proc applyMigration*(client: BaraClient, name: string): Future[QueryResult] {.async.} =
+  return await client.query("APPLY MIGRATION " & name)
+
+proc migrateUp*(client: BaraClient, count: int = 0): Future[QueryResult] {.async.} =
+  var sql = "MIGRATION UP"
+  if count > 0:
+    sql &= " " & $count
+  return await client.query(sql)
+
+proc migrateDown*(client: BaraClient, count: int = 1): Future[QueryResult] {.async.} =
+  return await client.query("MIGRATION DOWN " & $count)
+
+proc migrationStatus*(client: BaraClient): Future[QueryResult] {.async.} =
+  return await client.query("MIGRATION STATUS")
+
+proc migrationDryRun*(client: BaraClient, name: string): Future[QueryResult] {.async.} =
+  return await client.query("MIGRATION DRY RUN " & name)
+
 proc auth*(client: BaraClient, token: string) {.async.} =
   if not client.connected:
     raise newException(IOError, "Not connected")
@@ -651,6 +680,34 @@ proc query*(client: SyncClient, sql: string, params: seq[WireValue]): QueryResul
 proc exec*(client: SyncClient, sql: string): int =
   let qr = client.query(sql)
   return qr.affectedRows
+
+# === Migration API (SyncClient, blocking) ===
+
+proc createMigration*(client: SyncClient, name: string, upBody: string,
+                      downBody: string = ""): QueryResult =
+  var sql = "CREATE MIGRATION " & name & " { UP: " & upBody & ";"
+  if downBody.len > 0:
+    sql &= " DOWN: " & downBody & ";"
+  sql &= " }"
+  return client.query(sql)
+
+proc applyMigration*(client: SyncClient, name: string): QueryResult =
+  return client.query("APPLY MIGRATION " & name)
+
+proc migrateUp*(client: SyncClient, count: int = 0): QueryResult =
+  var sql = "MIGRATION UP"
+  if count > 0:
+    sql &= " " & $count
+  return client.query(sql)
+
+proc migrateDown*(client: SyncClient, count: int = 1): QueryResult =
+  return client.query("MIGRATION DOWN " & $count)
+
+proc migrationStatus*(client: SyncClient): QueryResult =
+  return client.query("MIGRATION STATUS")
+
+proc migrationDryRun*(client: SyncClient, name: string): QueryResult =
+  return client.query("MIGRATION DRY RUN " & name)
 
 proc auth*(client: SyncClient, token: string) =
   acquire(client.lock)

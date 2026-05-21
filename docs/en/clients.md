@@ -240,35 +240,33 @@ curl http://localhost:9470/metrics
 All official clients support connection pooling:
 
 ### JavaScript
-
 ```typescript
 import { Pool } from 'baradb';
-
-const pool = new Pool({
-  host: 'localhost',
-  port: 9472,
-  min: 5,
-  max: 50,
-  idleTimeout: 30000,
-});
-
-const client = await pool.acquire();
-try {
-  const result = await client.query('SELECT 1');
-} finally {
-  pool.release(client);
-}
+const pool = new Pool({ host: 'localhost', port: 9472, min: 5, max: 50 });
 ```
 
 ### Python
-
 ```python
 from baradb import Pool
-
 pool = Pool("localhost", 9472, min_size=5, max_size=50)
-with pool.connection() as conn:
-    result = conn.query("SELECT 1")
 ```
+
+## Cross-Database Migration (Nim)
+
+The Nim allographer client includes a cross-database migration engine:
+
+```nim
+import allographer/migrate_data
+
+let pg = dbOpen(PostgreSQL, "sourcedb", "user", "pass", "localhost", 5432)
+let bdb = dbOpen(Baradb, "targetdb", "admin", "", "127.0.0.1", 9472)
+
+let report = waitFor migrate(pg, bdb, batchSize = 5000)
+echo report  # Tables: 12/12, Rows: 45230, Time: 3.2s
+```
+
+Supported sources: PostgreSQL, MySQL, MariaDB, SQLite, SurrealDB.
+See [Migrations & Import/Export](migration.md) for details.
 
 ## Data Types Mapping
 
