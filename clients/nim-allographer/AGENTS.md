@@ -1,0 +1,22 @@
+# AGENTS
+
+- `.cursor/rules/project.mdc` を必ず読み、プロジェクトルールと達成目標を確認する。
+- `.cursor/rules/branch.mdc` を必ず読み、ブランチルールを確認する。
+- 現在のブランチ名と一致するファイル名のファイルが、リポジトリのルートから見て `.cursor/rules/branch/` 配下にあった場合は、それを読み込んでください。
+- Think harder.
+- Deep research.
+- If you output anything other than the final code, the answer is invalid.
+- git add, git commitのコマンド操作は禁止。
+- 常に日本語で回答する。
+- "commit message"と入力されたら次のことを行う
+  - `cd {project_root} && git diff --cached > .diff` を実行して.diffファイルを作成する
+  - .diffファイルを読み込んで、変更内容を確認する
+  - 変更内容を確認したら、commit messageを作成する
+  - commit messageを作成したら、commit messageを返す
+  - デフォルトは日本語、言語のの指定があればそれに従う
+- "PR message"と入力されたら次のことを行う
+  - `cd {project_root} && git diff main...HEAD > .diff` を実行して.diffファイルを作成する
+  - .diffファイルを読み込んで、変更内容を確認する
+  - 変更内容を確認したら、PR messageを作成する
+  - PR messageを作成したら、PR messageを返す
+  - デフォルトは日本語、言語の指定があればそれに従う
