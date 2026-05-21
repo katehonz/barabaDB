@@ -267,6 +267,7 @@ proc offsetSql*(self: BaradbQuery): BaradbQuery =
 # ==================== INSERT ====================
 
 proc insertSql*(self: BaradbQuery): BaradbQuery =
+  self.placeHolder = newJArray()
   let table = self.query["table"].getStr()
   self.queryString = &"INSERT INTO `{table}`"
   return self

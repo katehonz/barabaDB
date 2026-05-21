@@ -16,11 +16,11 @@ let rdb = baradb
 suite("Baradb query"):
   test("create table raw"):
     let sql = """
-      CREATE TABLE IF NOT EXISTS "users" (
-        "id" SERIAL PRIMARY KEY,
-        "name" VARCHAR(255),
-        "email" VARCHAR(255),
-        "age" INTEGER
+      CREATE TABLE IF NOT EXISTS `users` (
+        `id` SERIAL PRIMARY KEY,
+        `name` VARCHAR(255),
+        `email` VARCHAR(255),
+        `age` INTEGER
       )
     """
     waitFor rdb.raw(sql).exec()

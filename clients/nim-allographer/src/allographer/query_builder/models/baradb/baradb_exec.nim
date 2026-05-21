@@ -1,4 +1,5 @@
 import std/asyncdispatch
+import std/asyncnet
 import std/deques
 import std/json
 import std/monotimes
@@ -9,11 +10,13 @@ import std/sequtils
 import std/tables
 import std/times
 import ../../error
+import ../../enums
 import ../../libs/baradb/baradb_client
 import ../../log
 import ../database_types
 import ./query/baradb_builder
 import ./baradb_types
+import ./baradb_query
 
 
 # ================================================================================
@@ -144,6 +147,12 @@ proc escapeSqlValue(val: JsonNode): string =
 
 proc formatSql*(sql: string, args: seq[JsonNode]): string =
   result = sql
+  var placeholderCount = 0
+  for i in 0..<result.len:
+    if result[i] == '?':
+      placeholderCount += 1
+  if placeholderCount != args.len:
+    raise newException(DbError, "Placeholder count mismatch: expected " & $placeholderCount & " but got " & $args.len & " arguments")
   for arg in args:
     let pos = result.find("?")
     if pos < 0:
@@ -169,20 +178,33 @@ proc toJson*(resultSet: QueryResult): seq[JsonNode] =
     for c in 0 ..< resultSet.columns.len:
       let key = resultSet.columns[c]
       let val = resultSet.rows[r][c]
+      let colType = if c < resultSet.columnTypes.len: resultSet.columnTypes[c] else: "fkString"
       if val.len == 0:
         response_row[key] = newJNull()
-      elif val == "NULL" or val == "null":
-        response_row[key] = newJNull()
-      elif val == "t" or val == "true" or val == "f" or val == "false":
-        response_row[key] = newJBool(val == "t" or val == "true")
       else:
-        try:
-          response_row[key] = newJInt(val.parseInt)
-        except ValueError:
+        case colType
+        of "fkNull":
+          response_row[key] = newJNull()
+        of "fkBool":
+          response_row[key] = newJBool(val == "t" or val == "true" or val == "1")
+        of "fkInt8", "fkInt16", "fkInt32", "fkInt64":
+          try:
+            response_row[key] = newJInt(val.parseInt)
+          except ValueError:
+            response_row[key] = newJString(val)
+        of "fkFloat32", "fkFloat64":
           try:
             response_row[key] = newJFloat(val.parseFloat)
           except ValueError:
             response_row[key] = newJString(val)
+        of "fkJson":
+          try:
+            response_row[key] = parseJson(val)
+          except JsonParsingError:
+            response_row[key] = newJString(val)
+        else:
+          # fkString, fkBytes, fkArray, fkObject, fkVector, and unknown types
+          response_row[key] = newJString(val)
     response_table[r] = response_row
   return response_table
 
@@ -256,7 +278,9 @@ proc getRowPlain(self: BaradbQuery, queryString: string, args: JsonNode): Future
 
   let sql = formatSql(queryString, args)
   let qr = await self.pools.conns[connI].client.query(sql)
-  return qr.rows[0]
+  if qr.rows.len > 0:
+    return qr.rows[0]
+  return @[]
 
 
 proc getAllRows(self: RawBaradbQuery, queryString: string): Future[seq[JsonNode]] {.async.} =
@@ -336,7 +360,9 @@ proc getRowPlain(self: RawBaradbQuery, queryString: string, args: JsonNode): Fut
     arr.add(arg)
   let sql = formatSql(queryString, arr)
   let qr = await self.pools.conns[connI].client.query(sql)
-  return qr.rows[0]
+  if qr.rows.len > 0:
+    return qr.rows[0]
+  return @[]
 
 
 proc exec(self: BaradbQuery, queryString: string) {.async.} =
@@ -411,18 +437,25 @@ proc transactionStart(self: BaradbConnections) {.async.} =
   let connI = getFreeConn(self).await
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
+  discard await self.pools.conns[connI].client.exec("BEGIN")
   self.isInTransaction = true
   self.transactionConn = connI
-  discard await self.pools.conns[connI].client.exec("BEGIN")
 
 
 proc transactionEnd(self: BaradbConnections, query: string) {.async.} =
+  let connI = self.transactionConn
   defer:
-    self.returnConn(self.transactionConn).await
+    try:
+      await self.returnConn(connI)
+    except CatchableError:
+      discard
     self.transactionConn = 0
     self.isInTransaction = false
 
-  discard await self.pools.conns[self.transactionConn].client.exec(query)
+  try:
+    discard await self.pools.conns[connI].client.exec(query)
+  except CatchableError:
+    discard
 
 
 # ================================================================================
@@ -601,7 +634,14 @@ proc count*(self: BaradbQuery): Future[int] {.async.} =
   self.log.logger(sql)
   let response = await self.getRow(sql)
   if response.isSome:
-    return response.get["aggregate"].getStr().parseInt()
+    let agg = response.get["aggregate"]
+    case agg.kind
+    of JInt:
+      return agg.getInt
+    of JFloat:
+      return int(agg.getFloat)
+    else:
+      return agg.getStr.parseInt()
   else:
     return 0
 
@@ -643,7 +683,14 @@ proc avg*(self: BaradbQuery, column: string): Future[Option[float]] {.async.} =
   self.log.logger(sql)
   let response = await self.getRow(sql)
   if response.isSome:
-    return response.get["aggregate"].getStr().parseFloat.some
+    let agg = response.get["aggregate"]
+    case agg.kind
+    of JInt:
+      return some(float(agg.getInt))
+    of JFloat:
+      return some(agg.getFloat)
+    else:
+      return some(agg.getStr.parseFloat)
   else:
     return none(float)
 
@@ -653,7 +700,14 @@ proc sum*(self: BaradbQuery, column: string): Future[Option[float]] {.async.} =
   self.log.logger(sql)
   let response = await self.getRow(sql)
   if response.isSome:
-    return response.get["aggregate"].getStr.parseFloat.some
+    let agg = response.get["aggregate"]
+    case agg.kind
+    of JInt:
+      return some(float(agg.getInt))
+    of JFloat:
+      return some(agg.getFloat)
+    else:
+      return some(agg.getStr.parseFloat)
   else:
     return none(float)
 
@@ -715,8 +769,8 @@ proc paginate*(self: BaradbQuery, page: int = 1, perPage: int = 20): Future[Pagi
   ## Offset-based pagination. Returns rows for the given page plus metadata.
   let total = await self.count()
   let offset = (page - 1) * perPage
-  self.limit(perPage)
-  self.offset(offset)
+  discard self.limit(perPage)
+  discard self.offset(offset)
   let rows = await self.get()
   let qr = PaginateResult(
     rows: rows,
@@ -732,10 +786,10 @@ proc fastPaginate*(self: BaradbQuery, cursorColumn: string, perPage: int = 20,
   ## Cursor-based pagination (keyset). More efficient than offset for large tables.
   ## Requires a unique, ordered column (usually the primary key).
   let total = await self.count()
-  self.limit(perPage)
-  self.orderBy(cursorColumn, Asc)
+  discard self.limit(perPage)
+  discard self.orderBy(cursorColumn, Asc)
   if afterId.len > 0:
-    self.where(cursorColumn, ">", afterId)
+    discard self.where(cursorColumn, ">", afterId)
   let rows = await self.get()
   var hasMore = rows.len == perPage
   let qr = PaginateResult(
@@ -809,7 +863,7 @@ proc isMigrationApplied*(self: BaradbConnections, name: string): Future[bool] {.
 # ================================================================================
 
 proc sendPrepared(client: BaraClient, sql: string, params: seq[WireValue]): Future[QueryResult] {.async.} =
-  if not client.connected:
+  if not client.isConnected():
     raise newException(IOError, "Not connected")
   let msg = makeQueryParamsMessage(client.nextId(), sql, params)
   let msgStr = toString(msg)

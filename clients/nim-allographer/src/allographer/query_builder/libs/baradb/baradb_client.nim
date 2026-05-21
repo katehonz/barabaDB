@@ -110,12 +110,12 @@ proc readString(buf: openArray[byte], pos: var int): string =
     result[i] = char(buf[pos + i])
   pos += len
 
-proc toBytes(s: string): seq[byte] =
+proc toBytes*(s: string): seq[byte] =
   result = newSeq[byte](s.len)
   for i, c in s:
     result[i] = byte(c)
 
-proc toString(s: seq[byte]): string =
+proc toString*(s: seq[byte]): string =
   result = newString(s.len)
   for i, b in s:
     result[i] = char(b)
@@ -277,7 +277,7 @@ type
 
   BaraClient* = ref object
     config: ClientConfig
-    socket: AsyncSocket
+    socket*: AsyncSocket
     connected: bool
     requestId: uint32
 
@@ -294,7 +294,7 @@ proc connect*(client: BaraClient) {.async.} =
   await client.socket.connect(client.config.host, Port(client.config.port))
   client.connected = true
 
-proc nextId(client: BaraClient): uint32 =
+proc nextId*(client: BaraClient): uint32 =
   inc client.requestId; client.requestId
 
 proc close*(client: BaraClient) =
@@ -325,7 +325,7 @@ proc wireValueToString*(wv: WireValue): string =
   of fkVector: return "<vector:" & $wv.vecVal.len & ">"
   of fkJson: return wv.jsonVal
 
-proc readQueryResponse(client: BaraClient): Future[QueryResult] {.async.} =
+proc readQueryResponse*(client: BaraClient): Future[QueryResult] {.async.} =
   let headerData = await client.socket.recv(12)
   if headerData.len < 12:
     raise newException(IOError, "Connection closed")

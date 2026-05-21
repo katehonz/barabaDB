@@ -205,6 +205,8 @@ proc orWhere*(self: BaradbQuery, column: string, symbol: string, value: nil.type
 
 
 proc whereBetween*(self: BaradbQuery, column: string, width: array[2, int|float]): BaradbQuery =
+  self.placeHolder.add(%*{"key": column, "value": width[0]})
+  self.placeHolder.add(%*{"key": column, "value": width[1]})
   if self.query.hasKey("where_between") == false:
     self.query["where_between"] = %*[{
       "column": column,
@@ -219,6 +221,8 @@ proc whereBetween*(self: BaradbQuery, column: string, width: array[2, int|float]
 
 
 proc whereBetween*(self: BaradbQuery, column: string, width: array[2, string]): BaradbQuery =
+  self.placeHolder.add(%*{"key": column, "value": width[0]})
+  self.placeHolder.add(%*{"key": column, "value": width[1]})
   if self.query.hasKey("where_between_string") == false:
     self.query["where_between_string"] = %*[{
       "column": column,
@@ -233,6 +237,8 @@ proc whereBetween*(self: BaradbQuery, column: string, width: array[2, string]): 
 
 
 proc whereNotBetween*(self: BaradbQuery, column: string, width: array[2, int|float]): BaradbQuery =
+  self.placeHolder.add(%*{"key": column, "value": width[0]})
+  self.placeHolder.add(%*{"key": column, "value": width[1]})
   if self.query.hasKey("where_not_between") == false:
     self.query["where_not_between"] = %*[{
       "column": column,
@@ -247,6 +253,8 @@ proc whereNotBetween*(self: BaradbQuery, column: string, width: array[2, int|flo
 
 
 proc whereNotBetween*(self: BaradbQuery, column: string, width: array[2, string]): BaradbQuery =
+  self.placeHolder.add(%*{"key": column, "value": width[0]})
+  self.placeHolder.add(%*{"key": column, "value": width[1]})
   if self.query.hasKey("where_not_between_string") == false:
     self.query["where_not_between_string"] = %*[{
       "column": column,
@@ -261,6 +269,8 @@ proc whereNotBetween*(self: BaradbQuery, column: string, width: array[2, string]
 
 
 proc whereIn*(self: BaradbQuery, column: string, width: seq[int|float|string]): BaradbQuery =
+  for val in width:
+    self.placeHolder.add(%*{"key": column, "value": val})
   if self.query.hasKey("where_in") == false:
     self.query["where_in"] = %*[{
       "column": column,
@@ -275,6 +285,8 @@ proc whereIn*(self: BaradbQuery, column: string, width: seq[int|float|string]): 
 
 
 proc whereNotIn*(self: BaradbQuery, column: string, width: seq[int|float|string]): BaradbQuery =
+  for val in width:
+    self.placeHolder.add(%*{"key": column, "value": val})
   if self.query.hasKey("where_not_in") == false:
     self.query["where_not_in"] = %*[{
       "column": column,
