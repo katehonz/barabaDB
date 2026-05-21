@@ -1,4 +1,5 @@
 ## BaraQL Executor — AST lowering, IR compilation, and execution
+import std/os
 import std/strutils
 import std/tables
 import std/hashes
@@ -421,6 +422,7 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
                    cteTables: initTable[string, seq[Row]](),
                    ftsIndexes: ctx.ftsIndexes,
                    vectorIndexes: ctx.vectorIndexes,
+                   graphs: ctx.graphs,
                    users: ctx.users, policies: ctx.policies,
                    txnManager: ctx.txnManager,
                    currentUser: ctx.currentUser, currentRole: ctx.currentRole,
@@ -428,6 +430,8 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
                    autoIncCounters: ctx.autoIncCounters,
                     sequences: ctx.sequences,
                     pendingTxn: nil, onChange: ctx.onChange,
+                    embedder: ctx.embedder,
+                    llmClient: ctx.llmClient,
                     currentDatabase: ctx.currentDatabase,
                     registry: ctx.registry)
   result.sharedLock = ctx.sharedLock
@@ -5629,6 +5633,32 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       row["name"] = dbName
       rows.add(row)
     return okResult(rows, @["name"])
+
+  of nkShowTables:
+    if stmt.stTableName.len == 0:
+      # SHOW TABLES — list all tables
+      var rows: seq[Row] = @[]
+      for tableName in ctx.tables.keys:
+        var row = initTable[string, Value]()
+        row["name"] = tableName
+        rows.add(row)
+      return okResult(rows, @["name"])
+    else:
+      # SHOW COLUMNS FROM table — describe a specific table
+      var rows: seq[Row] = @[]
+      let tbl = ctx.getTableDef(stmt.stTableName)
+      for col in tbl.columns:
+        var row = initTable[string, Value]()
+        row["column_name"] = col.name
+        row["data_type"] = col.colType
+        row["is_nullable"] = if col.isNotNull: "NO" else: "YES"
+        row["is_primary_key"] = if col.isPk: "YES" else: "NO"
+        if col.defaultVal.len > 0:
+          row["column_default"] = col.defaultVal
+        else:
+          row["column_default"] = ""
+        rows.add(row)
+      return okResult(rows, @["column_name", "data_type", "is_nullable", "is_primary_key", "column_default"])
 
   else:
     return errResult("Unsupported statement type: " & $stmt.kind)

@@ -10,15 +10,25 @@ import ../../../query_builder/models/baradb/baradb_query
 import ../../../query_builder/models/baradb/baradb_exec
 
 proc getTableInfo(rdb: BaradbConnections): Future[Table[string, seq[tuple[name: string, typ: string]]]] {.async.} =
+  ## Introspect BaraDB tables using native SHOW TABLES / SHOW COLUMNS commands.
   var tablesInfo = initTable[string, seq[tuple[name: string, typ: string]]]()
-  let tables = await rdb.raw("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public'").get()
+
+  # SHOW TABLES — get all table names from the server
+  let tables = await rdb.raw("SHOW TABLES").get()
   for table in tables:
-    let tableName = table["table_name"].getStr()
-    let query = "SELECT column_name, data_type FROM information_schema.columns WHERE table_name = ? ORDER BY ordinal_position"
-    let columns = await rdb.raw(query, %*[tableName]).get()
+    let tableName = table["name"].getStr()
+    # Skip internal schema tables
+    if tableName.startsWith("_") and tableName != "_allographer_migrations":
+      continue
+
+    # SHOW COLUMNS FROM — get column definitions for this table
+    let descQuery = "SHOW COLUMNS FROM `" & tableName & "`"
+    let columns = await rdb.raw(descQuery).get()
     var columnInfo: seq[tuple[name: string, typ: string]]
     for col in columns:
-      columnInfo.add((name: col["column_name"].getStr(), typ: col["data_type"].getStr()))
+      let colName = col["column_name"].getStr()
+      let colType = col["data_type"].getStr()
+      columnInfo.add((name: colName, typ: colType))
     tablesInfo[tableName] = columnInfo
   return tablesInfo
 
@@ -33,15 +43,18 @@ proc generateSchemaCode(tablesInfo: Table[string, seq[tuple[name: string, typ: s
     for col in columns:
       let nimType =
         case col.typ.toLower()
-        of "smallint", "integer", "bigint", "serial":
+        of "smallint", "integer", "bigint", "serial", "int", "int8", "int16", "int32", "int64":
           "int"
-        of "character", "character varying", "text", "date", "timestamp without time zone", "time without time zone", "bytea", "varchar":
+        of "character", "character varying", "text", "date",
+           "timestamp without time zone", "time without time zone", "bytea",
+           "varchar", "string", "fkstring":
           "string"
-        of "boolean":
+        of "boolean", "bool":
           "bool"
-        of "numeric", "double precision", "real":
+        of "numeric", "double precision", "real", "float", "float32", "float64",
+           "double":
           "float"
-        of "json", "jsonb":
+        of "json", "jsonb", "jsonnode":
           "JsonNode"
         else:
           "string"

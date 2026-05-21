@@ -49,6 +49,7 @@ type
     nkDropDatabase
     nkUseDatabase
     nkShowDatabases
+    nkShowTables
 
     # Clauses
     nkFrom
@@ -355,6 +356,8 @@ type
       udDbName*: string
     of nkShowDatabases:
       discard
+    of nkShowTables:
+      stTableName*: string  # empty = list tables; non-empty = describe table
     of nkApplyMigration:
       amName*: string
     of nkMigrationStatus:

@@ -34,6 +34,18 @@ proc match(p: var Parser, kind: TokenKind): bool =
     return true
   return false
 
+# Token kinds that can also serve as identifiers in table/column name positions
+const identLikeKinds = {tkIdent, tkLabels, tkCount, tkSum, tkAvg, tkMin, tkMax, tkArrayAgg, tkStringAgg}
+
+proc expectIdent(p: var Parser): Token =
+  ## Expect a token that can serve as an identifier (table name, column name, alias, etc.).
+  ## Accepts tkIdent plus keyword tokens that are commonly used as names.
+  let tok = p.peek()
+  if tok.kind in identLikeKinds:
+    return p.advance()
+  raise newException(ValueError,
+    "Expected identifier but got " & $tok.kind & " at line " & $tok.line)
+
 proc parseExpr(p: var Parser): Node
 proc parseSelect(p: var Parser): Node
 proc parseStatement*(p: var Parser): Node
@@ -69,7 +81,7 @@ proc parsePrimary(p: var Parser): Node =
   of tkCurrentRole:
     discard p.advance()
     Node(kind: nkCurrentRole, line: tok.line, col: tok.col)
-  of tkIdent, tkRowNumber, tkRank, tkDenseRank, tkLead, tkLag, tkFirstValue, tkLastValue, tkNtile:
+  of tkIdent, tkLabels, tkRowNumber, tkRank, tkDenseRank, tkLead, tkLag, tkFirstValue, tkLastValue, tkNtile:
     discard p.advance()
     let funcName = tok.value
     # Check for function call: ident(...)
@@ -139,6 +151,17 @@ proc parsePrimary(p: var Parser): Node =
     let operand = p.parsePrimary()
     Node(kind: nkUnaryOp, unOp: ukNeg, unOperand: operand, line: tok.line, col: tok.col)
   of tkCount, tkSum, tkAvg, tkMin, tkMax, tkArrayAgg, tkStringAgg:
+    # If not followed by '(', treat as a regular identifier (column reference)
+    if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind != tkLParen:
+      discard p.advance()
+      let identName = tok.value
+      var parts = @[identName]
+      while p.peek().kind == tkDot:
+        discard p.advance()
+        parts.add(p.expectIdent().value)
+      if parts.len == 1:
+        return Node(kind: nkIdent, identName: identName, line: tok.line, col: tok.col)
+      return Node(kind: nkPath, pathParts: parts, line: tok.line, col: tok.col)
     let funcName = tok.value
     discard p.advance()
     discard p.expect(tkLParen)
@@ -1038,7 +1061,7 @@ proc parseCreateTable(p: var Parser): Node =
     discard p.expect(tkExists)
     result.crtIfNotExists = true
 
-  result.crtName = p.expect(tkIdent).value
+  result.crtName = p.expectIdent().value
   discard p.expect(tkLParen)
 
   while p.peek().kind != tkRParen and p.peek().kind != tkEof:
@@ -1053,26 +1076,26 @@ proc parseCreateTable(p: var Parser): Node =
         cst.cstType = "pkey"
         if p.peek().kind == tkLParen:
           discard p.advance()
-          cst.cstColumns.add(p.expect(tkIdent).value)
+          cst.cstColumns.add(p.expectIdent().value)
           while p.match(tkComma):
-            cst.cstColumns.add(p.expect(tkIdent).value)
+            cst.cstColumns.add(p.expectIdent().value)
           discard p.expect(tkRParen)
       elif p.match(tkForeign):
         discard p.expect(tkKey)
         cst.cstType = "fkey"
         if p.peek().kind == tkLParen:
           discard p.advance()
-          cst.cstColumns.add(p.expect(tkIdent).value)
+          cst.cstColumns.add(p.expectIdent().value)
           while p.match(tkComma):
-            cst.cstColumns.add(p.expect(tkIdent).value)
+            cst.cstColumns.add(p.expectIdent().value)
           discard p.expect(tkRParen)
         discard p.expect(tkReferences)
-        cst.cstRefTable = p.expect(tkIdent).value
+        cst.cstRefTable = p.expectIdent().value
         if p.peek().kind == tkLParen:
           discard p.advance()
-          cst.cstRefColumns.add(p.expect(tkIdent).value)
+          cst.cstRefColumns.add(p.expectIdent().value)
           while p.match(tkComma):
-            cst.cstRefColumns.add(p.expect(tkIdent).value)
+            cst.cstRefColumns.add(p.expectIdent().value)
           discard p.expect(tkRParen)
         if p.peek().kind == tkOn:
           discard p.advance()
@@ -1116,9 +1139,9 @@ proc parseCreateTable(p: var Parser): Node =
         cst.cstType = "unique"
         if p.peek().kind == tkLParen:
           discard p.advance()
-          cst.cstColumns.add(p.expect(tkIdent).value)
+          cst.cstColumns.add(p.expectIdent().value)
           while p.match(tkComma):
-            cst.cstColumns.add(p.expect(tkIdent).value)
+            cst.cstColumns.add(p.expectIdent().value)
           discard p.expect(tkRParen)
       elif p.match(tkCheck):
         cst.cstType = "check"
@@ -1129,7 +1152,7 @@ proc parseCreateTable(p: var Parser): Node =
       continue
 
     # Parse column definition
-    let colName = p.expect(tkIdent).value
+    let colName = p.expectIdent().value
     var colType = ""
     if p.peek().kind == tkIdent:
       colType = p.advance().value.toUpper()
@@ -1185,12 +1208,12 @@ proc parseCreateTable(p: var Parser): Node =
         cst.cstDefault = p.parseExpr()
       elif p.match(tkReferences):
         cst.cstType = "fkey"
-        cst.cstRefTable = p.expect(tkIdent).value
+        cst.cstRefTable = p.expectIdent().value
         if p.peek().kind == tkLParen:
           discard p.advance()
-          cst.cstRefColumns.add(p.expect(tkIdent).value)
+          cst.cstRefColumns.add(p.expectIdent().value)
           while p.match(tkComma):
-            cst.cstRefColumns.add(p.expect(tkIdent).value)
+            cst.cstRefColumns.add(p.expectIdent().value)
           discard p.expect(tkRParen)
         if p.peek().kind == tkOn:
           discard p.advance()
@@ -1232,12 +1255,12 @@ proc parseDropTable(p: var Parser): Node =
     discard p.advance()
     discard p.expect(tkExists)
     result.drtIfExists = true
-  result.drtName = p.expect(tkIdent).value
+  result.drtName = p.expectIdent().value
 
 proc parseAlterTable(p: var Parser): Node =
   let tok = p.expect(tkAlter)
   discard p.expect(tkTable)
-  let tableName = p.expect(tkIdent).value
+  let tableName = p.expectIdent().value
   # Check for ENABLE/DISABLE ROW LEVEL SECURITY
   if p.peek().kind == tkEnable:
     discard p.advance()
@@ -1256,7 +1279,7 @@ proc parseAlterTable(p: var Parser): Node =
   result.altOps = @[]
   if p.match(tkAdd):
     discard p.match(tkColumn)
-    let colName = p.expect(tkIdent).value
+    let colName = p.expectIdent().value
     var colType = ""
     if p.peek().kind == tkIdent:
       colType = p.advance().value.toUpper()
@@ -1273,16 +1296,16 @@ proc parseCreateIndex(p: var Parser): Node =
   if p.peek().kind == tkIdent and p.peek().value.toLower() != "on":
     idxName = p.advance().value
   discard p.match(tkOn)
-  let tableName = p.expect(tkIdent).value
+  let tableName = p.expectIdent().value
   discard p.match(tkLParen)
   var colNames: seq[string] = @[]
-  colNames.add(p.expect(tkIdent).value)
+  colNames.add(p.expectIdent().value)
   while p.match(tkComma):
-    colNames.add(p.expect(tkIdent).value)
+    colNames.add(p.expectIdent().value)
   discard p.match(tkRParen)
   var idxKind = ikBTree
   if p.match(tkUsing):
-    let idxMethod = p.expect(tkIdent).value.toLower()
+    let idxMethod = p.expectIdent().value.toLower()
     if idxMethod == "fts" or idxMethod == "fulltext":
       idxKind = ikFullText
     elif idxMethod == "hnsw":
@@ -1754,6 +1777,19 @@ proc parseShowDatabases(p: var Parser): Node =
   discard p.expect(tkDatabases)
   result = Node(kind: nkShowDatabases, line: tok.line, col: tok.col)
 
+proc parseShowTables(p: var Parser): Node =
+  let tok = p.expect(tkShow)
+  discard p.expect(tkTable)  # consume TABLES or TABLE
+  result = Node(kind: nkShowTables, line: tok.line, col: tok.col)
+  result.stTableName = ""
+
+proc parseDescribeTable(p: var Parser): Node =
+  let tok = p.expect(tkShow)
+  discard p.expect(tkColumns)
+  discard p.expect(tkFrom)
+  result = Node(kind: nkShowTables, line: tok.line, col: tok.col)
+  result.stTableName = p.expectIdent().value
+
 proc parseStatement*(p: var Parser): Node =
   case p.peek().kind
   of tkWith, tkSelect: p.parseSelect()
@@ -1830,8 +1866,17 @@ proc parseStatement*(p: var Parser): Node =
   of tkUse:
     p.parseUseDatabase()
   of tkShow:
-    if p.pos + 1 < p.tokens.len and p.tokens[p.pos + 1].kind == tkDatabases:
-      p.parseShowDatabases()
+    if p.pos + 1 < p.tokens.len:
+      let next = p.tokens[p.pos + 1].kind
+      if next == tkDatabases:
+        p.parseShowDatabases()
+      elif next == tkTable:
+        p.parseShowTables()
+      elif next == tkColumns:
+        p.parseDescribeTable()
+      else:
+        let tok = p.advance()
+        Node(kind: nkNullLit, line: tok.line, col: tok.col)
     else:
       let tok = p.advance()
       Node(kind: nkNullLit, line: tok.line, col: tok.col)

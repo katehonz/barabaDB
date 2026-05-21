@@ -168,6 +168,48 @@ proc formatSql*(sql: string, args: JsonNode): string =
 
 
 # ================================================================================
+# Parameterized query helpers (SQL injection prevention)
+# ================================================================================
+
+proc jsonToWireValue*(val: JsonNode): WireValue =
+  ## Convert a JsonNode to a WireValue for parameterized queries.
+  case val.kind
+  of JNull:
+    WireValue(kind: fkNull)
+  of JBool:
+    WireValue(kind: fkBool, boolVal: val.getBool())
+  of JInt:
+    let i = val.getInt()
+    if i >= int(low(int32)) and i <= int(high(int32)):
+      WireValue(kind: fkInt32, int32Val: int32(i))
+    else:
+      WireValue(kind: fkInt64, int64Val: i)
+  of JFloat:
+    WireValue(kind: fkFloat64, float64Val: val.getFloat())
+  of JString:
+    WireValue(kind: fkString, strVal: val.getStr())
+  of JArray:
+    var elems: seq[WireValue] = @[]
+    for elem in val.getElems():
+      elems.add(jsonToWireValue(elem))
+    WireValue(kind: fkArray, arrayVal: elems)
+  of JObject:
+    WireValue(kind: fkJson, jsonVal: val.pretty())
+
+proc placeholdersToWireValues*(placeHolder: JsonNode): seq[WireValue] =
+  ## Convert the query builder placeholder array to WireValue sequence.
+  result = @[]
+  for arg in placeHolder.items:
+    result.add(jsonToWireValue(arg["value"]))
+
+proc placeholdersToWireValuesRaw*(args: seq[JsonNode]): seq[WireValue] =
+  ## Convert a raw seq[JsonNode] to WireValue sequence (for RawBaradbQuery).
+  result = @[]
+  for arg in args:
+    result.add(jsonToWireValue(arg))
+
+
+# ================================================================================
 # toJson
 # ================================================================================
 
@@ -223,8 +265,11 @@ proc getAllRows(self: BaradbQuery, queryString: string): Future[seq[JsonNode]] {
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
-  let sql = formatSql(queryString, self.placeHolder)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValues(self.placeHolder)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
 
   if qr.rowCount == 0:
     self.log.echoErrorMsg(queryString)
@@ -242,8 +287,11 @@ proc getAllRowsPlain(self: BaradbQuery, queryString: string, args: JsonNode): Fu
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
-  let sql = formatSql(queryString, args)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValues(args)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
   return qr.rows
 
 
@@ -257,8 +305,11 @@ proc getRow(self: BaradbQuery, queryString: string): Future[Option[JsonNode]] {.
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
-  let sql = formatSql(queryString, self.placeHolder)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValues(self.placeHolder)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
 
   if qr.rowCount == 0:
     self.log.echoErrorMsg(queryString)
@@ -266,7 +317,7 @@ proc getRow(self: BaradbQuery, queryString: string): Future[Option[JsonNode]] {.
   return toJson(qr)[0].some()
 
 
-proc getRowPlain(self: BaradbQuery, queryString: string, args: JsonNode): Future[seq[string]] {.async.} =
+proc getRowPlain(self: BaradbQuery, queryString: string, args: JsonNode): Future[Option[seq[string]]] {.async.} =
   var connI = self.transactionConn
   if not self.isInTransaction:
     connI = getFreeConn(self).await
@@ -276,11 +327,14 @@ proc getRowPlain(self: BaradbQuery, queryString: string, args: JsonNode): Future
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
-  let sql = formatSql(queryString, args)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValues(args)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
   if qr.rows.len > 0:
-    return qr.rows[0]
-  return @[]
+    return some(qr.rows[0])
+  return none(seq[string])
 
 
 proc getAllRows(self: RawBaradbQuery, queryString: string): Future[seq[JsonNode]] {.async.} =
@@ -296,8 +350,11 @@ proc getAllRows(self: RawBaradbQuery, queryString: string): Future[seq[JsonNode]
   var arr: seq[JsonNode]
   for arg in self.placeHolder.items:
     arr.add(arg)
-  let sql = formatSql(queryString, arr)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValuesRaw(arr)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
 
   if qr.rowCount == 0:
     self.log.echoErrorMsg(queryString)
@@ -318,8 +375,11 @@ proc getAllRowsPlain(self: RawBaradbQuery, queryString: string, args: JsonNode):
   var arr: seq[JsonNode]
   for arg in args.items:
     arr.add(arg)
-  let sql = formatSql(queryString, arr)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValuesRaw(arr)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
   return qr.rows
 
 
@@ -336,8 +396,11 @@ proc getRow(self: RawBaradbQuery, queryString: string): Future[Option[JsonNode]]
   var arr: seq[JsonNode]
   for arg in self.placeHolder.items:
     arr.add(arg)
-  let sql = formatSql(queryString, arr)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValuesRaw(arr)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
 
   if qr.rowCount == 0:
     self.log.echoErrorMsg(queryString)
@@ -345,7 +408,7 @@ proc getRow(self: RawBaradbQuery, queryString: string): Future[Option[JsonNode]]
   return toJson(qr)[0].some()
 
 
-proc getRowPlain(self: RawBaradbQuery, queryString: string, args: JsonNode): Future[seq[string]] {.async.} =
+proc getRowPlain(self: RawBaradbQuery, queryString: string, args: JsonNode): Future[Option[seq[string]]] {.async.} =
   var connI = self.transactionConn
   if not self.isInTransaction:
     connI = getFreeConn(self).await
@@ -358,11 +421,14 @@ proc getRowPlain(self: RawBaradbQuery, queryString: string, args: JsonNode): Fut
   var arr: seq[JsonNode]
   for arg in args.items:
     arr.add(arg)
-  let sql = formatSql(queryString, arr)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValuesRaw(arr)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
   if qr.rows.len > 0:
-    return qr.rows[0]
-  return @[]
+    return some(qr.rows[0])
+  return none(seq[string])
 
 
 proc exec(self: BaradbQuery, queryString: string) {.async.} =
@@ -375,8 +441,11 @@ proc exec(self: BaradbQuery, queryString: string) {.async.} =
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
-  let sql = formatSql(queryString, self.placeHolder)
-  discard await self.pools.conns[connI].client.exec(sql)
+  let params = placeholdersToWireValues(self.placeHolder)
+  if params.len > 0:
+    discard await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    discard await self.pools.conns[connI].client.exec(queryString)
 
 
 proc exec(self: RawBaradbQuery, queryString: string, args: JsonNode) {.async.} =
@@ -392,8 +461,11 @@ proc exec(self: RawBaradbQuery, queryString: string, args: JsonNode) {.async.} =
   var arr: seq[JsonNode]
   for arg in args.items:
     arr.add(arg)
-  let sql = formatSql(queryString, arr)
-  discard await self.pools.conns[connI].client.exec(sql)
+  let params = placeholdersToWireValuesRaw(arr)
+  if params.len > 0:
+    discard await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    discard await self.pools.conns[connI].client.exec(queryString)
 
 
 proc insertId(self: BaradbQuery, queryString: string, key: string): Future[string] {.async.} =
@@ -406,8 +478,12 @@ proc insertId(self: BaradbQuery, queryString: string, key: string): Future[strin
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
-  let sql = formatSql(queryString, self.placeHolder) & &" RETURNING `{key}`"
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let sql = queryString & &" RETURNING `{key}`"
+  let params = placeholdersToWireValues(self.placeHolder)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(sql, params)
+  else:
+    await self.pools.conns[connI].client.query(sql)
   if qr.rowCount > 0 and qr.rows[0].len > 0:
     return qr.rows[0][0]
   return ""
@@ -423,11 +499,11 @@ proc getColumns(self: BaradbQuery, queryString: string, args = newJArray()): Fut
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
-  var arr: seq[JsonNode]
-  for arg in args.items:
-    arr.add(arg["value"])
-  let sql = formatSql(queryString, arr)
-  let qr = await self.pools.conns[connI].client.query(sql)
+  let params = placeholdersToWireValues(args)
+  let qr = if params.len > 0:
+    await self.pools.conns[connI].client.query(queryString, params)
+  else:
+    await self.pools.conns[connI].client.query(queryString)
   if qr.rowCount > 0:
     return qr.rows[0]
   return @[]
@@ -517,7 +593,9 @@ proc firstPlain*(self: BaradbQuery): Future[seq[string]] {.async.} =
   let sql = self.selectFirstBuilder()
   try:
     self.log.logger(sql)
-    return await self.getRowPlain(sql, self.placeHolder)
+    let row = await self.getRowPlain(sql, self.placeHolder)
+    if row.isSome: return row.get()
+    return @[]
   except CatchableError:
     self.log.echoErrorMsg(sql)
     self.log.echoErrorMsg(getCurrentExceptionMsg())
@@ -529,7 +607,9 @@ proc findPlain*(self: BaradbQuery, id: string, key = "id"): Future[seq[string]] 
   let sql = self.selectFindBuilder(key)
   try:
     self.log.logger(sql)
-    return await self.getRowPlain(sql, self.placeHolder)
+    let row = await self.getRowPlain(sql, self.placeHolder)
+    if row.isSome: return row.get()
+    return @[]
   except CatchableError:
     self.log.echoErrorMsg(sql)
     self.log.echoErrorMsg(getCurrentExceptionMsg())
