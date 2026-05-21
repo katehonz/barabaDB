@@ -317,6 +317,8 @@ proc recvExactWithTimeout(client: AsyncSocket, size: int, timeoutMs: int): Futur
   let ok = await withTimeout(fut, timeoutMs)
   if ok:
     return fut.read()
+  # Timeout: caller will close the socket, which cancels the pending recv
+  return ""
 
 proc slowQueryLog(logPath: string, query: string, durationMs: int, clientId: int) =
   if logPath.len == 0:
@@ -505,6 +507,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
             let info = getDatabaseInfo(server.registry, jwtDatabase)
             if info != nil:
               let targetCtx = cast[ExecutionContext](cast[pointer](info.ctx))
+              let oldDb = connCtx.currentDatabase
               connCtx.db = info.db
               connCtx.tables = targetCtx.tables
               connCtx.btrees = targetCtx.btrees
@@ -517,6 +520,8 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
               connCtx.autoIncCounters = targetCtx.autoIncCounters
               connCtx.sequences = targetCtx.sequences
               connCtx.currentDatabase = jwtDatabase
+              if oldDb.len > 0 and oldDb != jwtDatabase:
+                decrementConnections(server.registry, oldDb)
               incrementConnections(server.registry, jwtDatabase)
         else:
           let err = makeErrorMessage(header.requestId, 403, "Invalid token")

@@ -293,10 +293,10 @@ proc inferExpr*(tc: TypeChecker, expr: IRExpr, context: Table[string, IRType]): 
     if operandType == nil:
       return nil
     case expr.unOp
-    of irEq, irNeq, irLt, irLte, irGt, irGte, irAnd, irOr, irNot,
-       irIsNull, irIsNotNull, irIn, irNotIn, irLike, irILike, irBetween,
-       irFtsMatch:
+    of irNot, irIsNull, irIsNotNull:
       return IRType(name: "bool", kind: itkScalar)
+    of irNeg:
+      return operandType
     else:
       return nil
   of irekBinary:

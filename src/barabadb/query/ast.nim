@@ -229,8 +229,11 @@ type
       mergeSourceAlias*: string
       mergeOn*: Node
       mergeMatchedUpdate*: seq[Node]  # SET assignments, empty if no UPDATE
+      mergeMatchedDelete*: bool       # WHEN MATCHED THEN DELETE
+      mergeMatchedCondition*: Node    # optional AND <condition> after MATCHED
       mergeNotMatchedInsert*: seq[Node]  # column list for INSERT
       mergeNotMatchedValues*: seq[Node]  # value expressions for INSERT
+      mergeNotMatchedNothing*: bool   # WHEN NOT MATCHED THEN DO NOTHING
     of nkCreateType:
       ctName*: string
       ctBases*: seq[string]
@@ -404,6 +407,7 @@ type
       funcName*: string
       funcArgs*: seq[Node]
       funcFilter*: Node
+      funcDistinct*: bool
     of nkTypeCast:
       castType*: string
       castExpr*: Node

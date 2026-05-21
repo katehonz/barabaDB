@@ -77,6 +77,10 @@ proc call*(reg: UDFRegistry, name: string, args: seq[Value]): Value =
   inc udf.callCount
   if udf.body != nil:
     return udf.body(args)
+  if udf.language == udlExpr:
+    # Expression-based UDFs are evaluated by the query executor, not here
+    raise newException(ValueError,
+      "Expression UDF '" & name & "' must be evaluated via query executor, not direct call")
   return Value(kind: vkNull)
 
 proc hasFunction*(reg: UDFRegistry, name: string): bool =
@@ -181,10 +185,13 @@ proc registerStdlib*(reg: UDFRegistry) =
       if args.len >= 2 and args[0].kind == vkString and args[1].kind == vkInt64:
         let s = args[0].strVal
         let start = int(args[1].int64Val)
+        if start < 0 or start >= s.len:
+          return Value(kind: vkString, strVal: "")
         if args.len >= 3 and args[2].kind == vkInt64:
           let length = int(args[2].int64Val)
-          return Value(kind: vkString, strVal: s[start ..< min(start + length, s.len)])
-        return Value(kind: vkString, strVal: s[start .. ^1])
+          let endIdx = min(start + length, s.len)
+          return Value(kind: vkString, strVal: s[start ..< endIdx])
+        return Value(kind: vkString, strVal: s[start])
       return Value(kind: vkNull))
 
   # Type conversion
@@ -214,21 +221,32 @@ proc registerStdlib*(reg: UDFRegistry) =
     UDFParam(name: "value", typeName: "any", required: true)],
     "bool", proc(args: seq[Value]): Value =
       if args.len >= 2 and args[0].kind == vkArray:
+        let target = args[1]
         for item in args[0].arrayVal:
-          if item.kind == args[1].kind:
+          if item.kind == target.kind:
             case item.kind
             of vkString:
-              if item.strVal == args[1].strVal:
+              if item.strVal == target.strVal:
                 return Value(kind: vkBool, boolVal: true)
             of vkInt64:
-              if item.int64Val == args[1].int64Val:
+              if item.int64Val == target.int64Val:
                 return Value(kind: vkBool, boolVal: true)
             of vkFloat64:
-              if item.float64Val == args[1].float64Val:
+              if item.float64Val == target.float64Val:
                 return Value(kind: vkBool, boolVal: true)
             of vkBool:
-              if item.boolVal == args[1].boolVal:
+              if item.boolVal == target.boolVal:
                 return Value(kind: vkBool, boolVal: true)
             else: discard
+          elif (item.kind in {vkInt64, vkInt32, vkFloat64}) and
+               (target.kind in {vkInt64, vkInt32, vkFloat64}):
+            let a = case item.kind of vkInt64: float64(item.int64Val)
+                    of vkInt32: float64(item.int32Val)
+                    else: item.float64Val
+            let b = case target.kind of vkInt64: float64(target.int64Val)
+                    of vkInt32: float64(target.int32Val)
+                    else: target.float64Val
+            if a == b:
+              return Value(kind: vkBool, boolVal: true)
         return Value(kind: vkBool, boolVal: false)
       return Value(kind: vkNull))

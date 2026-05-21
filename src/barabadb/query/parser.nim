@@ -15,7 +15,7 @@ proc newParser*(tokens: seq[Token]): Parser =
 proc peek(p: Parser): Token =
   if p.pos < p.tokens.len:
     return p.tokens[p.pos]
-  Token(kind: tkEof)
+  return Token(kind: tkEof)
 
 proc advance(p: var Parser): Token =
   result = p.tokens[p.pos]
@@ -154,6 +154,7 @@ proc parsePrimary(p: var Parser): Node =
         args.add(p.parseExpr())
     discard p.expect(tkRParen)
     var node = Node(kind: nkFuncCall, funcName: funcName.toLower(), funcArgs: args,
+                    funcDistinct: hasDistinct,
                     line: tok.line, col: tok.col)
     # Handle FILTER (WHERE ...)
     if p.match(tkFilter):
@@ -267,8 +268,16 @@ proc parsePostfix(p: var Parser): Node =
     result = Node(kind: nkJsonPath, jpLeft: result, jpKey: key, jpAsText: isText,
                   line: p.peek().line, col: p.peek().col)
 
-proc parseMulDiv(p: var Parser): Node =
+proc parsePower(p: var Parser): Node =
   result = p.parsePostfix()
+  if p.peek().kind == tkPower:
+    let tok = p.advance()
+    let right = p.parsePower()  # right-associative
+    result = Node(kind: nkBinOp, binOp: bkPow, binLeft: result, binRight: right,
+                  line: tok.line, col: tok.col)
+
+proc parseMulDiv(p: var Parser): Node =
+  result = p.parsePower()
   while p.peek().kind in {tkStar, tkSlash, tkPercent, tkFloorDiv}:
     let op = case p.peek().kind
       of tkStar: bkMul
@@ -339,10 +348,6 @@ proc parseComparison(p: var Parser): Node =
                 likeCaseInsensitive: isILike,
                 likeNegated: negated,
                 line: tok.line, col: tok.col)
-  # If we consumed NOT but didn't find IN/LIKE/BETWEEN, put it back is not possible.
-  # Instead, wrap result in a unary NOT node.
-  if negated:
-    result = Node(kind: nkUnaryOp, unOp: ukNot, unOperand: result, line: 0, col: 0)
   # Handle IS NULL / IS NOT NULL
   if p.peek().kind == tkIs:
     let tok = p.advance()
@@ -375,6 +380,9 @@ proc parseComparison(p: var Parser): Node =
     let right = p.parseAddSub()
     result = Node(kind: nkBinOp, binOp: op, binLeft: result, binRight: right,
                   line: tok.line, col: tok.col)
+  # If we consumed NOT but didn't find IN/LIKE/BETWEEN, wrap the full comparison in NOT
+  if negated:
+    result = Node(kind: nkUnaryOp, unOp: ukNot, unOperand: result, line: 0, col: 0)
 
 proc parseNot(p: var Parser): Node =
   if p.peek().kind == tkNot:
@@ -923,12 +931,28 @@ proc parseMerge(p: var Parser): Node =
     result.mergeSourceAlias = p.advance().value
   discard p.expect(tkOn)
   result.mergeOn = p.parseExpr()
-  # WHEN MATCHED THEN UPDATE SET ...
-  if p.match(tkWhen):
-    if p.match(tkNot):
-      discard p.expect(tkMatched)
-      discard p.expect(tkThen)
-      discard p.expect(tkInsert)
+  # Parse MERGE branches: WHEN MATCHED [AND cond] THEN ... / WHEN NOT MATCHED [AND cond] THEN ...
+  while p.match(tkWhen):
+    var isNotMatched = p.match(tkNot)
+    discard p.expect(tkMatched)
+    # Optional AND <condition>
+    if p.match(tkAnd):
+      result.mergeMatchedCondition = p.parseExpr()
+    discard p.expect(tkThen)
+    if p.peek().kind == tkDelete:
+      discard p.advance()
+      if not isNotMatched:
+        result.mergeMatchedDelete = true
+      else:
+        # WHEN NOT MATCHED THEN DELETE is non-standard but treat as no-op
+        discard
+    elif p.peek().kind == tkDo:
+      discard p.advance()  # consume DO
+      discard p.expect(tkNothing)
+      if isNotMatched:
+        result.mergeNotMatchedNothing = true
+    elif p.peek().kind == tkInsert:
+      discard p.advance()
       discard p.expect(tkLParen)
       result.mergeNotMatchedInsert.add(Node(kind: nkIdent, identName: p.expect(tkIdent).value))
       while p.match(tkComma):
@@ -940,10 +964,8 @@ proc parseMerge(p: var Parser): Node =
       while p.match(tkComma):
         result.mergeNotMatchedValues.add(p.parseExpr())
       discard p.expect(tkRParen)
-    else:
-      discard p.expect(tkMatched)
-      discard p.expect(tkThen)
-      discard p.expect(tkUpdate)
+    elif p.peek().kind == tkUpdate:
+      discard p.advance()
       discard p.expect(tkSet)
       let col = p.expect(tkIdent).value
       discard p.expect(tkEq)
@@ -1078,13 +1100,6 @@ proc parseCreateTable(p: var Parser): Node =
             elif p.peek().kind == tkRestrict:
               discard p.advance()
               cst.cstOnUpdate = "RESTRICT"
-            elif p.peek().kind == tkSet:
-              discard p.advance()
-              discard p.match(tkNull)
-              cst.cstOnDelete = "SET NULL"
-            elif p.peek().kind == tkRestrict:
-              discard p.advance()
-              cst.cstOnDelete = "RESTRICT"
           elif p.peek().kind == tkUpdate:
             discard p.advance()
             if p.peek().kind == tkCascade:

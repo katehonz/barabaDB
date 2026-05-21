@@ -65,9 +65,11 @@ proc loadExistingDatabases*(reg: DatabaseRegistry) =
         info("Loading database '" & dbName & "' from " & dbDir)
         let db = newLSMTree(dbDir)
         let ctx = reg.ctxFactory(db, reg)
+        acquire(reg.lock)
         reg.databases[dbName] = DatabaseInfo(
           name: dbName, db: db, ctx: ctx, activeConnections: 0
         )
+        release(reg.lock)
 
 proc setDatabase*(reg: DatabaseRegistry, name: string, db: LSMTree, ctx: ContextRef) =
   acquire(reg.lock)
@@ -80,14 +82,20 @@ proc ensureDefaultDatabase*(reg: DatabaseRegistry) =
     raise newException(ValueError, "Context factory not set. Call setContextFactory first.")
 
   let defaultDbName = reg.defaultDbName
-  if defaultDbName notin reg.databases:
+  acquire(reg.lock)
+  let exists = defaultDbName in reg.databases
+  release(reg.lock)
+
+  if not exists:
     let dbDir = reg.dataRoot / defaultDbName
     info("Creating default database at " & dbDir)
     let db = newLSMTree(dbDir)
     let ctx = reg.ctxFactory(db, reg)
+    acquire(reg.lock)
     reg.databases[defaultDbName] = DatabaseInfo(
       name: defaultDbName, db: db, ctx: ctx, activeConnections: 0
     )
+    release(reg.lock)
 
 proc getOrCreateDatabase*(reg: DatabaseRegistry, name: string): DatabaseInfo =
   if not isValidDbName(name):
@@ -135,29 +143,30 @@ proc dropDatabase*(reg: DatabaseRegistry, name: string): bool =
     return false
 
   acquire(reg.lock)
-  defer: release(reg.lock)
-
   if name notin reg.databases:
+    release(reg.lock)
     return false
 
   if name == reg.defaultDbName:
+    release(reg.lock)
     raise newException(ValueError, "Cannot drop the default database")
 
   let info = reg.databases[name]
   if info.activeConnections > 0:
+    release(reg.lock)
     raise newException(ValueError,
       "Cannot drop database '" & name & "': " &
       $info.activeConnections & " active connections")
 
-  # Close LSMTree
-  info.db.close()
+  # Remove from registry first so no new references can be obtained
+  reg.databases.del(name)
+  release(reg.lock)
 
-  # Remove data directory
+  # Close LSMTree and remove directory outside the lock
+  info.db.close()
   let dbDir = reg.dataRoot / name
   if dirExists(dbDir):
     removeDir(dbDir)
-
-  reg.databases.del(name)
   true
 
 proc listDatabases*(reg: DatabaseRegistry): seq[string] =

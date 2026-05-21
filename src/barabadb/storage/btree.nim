@@ -151,10 +151,149 @@ proc len*[K, V](btree: BTreeIndex[K, V]): int =
   finally:
     release(btree.lock)
 
+proc minKeysForLeaf[K, V](node: BTreeNode[K, V], order: int): int =
+  if node.keys.len == 0: return 0
+  return (order div 2) - 1
+
+proc borrowFromLeft[K, V](node: BTreeNode[K, V], parent: BTreeNode[K, V], parentIdx: int, order: int) =
+  ## Borrow one key from the left sibling.
+  let sibling = parent.children[parentIdx - 1]
+  if node.isLeaf:
+    # Borrow from leaf sibling
+    let borrowKey = sibling.keys[^1]
+    let borrowVal = sibling.values[^1]
+    node.keys.insert(borrowKey, 0)
+    node.values.insert(borrowVal, 0)
+    sibling.keys.setLen(sibling.keys.len - 1)
+    sibling.values.setLen(sibling.values.len - 1)
+    parent.keys[parentIdx - 1] = node.keys[0]
+  else:
+    # Borrow from internal sibling
+    let borrowKey = sibling.keys[^1]
+    let borrowChild = sibling.children[^1]
+    let parentSep = parent.keys[parentIdx - 1]
+    node.keys.insert(parentSep, 0)
+    node.children.insert(borrowChild, 0)
+    sibling.keys.setLen(sibling.keys.len - 1)
+    sibling.children.setLen(sibling.children.len - 1)
+    parent.keys[parentIdx - 1] = borrowKey
+
+proc borrowFromRight[K, V](node: BTreeNode[K, V], parent: BTreeNode[K, V], parentIdx: int, order: int) =
+  ## Borrow one key from the right sibling.
+  let sibling = parent.children[parentIdx + 1]
+  if node.isLeaf:
+    let borrowKey = sibling.keys[0]
+    let borrowVal = sibling.values[0]
+    node.keys.add(borrowKey)
+    node.values.add(borrowVal)
+    sibling.keys.delete(0)
+    sibling.values.delete(0)
+    parent.keys[parentIdx] = sibling.keys[0]
+  else:
+    let borrowKey = sibling.keys[0]
+    let borrowChild = sibling.children[0]
+    let parentSep = parent.keys[parentIdx]
+    node.keys.add(parentSep)
+    node.children.add(borrowChild)
+    sibling.keys.delete(0)
+    sibling.children.delete(0)
+    parent.keys[parentIdx] = borrowKey
+
+proc mergeWithLeft[K, V](node: BTreeNode[K, V], parent: BTreeNode[K, V], parentIdx: int) =
+  ## Merge with left sibling, pulling down separator from parent.
+  let sibling = parent.children[parentIdx - 1]
+  let sepKey = parent.keys[parentIdx - 1]
+  if node.isLeaf:
+    sibling.keys.add(sepKey)
+    sibling.values.add(newSeq[V]())
+    for i in 0..<node.keys.len:
+      sibling.keys.add(node.keys[i])
+      sibling.values.add(node.values[i])
+    sibling.next = node.next
+  else:
+    sibling.keys.add(sepKey)
+    for i in 0..<node.keys.len:
+      sibling.keys.add(node.keys[i])
+    for i in 0..<node.children.len:
+      sibling.children.add(node.children[i])
+  sibling.keys.setLen(sibling.keys.len)
+  parent.keys.delete(parentIdx - 1)
+  parent.children.delete(parentIdx)
+
+proc mergeWithRight[K, V](node: BTreeNode[K, V], parent: BTreeNode[K, V], parentIdx: int) =
+  ## Merge with right sibling, pulling down separator from parent.
+  let sibling = parent.children[parentIdx + 1]
+  let sepKey = parent.keys[parentIdx]
+  if node.isLeaf:
+    node.keys.add(sepKey)
+    node.values.add(newSeq[V]())
+    for i in 0..<sibling.keys.len:
+      node.keys.add(sibling.keys[i])
+      node.values.add(sibling.values[i])
+    node.next = sibling.next
+  else:
+    node.keys.add(sepKey)
+    for i in 0..<sibling.keys.len:
+      node.keys.add(sibling.keys[i])
+    for i in 0..<sibling.children.len:
+      node.children.add(sibling.children[i])
+  parent.keys.delete(parentIdx)
+  parent.children.delete(parentIdx + 1)
+
+proc findParentOfKey[K, V](node: BTreeNode[K, V], target: BTreeNode[K, V]): (BTreeNode[K, V], int) =
+  ## Find parent and index of target child. Returns (nil, -1) if not found.
+  if node == nil: return (nil, -1)
+  for i in 0..<node.children.len:
+    if node.children[i] == target:
+      return (node, i)
+    let (p, idx) = findParentOfKey(node.children[i], target)
+    if p != nil:
+      return (p, idx)
+  return (nil, -1)
+
+proc rebalanceAfterDelete[K, V](node: BTreeNode[K, V], root: var BTreeNode[K, V], order: int) =
+  ## Ensure node has enough keys after deletion. Borrow or merge if needed.
+  if node.keys.len >= minKeysForLeaf(node, order):
+    return
+
+  let (parent, parentIdx) = findParentOfKey(root, node)
+  if parent == nil:
+    # This is the root; if empty, keep it empty
+    return
+
+  let hasLeft = parentIdx > 0
+  let hasRight = parentIdx < parent.children.len - 1
+
+  # Try to borrow from left sibling
+  if hasLeft:
+    let leftSibling = parent.children[parentIdx - 1]
+    let minForLeft = minKeysForLeaf(leftSibling, order)
+    if leftSibling.keys.len > minForLeft:
+      borrowFromLeft(node, parent, parentIdx, order)
+      return
+
+  # Try to borrow from right sibling
+  if hasRight:
+    let rightSibling = parent.children[parentIdx + 1]
+    let minForRight = minKeysForLeaf(rightSibling, order)
+    if rightSibling.keys.len > minForRight:
+      borrowFromRight(node, parent, parentIdx, order)
+      return
+
+  # Must merge with a sibling
+  if hasLeft:
+    mergeWithLeft(node, parent, parentIdx)
+  elif hasRight:
+    mergeWithRight(node, parent, parentIdx)
+
+  # Recursively rebalance parent if it fell below minimum
+  if parent == root and parent.keys.len == 0 and parent.children.len == 1:
+    root = parent.children[0]
+
 proc remove*[K, V](btree: var BTreeIndex[K, V], key: K, value: V) =
   acquire(btree.lock)
   try:
-    proc removeRec(node: BTreeNode[K, V]): bool =
+    proc removeRec(node: BTreeNode[K, V], root: var BTreeNode[K, V], order: int): bool =
       var i = 0
       while i < node.keys.len and key > node.keys[i]:
         inc i
@@ -176,9 +315,22 @@ proc remove*[K, V](btree: var BTreeIndex[K, V], key: K, value: V) =
             return true
         return false
       else:
-        return removeRec(node.children[i])
+        # Internal node: recurse into child
+        let found = removeRec(node.children[i], root, order)
+        if found:
+          # If the key was in the internal node (separator), update it
+          if i < node.keys.len and key == node.keys[i]:
+            # Key was removed from leaf, update separator
+            if node.children[i].keys.len > 0:
+              node.keys[i] = node.children[i].keys[0]
+          # Rebalance the child if needed
+          rebalanceAfterDelete(node.children[i], root, order)
+        return found
 
-    if removeRec(btree.root):
+    if removeRec(btree.root, btree.root, btree.order):
       dec btree.size
+      # Shrink root if it has only one child and is not a leaf
+      if not btree.root.isLeaf and btree.root.keys.len == 0 and btree.root.children.len == 1:
+        btree.root = btree.root.children[0]
   finally:
     release(btree.lock)

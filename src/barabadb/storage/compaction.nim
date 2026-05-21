@@ -72,6 +72,7 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
   var allEntries: seq[Entry] = @[]
 
   # Read all entries from SSTable files
+  var failedLoad = false
   for t in tables:
     try:
       let sst = loadSSTable(t.path)
@@ -80,8 +81,13 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
         if found:
           allEntries.add(entry)
           inc entriesRead
-    except:
-      discard
+    except CatchableError as e:
+      echo "[ERROR] Failed to load SSTable for compaction: ", t.path, ": ", e.msg
+      failedLoad = true
+      break
+
+  if failedLoad:
+    return CompactionResult()
 
   # Sort by key, then by timestamp (newest first for dedup)
   allEntries.sort(proc(a, b: Entry): int =
@@ -120,12 +126,19 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
     createdAt: tables[^1].createdAt,
   )
 
+  # Verify output SSTable before deleting sources
+  let (ok, msg) = verifySSTable(outputPath)
+  if not ok:
+    echo "[ERROR] Compaction output verification failed: ", msg
+    try: removeFile(outputPath) except: discard
+    return CompactionResult()
+
   # Remove old SSTable files
   for t in tables:
     try:
       removeFile(t.path)
-    except:
-      discard
+    except CatchableError as e:
+      echo "[WARN] Failed to remove old SSTable: ", t.path, ": ", e.msg
 
   # Update level arrays
   var newTables: seq[SSTableMeta] = @[]
@@ -166,7 +179,6 @@ type
     key*: string
     data*: seq[byte]
     accessCount*: int
-    lastAccess*: int64
     dirty*: bool
 
   PageCache* = ref object
@@ -196,7 +208,6 @@ proc evict*(cache: PageCache) =
 proc put*(cache: PageCache, key: string, data: seq[byte]) =
   if key in cache.pages:
     cache.pages[key].data = data
-    cache.pages[key].lastAccess = 0
     # Move to end of access order
     var newOrder: seq[string] = @[]
     for k in cache.accessOrder:
@@ -208,7 +219,7 @@ proc put*(cache: PageCache, key: string, data: seq[byte]) =
     cache.evict()
     cache.pages[key] = CacheEntry(
       key: key, data: data,
-      accessCount: 1, lastAccess: 0, dirty: false,
+      accessCount: 1, dirty: false,
     )
     cache.accessOrder.add(key)
 

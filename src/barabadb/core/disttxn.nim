@@ -23,6 +23,8 @@ type
     prepared*: bool
     committed*: bool
     aborted*: bool
+    commitPending*: bool
+    rollbackPending*: bool
     errorMsg*: string
 
   DistributedTransaction* = ref object
@@ -94,19 +96,15 @@ proc sendDistTxnRpc(host: string, port: int, txnId: uint64, action: string, time
   ## Send 2PC RPC to participant node via TCP text protocol.
   ## Protocol: "DISTTXN <txnId> <action>\n" where action = PREPARE|COMMIT|ROLLBACK
   ## Response: "OK\n" or "ERR <msg>\n"
-  try:
-    var sock = newSocket()
-    if not connectWithTimeout(sock, host, Port(port), timeoutMs):
-      sock.close()
-      return false
-    let msg = "DISTTXN " & $txnId & " " & action & "\n"
-    sock.send(msg)
-    var response = ""
-    sock.readLine(response)
-    sock.close()
-    return response.strip() == "OK"
-  except CatchableError:
+  var sock = newSocket()
+  defer: sock.close()
+  if not connectWithTimeout(sock, host, Port(port), timeoutMs):
     return false
+  let msg = "DISTTXN " & $txnId & " " & action & "\n"
+  sock.send(msg)
+  var response = ""
+  sock.readLine(response)
+  return response.strip() == "OK"
 
 type
   ParticipantInfo = object
@@ -147,13 +145,20 @@ proc prepare*(txn: DistributedTransaction): bool =
     for nodeId, _ in txn.participants.mpairs:
       txn.participants[nodeId].prepared = true
   else:
-    # Rollback already-prepared participants
+    # Rollback already-prepared participants; track failures for recovery
+    var rollbackFailed = false
     for nodeId in preparedNodes:
       if txn.participants.hasKey(nodeId):
-        discard sendDistTxnRpc(txn.participants[nodeId].host, txn.participants[nodeId].port, txn.id, "ROLLBACK")
-        txn.participants[nodeId].prepared = false
-        txn.participants[nodeId].aborted = true
+        let ok = sendDistTxnRpc(txn.participants[nodeId].host, txn.participants[nodeId].port, txn.id, "ROLLBACK")
+        if ok:
+          txn.participants[nodeId].prepared = false
+          txn.participants[nodeId].aborted = true
+        else:
+          txn.participants[nodeId].rollbackPending = true
+          rollbackFailed = true
     txn.state = dtsAborted
+    if rollbackFailed:
+      echo "[WARN] 2PC rollback failed for some participants of txn ", txn.id, " — recovery needed"
   release(txn.lock)
   return allOk
 
@@ -190,10 +195,15 @@ proc commit*(txn: DistributedTransaction): bool =
     for nodeId, _ in txn.participants.mpairs:
       txn.participants[nodeId].committed = true
   elif committedNodes.len > 0:
+    # Partial commit — mark committed, flag uncommitted for recovery
     txn.state = dtsCommitted
     for nodeId in committedNodes:
       if txn.participants.hasKey(nodeId):
         txn.participants[nodeId].committed = true
+    for nodeId, p in txn.participants.mpairs:
+      if not p.committed:
+        p.commitPending = true
+    echo "[WARN] 2PC partial commit for txn ", txn.id, " (", committedNodes.len, "/", txn.participants.len, ") — recovery needed"
   else:
     txn.state = dtsAborted
   release(txn.lock)
@@ -288,7 +298,10 @@ proc execute*(saga: Saga): bool =
       # Rollback: compensate completed steps in reverse order
       for j in countdown(saga.completedSteps.len - 1, 0):
         let idx = saga.completedSteps[j]
-        saga.steps[idx].compensate()
+        try:
+          saga.steps[idx].compensate()
+        except CatchableError as e:
+          echo "[ERROR] Saga compensation failed for step ", idx, ": ", e.msg
       return false
   return true
 

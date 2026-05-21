@@ -184,6 +184,14 @@ proc lastLogTerm*(node: RaftNode): uint64 =
     return 0
   return node.log[^1].term
 
+proc findLogEntryByIndex(node: RaftNode, index: uint64): int =
+  ## Find array position for a logical log index.
+  ## Returns -1 if not found. Does NOT assume index - 1 == array position.
+  for i, entry in node.log:
+    if entry.index == index:
+      return i
+  return -1
+
 proc applyCommitted(node: RaftNode) =
   while node.lastApplied < node.commitIndex:
     let idx = int(node.lastApplied)
@@ -211,6 +219,8 @@ proc becomeFollower*(node: RaftNode, term: uint64) =
   node.currentTerm = term
   node.votedFor = ""
   node.votesReceived.clear()
+  node.nextIndex.clear()
+  node.matchIndex.clear()
   node.saveState()
 
 proc becomeCandidate*(node: RaftNode) =
@@ -266,26 +276,27 @@ proc handleAppendEntries*(node: RaftNode, msg: RaftMessage): RaftMessage =
   if msg.term < node.currentTerm:
     return reply
 
-  if msg.term >= node.currentTerm:
+  if msg.term > node.currentTerm:
     node.becomeFollower(msg.term)
-    node.leaderId = msg.senderId
+  node.leaderId = msg.senderId
 
   # Check if log contains entry at prevLogIndex with prevLogTerm
   if msg.prevLogIndex > 0:
-    if msg.prevLogIndex > uint64(node.log.len):
+    let prevPos = node.findLogEntryByIndex(msg.prevLogIndex)
+    if prevPos < 0:
       return reply
-    if node.log[msg.prevLogIndex - 1].term != msg.prevLogTerm:
+    if node.log[prevPos].term != msg.prevLogTerm:
       # Delete conflicting entries
-      node.log.setLen(int(msg.prevLogIndex - 1))
+      node.log.setLen(prevPos)
       return reply
 
   # Append new entries
   var logChanged = false
   for entry in msg.entries:
-    let idx = int(entry.index - 1)
-    if idx < node.log.len:
-      if node.log[idx].term != entry.term:
-        node.log.setLen(idx)
+    let pos = node.findLogEntryByIndex(entry.index)
+    if pos >= 0:
+      if node.log[pos].term != entry.term:
+        node.log.setLen(pos)
         node.log.add(entry)
         logChanged = true
     else:
@@ -354,6 +365,9 @@ proc handleVoteReply*(node: RaftNode, reply: RaftMessage) =
     node.becomeFollower(reply.term)
     return
 
+  if reply.term < node.currentTerm:
+    return
+
   if node.state != rsCandidate:
     return
 
@@ -365,6 +379,9 @@ proc handleVoteReply*(node: RaftNode, reply: RaftMessage) =
 proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
   if reply.term > node.currentTerm:
     node.becomeFollower(reply.term)
+    return
+
+  if reply.term < node.currentTerm:
     return
 
   if node.state != rsLeader:

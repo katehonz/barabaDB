@@ -209,7 +209,7 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
   if mf.regions.len == 0:
     raise newException(IOError, "Cannot mmap SSTable for CRC: " & path)
 
-  let headerSize = 36
+  let headerSize = 40
   let dataCrc = crc32(unsafeAddr mf.regions[0].data[headerSize], int(indexOffset) - headerSize)
   let indexCrc = crc32(unsafeAddr mf.regions[0].data[int(indexOffset)], int(bloomOffset) - int(indexOffset))
   let bloomCrc = crc32(unsafeAddr mf.regions[0].data[int(bloomOffset)], int(footerOffset) - int(bloomOffset))
@@ -290,7 +290,7 @@ proc verifySSTable*(path: string): (bool, string) =
   if reserved != 0:
     return (false, "Non-zero reserved field in footer: " & path)
 
-  let headerSize = 36
+  let headerSize = 40
   let computedDataCrc = crc32(unsafeAddr mf.regions[0].data[headerSize], indexOffset - headerSize)
   let computedIndexCrc = crc32(unsafeAddr mf.regions[0].data[indexOffset], bloomOffset - indexOffset)
   let computedBloomCrc = crc32(unsafeAddr mf.regions[0].data[bloomOffset], footerOffset - bloomOffset)
@@ -331,7 +331,7 @@ proc loadSSTable*(path: string): SSTable =
       let storedDataCrc = mf.readUint32(footerOffset)
       let storedIndexCrc = mf.readUint32(footerOffset + 4)
       let storedBloomCrc = mf.readUint32(footerOffset + 8)
-      let headerSize = 36
+      let headerSize = 40
       let computedDataCrc = crc32(unsafeAddr mf.regions[0].data[headerSize], indexOffset - headerSize)
       let computedIndexCrc = crc32(unsafeAddr mf.regions[0].data[indexOffset], bloomOffset - indexOffset)
       let computedBloomCrc = crc32(unsafeAddr mf.regions[0].data[bloomOffset], footerOffset - bloomOffset)
@@ -805,9 +805,11 @@ proc flushUnsafe(db: LSMTree) =
   except CatchableError as e:
     echo "[WARN] Failed to write MANIFEST: ", e.msg
 
+  acquire(db.walLock)
   db.wal.writeCommit(uint64(getMonoTime().ticks()))
   db.wal.maybeRotate()
   db.wal.sync()
+  release(db.walLock)
 
 proc flush*(db: LSMTree) =
   acquire(db.lock)
@@ -819,36 +821,40 @@ proc checkpoint*(db: LSMTree) =
   ## rotate WAL, and write MANIFEST. This provides a clean boundary
   ## for online backup without stopping the server.
   acquire(db.lock)
-  
+
   # Flush any pending immutable memtable first
   if db.immutableMem.len > 0:
     flushUnsafe(db)
-  
+
   # Freeze current memtable so writes can continue on a new one
   if db.memTable.len > 0:
     db.immutableMem = db.memTable
     db.memTable = newMemTable(db.memMaxSize)
-  
-  release(db.lock)
-  
-  # Flush the frozen memtable outside the lock (writes proceed concurrently)
+
+  # Flush the frozen memtable
   if db.immutableMem.len > 0:
     flushUnsafe(db)
-  
+
   # Rotate WAL for a clean backup boundary
+  acquire(db.walLock)
   db.wal.maybeRotate()
   db.wal.sync()
+  release(db.walLock)
+
+  release(db.lock)
 
 proc close*(db: LSMTree) =
   acquire(db.lock)
-  defer: release(db.lock)
-  # Flush both memtables to avoid data loss
-  while db.immutableMem.len > 0:
+  try:
+    # Flush both memtables to avoid data loss
+    while db.immutableMem.len > 0:
+      flushUnsafe(db)
     flushUnsafe(db)
-  flushUnsafe(db)
-  for sst in db.sstables.mitems:
-    sst.close()
-  db.wal.close()
+    for sst in db.sstables.mitems:
+      sst.close()
+    db.wal.close()
+  finally:
+    release(db.lock)
 
 proc memTableSize*(db: LSMTree): int =
   acquire(db.lock)

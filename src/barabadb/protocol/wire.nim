@@ -133,8 +133,9 @@ proc readUint64*(buf: openArray[byte], pos: var int): uint64 =
   pos += 8
 
 proc readString*(buf: openArray[byte], pos: var int): string =
-  let len = int(readUint32(buf, pos))
-  if len > MaxWireStringLen:
+  let rawLen = readUint32(buf, pos)
+  let len = int(rawLen)
+  if rawLen > uint32(MaxWireStringLen) or len < 0:
     raise newException(ValueError, "Wire protocol: string exceeds max length")
   if pos + len > buf.len:
     raise newException(ValueError, "Wire protocol: truncated string data")
@@ -144,8 +145,9 @@ proc readString*(buf: openArray[byte], pos: var int): string =
   pos += len
 
 proc readBytes*(buf: openArray[byte], pos: var int): seq[byte] =
-  let len = int(readUint32(buf, pos))
-  if len > MaxWireStringLen:
+  let rawLen = readUint32(buf, pos)
+  let len = int(rawLen)
+  if rawLen > uint32(MaxWireStringLen) or len < 0:
     raise newException(ValueError, "Wire protocol: bytes exceed max length")
   if pos + len > buf.len:
     raise newException(ValueError, "Wire protocol: truncated bytes data")
@@ -213,12 +215,15 @@ proc deserializeValue*(buf: openArray[byte], pos: var int, depth: int = 0): Wire
   case kind
   of fkNull: result = WireValue(kind: fkNull)
   of fkBool:
+    if pos >= buf.len: raise newException(ValueError, "Wire protocol: truncated message at bool")
     result = WireValue(kind: fkBool, boolVal: buf[pos] != 0)
     inc pos
   of fkInt8:
+    if pos >= buf.len: raise newException(ValueError, "Wire protocol: truncated message at int8")
     result = WireValue(kind: fkInt8, int8Val: cast[int8](buf[pos]))
     inc pos
   of fkInt16:
+    if pos + 1 >= buf.len: raise newException(ValueError, "Wire protocol: truncated message at int16")
     var val: int16
     var bytes: array[2, byte]
     for i in 0..1: bytes[i] = buf[pos + i]

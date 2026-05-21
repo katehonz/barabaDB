@@ -80,32 +80,32 @@ proc readAt*(mf: MmapFile, offset: int, size: int): seq[byte] =
   if mf.regions.len == 0:
     return @[]
   let region = mf.regions[0]
-  if offset + size > region.size:
+  if offset < 0 or size < 0 or offset + size > region.size:
     return @[]
   result = newSeq[byte](size)
   copyMem(addr result[0], unsafeAddr region.data[offset], size)
 
 proc readByte*(mf: MmapFile, offset: int): byte =
-  if mf.regions.len == 0 or offset >= mf.regions[0].size:
+  if mf.regions.len == 0 or offset < 0 or offset >= mf.regions[0].size:
     return 0
   return mf.regions[0].data[offset]
 
 proc readUint32*(mf: MmapFile, offset: int): uint32 =
-  if mf.regions.len == 0 or offset + 4 > mf.regions[0].size:
+  if mf.regions.len == 0 or offset < 0 or offset + 4 > mf.regions[0].size:
     return 0
   var val: uint32
   copyMem(addr val, unsafeAddr mf.regions[0].data[offset], 4)
   return val
 
 proc readUint64*(mf: MmapFile, offset: int): uint64 =
-  if mf.regions.len == 0 or offset + 8 > mf.regions[0].size:
+  if mf.regions.len == 0 or offset < 0 or offset + 8 > mf.regions[0].size:
     return 0
   var val: uint64
   copyMem(addr val, unsafeAddr mf.regions[0].data[offset], 8)
   return val
 
 proc readString*(mf: MmapFile, offset: int, size: int): string =
-  if mf.regions.len == 0 or offset + size > mf.regions[0].size:
+  if mf.regions.len == 0 or offset < 0 or size < 0 or offset + size > mf.regions[0].size:
     return ""
   result = newString(size)
   copyMem(addr result[0], unsafeAddr mf.regions[0].data[offset], size)
@@ -134,7 +134,7 @@ proc close*(mf: MmapFile) =
   for region in mf.regions:
     discard munmap(region.data, region.size)
     if region.fd != -1:
-      discard close(cint(region.fd))
+      discard posix.close(cint(region.fd))
   mf.regions.setLen(0)
 
 proc size*(mf: MmapFile): int = mf.totalSize

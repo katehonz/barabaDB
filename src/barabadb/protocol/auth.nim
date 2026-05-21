@@ -76,7 +76,8 @@ proc hmacSha256(key, message: string): string =
     var ctx = initSha_256()
     ctx.update(k.toOpenArray(0, k.len-1))
     let hash = ctx.digest()
-    k = $hash
+    k = newString(32)
+    for i in 0..<32: k[i] = char(hash[i])
   while k.len < 64:
     k &= "\x00"
 
@@ -166,17 +167,25 @@ proc verifyToken*(am: AuthManager, token: string): (bool, JWTClaims) =
           val &= payload[i]
           inc i
       # Assign to claims
+      var parseOk = true
       case key
       of "sub": claims.sub = val
       of "role": claims.role = val
       of "database": claims.database = val
       of "iss": claims.iss = val
       of "aud": claims.aud = val
-      of "exp": claims.exp = parseInt(val)
-      of "iat": claims.iat = parseInt(val)
-      of "nbf": claims.nbf = parseInt(val)
+      of "exp":
+        try: claims.exp = parseInt(val)
+        except ValueError: parseOk = false
+      of "iat":
+        try: claims.iat = parseInt(val)
+        except ValueError: parseOk = false
+      of "nbf":
+        try: claims.nbf = parseInt(val)
+        except ValueError: parseOk = false
       of "jti": claims.jti = val
       else: discard
+      if not parseOk: return (false, JWTClaims())
     if i < payload.len and payload[i] == ',':
       inc i
     inc i
@@ -205,7 +214,7 @@ proc startScram*(am: AuthManager, clientFirstMessage: string): string =
   ## Start SCRAM authentication. Returns server-first-message.
   let (_, username, clientNonce) = parseClientFirst(clientFirstMessage)
   if username notin am.scramUsers:
-    raise newException(ValueError, "Unknown user: " & username)
+    raise newException(ValueError, "Authentication failed")
 
   let cred = am.scramUsers[username]
   let serverNonce = generateNonce()

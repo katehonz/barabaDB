@@ -137,8 +137,9 @@ proc isVisible(tm: TxnManager, txn: Transaction, version: VersionedRecord): bool
       if deleter in tm.activeTxns:
         if tm.activeTxns[deleter].state == tsCommitted:
           return false
-      else:
-        return false
+      elif deleter in tm.committedTxnsSet:
+        return false  # deleter committed after snapshot, conservatively show record
+      # Deleter not in active, committed, or aborted — unknown state, show record
 
   return true
 
@@ -195,6 +196,7 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
           if victimId in tm.activeTxns:
             tm.activeTxns[victimId].state = tsAborted
             tm.activeTxns.del(victimId)
+        tm.deadlockDetector.removeWait(uint64(txn.id), uint64(otherId))
         release(tm.lock)
         return false  # write-write conflict with uncommitted txn
 
@@ -255,6 +257,7 @@ proc delete*(tm: TxnManager, txn: Transaction, key: string): bool =
           if victimId in tm.activeTxns:
             tm.activeTxns[victimId].state = tsAborted
             tm.activeTxns.del(victimId)
+        tm.deadlockDetector.removeWait(uint64(txn.id), uint64(otherId))
         release(tm.lock)
         return false
 
@@ -326,7 +329,7 @@ proc commit*(tm: TxnManager, txn: Transaction): bool =
   release(tm.lock)
   return true
 
-proc compactVersions*(tm: TxnManager) =
+proc compactVersions(tm: TxnManager) =
   ## Remove old overwritten versions that are no longer visible to any active transaction.
   for key, versions in tm.globalVersions.mpairs:
     if versions.len <= 3:

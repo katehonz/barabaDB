@@ -3,6 +3,7 @@ import std/tables
 import std/sets
 import std/locks
 import std/net
+import std/posix
 import std/strutils
 import std/nativesockets
 import std/monotimes
@@ -88,29 +89,29 @@ proc connectWithTimeout(sock: Socket, host: string, port: Port, timeoutMs: int):
     var fds = @[sock.getFd]
     if selectWrite(fds, timeoutMs) <= 0:
       return false
+    # Verify connection actually succeeded via SO_ERROR
+    var err: cint = 0
+    var errLen = cint(sizeof(err)).SockLen
+    discard posix.getsockopt(sock.getFd, 1'i32, 4'i32, addr err, addr errLen)
     sock.getFd.setBlocking(true)
-    return true
+    return err == 0
 
 proc shipToReplica(replica: Replica, lsn: uint64, data: seq[byte]): bool =
   ## Send replication data to a replica via TCP.
   ## Protocol: "REP <lsn> <dataLen>\n<data>"
   ## Response: "ACK <lsn>\n" on success
-  try:
-    var sock = newSocket()
-    if not connectWithTimeout(sock, replica.host, Port(replica.port), 500):
-      sock.close()
-      return false
-    let header = "REP " & $lsn & " " & $data.len & "\n"
-    sock.send(header)
-    if data.len > 0:
-      sock.send(cast[string](data))
-    var response = ""
-    sock.readLine(response)
-    sock.close()
-    let parts = response.strip().split(" ")
-    return parts.len >= 2 and parts[0] == "ACK"
-  except:
+  var sock = newSocket()
+  defer: sock.close()
+  if not connectWithTimeout(sock, replica.host, Port(replica.port), 500):
     return false
+  let header = "REP " & $lsn & " " & $data.len & "\n"
+  sock.send(header)
+  if data.len > 0:
+    sock.send(cast[string](data))
+  var response = ""
+  sock.readLine(response)
+  let parts = response.strip().split(" ")
+  return parts.len >= 2 and parts[0] == "ACK"
 
 proc writeLsn*(rm: ReplicationManager, data: seq[byte]): uint64 =
   acquire(rm.lock)
@@ -135,11 +136,20 @@ proc writeLsn*(rm: ReplicationManager, data: seq[byte]): uint64 =
         rm.pendingAcks[lsn].incl(replica.id)
     release(rm.lock)
     var ackCount = 0
+    var ackedIds: seq[string] = @[]
     for replica in replicasToShip:
       if shipToReplica(replica, lsn, data):
         inc ackCount
+        ackedIds.add(replica.id)
+    # Clean up pendingAcks for successfully acked replicas
+    acquire(rm.lock)
+    if lsn in rm.pendingAcks:
+      for id in ackedIds:
+        rm.pendingAcks[lsn].excl(id)
+      if rm.pendingAcks[lsn].len == 0:
+        rm.pendingAcks.del(lsn)
+    release(rm.lock)
     if replicasToShip.len > 0 and ackCount < replicasToShip.len:
-      # Not all replicas acked — log but still return LSN (caller decides)
       when defined(debug):
         echo "Replication sync: only ", ackCount, "/", replicasToShip.len, " replicas acked for LSN ", lsn
     return lsn
@@ -153,11 +163,21 @@ proc writeLsn*(rm: ReplicationManager, data: seq[byte]): uint64 =
           inc count
     release(rm.lock)
     var ackCount = 0
+    var ackedIds: seq[string] = @[]
     for replica in replicasToShip:
       if shipToReplica(replica, lsn, data):
         inc ackCount
+        ackedIds.add(replica.id)
         if ackCount >= rm.syncReplicaCount:
           break
+    # Clean up pendingAcks for successfully acked replicas
+    acquire(rm.lock)
+    if lsn in rm.pendingAcks:
+      for id in ackedIds:
+        rm.pendingAcks[lsn].excl(id)
+      if rm.pendingAcks[lsn].len == 0:
+        rm.pendingAcks.del(lsn)
+    release(rm.lock)
     if replicasToShip.len > 0 and ackCount == 0 and rm.syncReplicaCount > 0:
       when defined(debug):
         echo "Replication semi-sync: no replicas acked for LSN ", lsn
@@ -226,55 +246,83 @@ proc switchMode*(rm: ReplicationManager, mode: ReplicationMode) =
 
 proc healthCheck*(rm: ReplicationManager) =
   acquire(rm.lock)
+  var replicas: seq[(string, Replica)] = @[]
   for id, replica in rm.replicas:
     if replica.connected:
-      # Probe connection by sending a heartbeat
-      var sock = newSocket()
+      replicas.add((id, replica))
+  release(rm.lock)
+
+  for (id, replica) in replicas:
+    var connected = true
+    var sock = newSocket()
+    try:
       if not connectWithTimeout(sock, replica.host, Port(replica.port), 1000):
-        replica.connected = false
-        replica.state = rsDisconnected
+        connected = false
       else:
+        defer: sock.close()
         sock.send("PING\n")
         var response = ""
         try:
           sock.readLine(response)
           if response.strip() != "PONG":
-            replica.connected = false
-            replica.state = rsDisconnected
+            connected = false
         except:
-          replica.connected = false
-          replica.state = rsDisconnected
-        sock.close()
-  release(rm.lock)
+          connected = false
+    except:
+      connected = false
+    finally:
+      sock.close()
+
+    if not connected:
+      acquire(rm.lock)
+      if id in rm.replicas:
+        rm.replicas[id].connected = false
+        rm.replicas[id].state = rsDisconnected
+      release(rm.lock)
 
 proc reconnectReplica*(rm: ReplicationManager, id: string): bool =
-  acquire(rm.lock)
   result = false
+  var replica: Replica
+  var found = false
+  acquire(rm.lock)
   if id in rm.replicas:
-    let replica = rm.replicas[id]
-    if not replica.connected and replica.host.len > 0 and replica.port > 0:
-      var sock = newSocket()
-      if connectWithTimeout(sock, replica.host, Port(replica.port), 2000):
-        replica.connected = true
-        replica.state = rsStreaming
-        replica.lastSeen = getMonoTime().ticks()
-        result = true
-      sock.close()
+    replica = rm.replicas[id]
+    found = true
   release(rm.lock)
+  if not found: return false
+  if replica.connected or replica.host.len == 0 or replica.port == 0: return false
+
+  var sock = newSocket()
+  defer: sock.close()
+  if connectWithTimeout(sock, replica.host, Port(replica.port), 2000):
+    acquire(rm.lock)
+    if id in rm.replicas:
+      rm.replicas[id].connected = true
+      rm.replicas[id].state = rsStreaming
+      rm.replicas[id].lastSeen = getMonoTime().ticks()
+      result = true
+    release(rm.lock)
 
 proc reconnectAll*(rm: ReplicationManager): int =
   acquire(rm.lock)
-  result = 0
+  var candidates: seq[(string, Replica)] = @[]
   for id, replica in rm.replicas:
     if not replica.connected and replica.host.len > 0 and replica.port > 0:
-      var sock = newSocket()
-      if connectWithTimeout(sock, replica.host, Port(replica.port), 2000):
-        replica.connected = true
-        replica.state = rsStreaming
-        replica.lastSeen = getMonoTime().ticks()
-        inc result
-      sock.close()
+      candidates.add((id, replica))
   release(rm.lock)
+
+  result = 0
+  for (id, replica) in candidates:
+    var sock = newSocket()
+    defer: sock.close()
+    if connectWithTimeout(sock, replica.host, Port(replica.port), 2000):
+      acquire(rm.lock)
+      if id in rm.replicas:
+        rm.replicas[id].connected = true
+        rm.replicas[id].state = rsStreaming
+        rm.replicas[id].lastSeen = getMonoTime().ticks()
+      release(rm.lock)
+      inc result
 
 proc startHealthCheck*(rm: ReplicationManager, intervalMs: int = 5000) {.async.} =
   while true:

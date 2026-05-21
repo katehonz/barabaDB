@@ -293,10 +293,14 @@ proc handleIncomingGossip(gp: GossipProtocol, data: string, senderAddr: string) 
       gp.members[msg.senderId].lastSeen = getMonoTime().ticks()
     elif msg.senderId != gp.self.id:
       var host = senderAddr
+      var port = gp.gossipPort
       if ':' in host:
-        host = host.split(":")[0]
+        let parts = host.split(":")
+        host = parts[0]
+        if parts[1].len > 0:
+          port = try: parseInt(parts[1]) except: gp.gossipPort
       let newNode = GossipNode(
-        id: msg.senderId, host: host, port: gp.gossipPort,
+        id: msg.senderId, host: host, port: port,
         state: nsAlive, incarnation: msg.senderIncarnation,
         lastSeen: getMonoTime().ticks(),
       )

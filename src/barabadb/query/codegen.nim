@@ -52,17 +52,33 @@ proc codegenExpr*(expr: IRExpr): StorageOp =
     return nil
   case expr.kind
   of irekLiteral:
-    return nil
+    let op = newStorageOp(sokProject)
+    if expr.literal.kind == vkString:
+      op.columns = @[expr.literal.strVal]
+    return op
   of irekField:
-    return nil
+    let op = newStorageOp(sokProject)
+    op.columns = @[]
+    for p in expr.fieldPath:
+      op.columns.add(p)
+    return op
   of irekUnary:
-    return codegenExpr(expr.unExpr)
+    let child = codegenExpr(expr.unExpr)
+    if child != nil:
+      return child
+    return nil
   of irekBinary:
     let left = codegenExpr(expr.binLeft)
     let right = codegenExpr(expr.binRight)
+    if left != nil:
+      return left
+    if right != nil:
+      return right
     return nil
   of irekAggregate:
-    return nil
+    let op = newStorageOp(sokAggregate)
+    op.aggFuncs = @[("agg", expr.aggOp)]
+    return op
   else:
     return nil
 
@@ -243,6 +259,10 @@ proc estimateCost*(op: StorageOp): float64 =
     var cost = 0.0
     for child in op.children:
       cost += estimateCost(child)
+    # High offset means more rows must be scanned before limiting
+    # LIMIT 10 OFFSET 0 -> cheap; LIMIT 10 OFFSET 9990 -> expensive (scan ~10000)
+    if op.offset > 0:
+      return cost * (1.0 - 0.5 * float64(op.limit) / float64(op.limit + op.offset))
     return cost * 0.5
   of sokHashJoin:
     var cost = 0.0

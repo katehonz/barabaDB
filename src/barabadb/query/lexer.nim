@@ -164,6 +164,8 @@ type
     tkDatabases
     tkUse
     tkShow
+    tkDo
+    tkNothing
 
     tkAutoIncrement
     tkSequence
@@ -377,6 +379,8 @@ const keywords*: Table[string, TokenKind] = {
   "dst": tkDst,
   "merge": tkMerge,
   "matched": tkMatched,
+  "do": tkDo,
+  "nothing": tkNothing,
   "array": tkArray,
   "vector": tkVector,
   "document": tkDocument,
@@ -516,6 +520,8 @@ proc readNumber(l: var Lexer, startLine, startCol: int): Token =
     numStr.add(l.input[l.pos])
     discard l.advance()
   if isFloat:
+    if numStr.endsWith("."):
+      numStr.add("0")
     Token(kind: tkFloatLit, value: numStr, line: startLine, col: startCol)
   else:
     Token(kind: tkIntLit, value: numStr, line: startLine, col: startCol)
@@ -529,6 +535,7 @@ proc readIdent(l: var Lexer, startLine, startCol: int): Token =
       fastRuneAt(l.input, l.pos, run, true)
       ident.add($run)
       inc l.col
+      discard l.advanceRune()
     else:
       break
   let lowerIdent = ident.toLower()

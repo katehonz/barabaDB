@@ -118,10 +118,10 @@ proc loadConfigFromJson*(path: string, cfg: var BaraConfig) =
       if s.hasKey("query_timeout_ms"): cfg.queryTimeoutMs = s["query_timeout_ms"].getInt()
       if s.hasKey("slow_query_threshold_ms"): cfg.slowQueryThresholdMs = s["slow_query_threshold_ms"].getInt()
       if s.hasKey("slow_query_log_path"): cfg.slowQueryLogPath = s["slow_query_log_path"].getStr()
-  except JsonParsingError:
-    discard
-  except KeyError:
-    discard
+  except JsonParsingError as e:
+    echo "[WARN] Failed to parse config file ", path, ": ", e.msg
+  except KeyError as e:
+    echo "[WARN] Missing key in config file ", path, ": ", e.msg
 
 # ----------------------------------------------------------------------
 # Environment Variables
@@ -182,4 +182,4 @@ proc loadConfig*(): BaraConfig =
 proc getEffectiveJwtSecret*(cfg: BaraConfig): string =
   if cfg.jwtSecret.len > 0:
     return cfg.jwtSecret
-  return "baradb-default-secret-change-in-production!"
+  return ""

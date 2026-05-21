@@ -64,12 +64,16 @@ proc hashKey*(key: string): uint64 =
   return uint64(hash(key))
 
 proc getShardHash*(router: ShardRouter, key: string): int =
+  if router.shards.len == 0: return -1
   let h = hashKey(key)
   return int(h mod uint64(router.shards.len))
 
 proc getShardRange*(router: ShardRouter, key: string): int =
   for i, shard in router.shards:
-    if key >= shard.minKey and key <= shard.maxKey:
+    let lastShard = (i == router.shards.len - 1)
+    if key >= shard.minKey and (lastShard or key < shard.maxKey):
+      return i
+    if lastShard and key == shard.maxKey:
       return i
   return -1  # key outside all defined ranges
 
@@ -175,18 +179,22 @@ proc sendMigrationBatch(host: string, port: int, shardId: int,
     return false
 
 proc migrateData*(router: var ShardRouter, nodes: seq[string],
-                  nodeAddrs: Table[string, tuple[host: string, port: int]]) =
+                  nodeAddrs: Table[string, tuple[host: string, port: int]],
+                  oldAssignments: seq[seq[string]] = @[]) =
   ## Migrate data when shard assignments change.
   ## Moves keys out of shards that are no longer owned by local node.
+  ## oldAssignments[i] contains the previous nodeIds for shard i.
   if router.iterateKeys == nil or router.storeKeys == nil:
     return
 
   if router.localNodeId.len == 0:
     return
 
-  for shard in router.shards.mitems:
+  for i in 0..<router.shards.len:
+    let shard = router.shards[i]
+    let wasOwner = oldAssignments.len > i and router.localNodeId in oldAssignments[i]
     let isOwner = router.localNodeId in shard.nodeIds
-    if not isOwner:
+    if wasOwner and not isOwner:
       # We previously owned this shard but no longer do — ship data to new owner
       let entries = router.iterateKeys(shard.id)
       if entries.len > 0:
@@ -201,9 +209,10 @@ proc migrateData*(router: var ShardRouter, nodes: seq[string],
                 router.deleteKeys(keys)
             break
 
-proc rebalance*(router: var ShardRouter, nodes: seq[string]) =
+proc rebalance*(router: var ShardRouter, nodes: seq[string]): seq[seq[string]] =
+  ## Rebalance shard assignments across nodes. Returns old assignments for migration.
   if nodes.len == 0:
-    return
+    return @[]
 
   # Remember old assignments for migration
   var oldAssignments: seq[seq[string]] = @[]
@@ -219,6 +228,8 @@ proc rebalance*(router: var ShardRouter, nodes: seq[string]) =
     for r in 0..<router.replicas:
       let nodeIdx = (i + r) mod nodes.len
       router.shards[i].nodeIds.add(nodes[nodeIdx])
+
+  return oldAssignments
 
 proc applyMigrationBatch*(router: var ShardRouter, shardId: int,
                           entries: seq[(string, seq[byte])]) =
@@ -261,10 +272,10 @@ proc addNode*(cm: ClusterMembership, nodeId: string,
   if host.len > 0:
     cm.nodeAddrs[nodeId] = (host, port)
   if cm.nodes.len >= 2:
-    cm.router.rebalance(cm.nodes)
+    let oldAssignments = cm.router.rebalance(cm.nodes)
     # Migrate data if we have migration callbacks and node addresses
     if cm.router.iterateKeys != nil:
-      cm.router.migrateData(cm.nodes, cm.nodeAddrs)
+      cm.router.migrateData(cm.nodes, cm.nodeAddrs, oldAssignments)
 
 proc removeNode*(cm: ClusterMembership, nodeId: string) =
   var newNodes: seq[string] = @[]
@@ -274,7 +285,9 @@ proc removeNode*(cm: ClusterMembership, nodeId: string) =
   cm.nodes = newNodes
   cm.nodeAddrs.del(nodeId)
   if cm.nodes.len >= 1:
-    cm.router.rebalance(cm.nodes)
+    let oldAssignments = cm.router.rebalance(cm.nodes)
+    if cm.router.iterateKeys != nil:
+      cm.router.migrateData(cm.nodes, cm.nodeAddrs, oldAssignments)
 
 proc onNodeJoin*(cm: ClusterMembership, nodeId: string,
                  host: string = "", port: int = 0) =
