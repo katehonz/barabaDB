@@ -31,19 +31,50 @@ proc newBTreeIndex*[K, V](order: int = DefaultBTreeOrder): BTreeIndex[K, V] =
 
 proc search[K, V](node: BTreeNode[K, V], key: K): seq[V] =
   var i = 0
-  while i < node.keys.len and key > node.keys[i]:
-    inc i
   if node.isLeaf:
-    if i < node.keys.len and key == node.keys[i]:
-      return node.values[i]
-    return @[]
+    while i < node.keys.len and key > node.keys[i]:
+      inc i
+    # Collect values from this leaf and any subsequent leaves that also contain the key.
+    var cur: BTreeNode[K, V] = node
+    while cur != nil:
+      var j = 0
+      while j < cur.keys.len and cur.keys[j] < key:
+        inc j
+      if j < cur.keys.len and cur.keys[j] == key:
+        result &= cur.values[j]
+      if j < cur.keys.len and cur.keys[j] > key:
+        break
+      cur = cur.next
+    return result
   else:
+    while i < node.keys.len and key > node.keys[i]:
+      inc i
     return search(node.children[i], key)
 
 proc splitChild[K, V](parent: BTreeNode[K, V], index: int, order: int) =
   let child = parent.children[index]
-  let mid = (order - 1) div 2
+  var mid = (order - 1) div 2
   let newNode = newBTreeNode[K, V](child.isLeaf)
+
+  if child.isLeaf:
+    # Consolidate duplicate boundary key values before split.
+    let midKey = child.keys[mid]
+    var hasDup = false
+    for j in 0..<child.keys.len:
+      if j != mid and child.keys[j] == midKey:
+        hasDup = true
+        break
+    if hasDup:
+      var allVals = child.values[mid]
+      var j = child.keys.len - 1
+      while j >= 0:
+        if j != mid and child.keys[j] == midKey:
+          allVals &= child.values[j]
+          child.keys.delete(j)
+          child.values.delete(j)
+          if j < mid: dec mid
+        dec j
+      child.values[mid] = allVals
 
   for j in mid+1..<child.keys.len:
     newNode.keys.add(child.keys[j])
@@ -147,7 +178,19 @@ proc scan*[K, V](btree: BTreeIndex[K, V], startKey, endKey: K): seq[(K, seq[V])]
 proc len*[K, V](btree: BTreeIndex[K, V]): int =
   acquire(btree.lock)
   try:
-    result = btree.size
+    var node = btree.root
+    while not node.isLeaf:
+      node = node.children[0]
+    var lastKey: K
+    var hasLast = false
+    while node != nil:
+      for i in 0..<node.keys.len:
+        if hasLast and node.keys[i] == lastKey:
+          continue
+        lastKey = node.keys[i]
+        hasLast = true
+        inc result
+      node = node.next
   finally:
     release(btree.lock)
 
@@ -216,7 +259,6 @@ proc mergeWithLeft[K, V](node: BTreeNode[K, V], parent: BTreeNode[K, V], parentI
       sibling.keys.add(node.keys[i])
     for i in 0..<node.children.len:
       sibling.children.add(node.children[i])
-  sibling.keys.setLen(sibling.keys.len)
   parent.keys.delete(parentIdx - 1)
   parent.children.delete(parentIdx)
 
@@ -298,33 +340,45 @@ proc remove*[K, V](btree: var BTreeIndex[K, V], key: K, value: V) =
       while i < node.keys.len and key > node.keys[i]:
         inc i
       if node.isLeaf:
-        if i < node.keys.len and key == node.keys[i]:
-          var vals = node.values[i]
-          var idx = -1
-          for j in 0..<vals.len:
-            if vals[j] == value:
-              idx = j
-              break
-          if idx >= 0:
-            vals.del(idx)
-            if vals.len == 0:
-              node.keys.del(i)
-              node.values.del(i)
-            else:
-              node.values[i] = vals
-            return true
-        return false
+        # Traverse leaf linked list to find and remove ALL occurrences
+        # of (key, value) across leaves (B+ tree boundary key duplicates).
+        var cur: BTreeNode[K, V] = node
+        var found = false
+        while cur != nil:
+          var j = 0
+          while j < cur.keys.len and key > cur.keys[j]:
+            inc j
+          if j < cur.keys.len and key == cur.keys[j]:
+            var vals = cur.values[j]
+            var idx = -1
+            for k in 0..<vals.len:
+              if vals[k] == value:
+                idx = k
+                break
+            if idx >= 0:
+              vals.delete(idx)
+              if vals.len == 0:
+                cur.keys.delete(j)
+                cur.values.delete(j)
+              else:
+                cur.values[j] = vals
+              found = true
+          if j < cur.keys.len and cur.keys[j] > key:
+            break
+          cur = cur.next
+        return found
       else:
         # Internal node: recurse into child
-        let found = removeRec(node.children[i], root, order)
+        let child = node.children[i]
+        let oldFirstKey = if child.keys.len > 0: child.keys[0] else: default(K)
+        let found = removeRec(child, root, order)
         if found:
-          # If the key was in the internal node (separator), update it
-          if i < node.keys.len and key == node.keys[i]:
-            # Key was removed from leaf, update separator
-            if node.children[i].keys.len > 0:
-              node.keys[i] = node.children[i].keys[0]
+          # Update separator if child's first key changed.
+          # Separator node.keys[i-1] represents child's first key (for i > 0).
+          if i > 0 and child.keys.len > 0 and child.keys[0] != oldFirstKey:
+            node.keys[i - 1] = child.keys[0]
           # Rebalance the child if needed
-          rebalanceAfterDelete(node.children[i], root, order)
+          rebalanceAfterDelete(child, root, order)
         return found
 
     if removeRec(btree.root, btree.root, btree.order):

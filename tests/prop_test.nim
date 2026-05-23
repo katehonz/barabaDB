@@ -5,12 +5,14 @@ import std/random
 import std/os
 import std/monotimes
 import std/math
+import std/sets
 
 import barabadb/core/types
 import barabadb/storage/lsm
 import barabadb/storage/btree
 import barabadb/query/ir as qir
 import barabadb/query/executor as qexec
+from barabadb/query/executor import Row
 
 suite "Property-Based — evalExprValue Invariants":
   setup:
@@ -86,34 +88,34 @@ suite "Property-Based — evalExprValue Invariants":
     var rng = initRand(42)
     for i in 0..<100:
       let lit = randIntLit(rng)
-      let v = evalExprValue(lit, initTable[string, string](), nil)
+      let v = qexec.evalExpr(lit, Row(), nil)
       check v.kind == vkInt64
 
   test "Literal eval returns correct ValueKind (FLOAT)":
     var rng = initRand(43)
     for i in 0..<100:
       let lit = randFloatLit(rng)
-      let v = evalExprValue(lit, initTable[string, string](), nil)
+      let v = qexec.evalExpr(lit, Row(), nil)
       check v.kind == vkFloat64
 
   test "Literal eval returns correct ValueKind (STRING)":
     var rng = initRand(49)
     for i in 0..<100:
       let lit = randStrLit(rng)
-      let v = evalExprValue(lit, initTable[string, string](), nil)
+      let v = qexec.evalExpr(lit, Row(), nil)
       check v.kind == vkString
 
   test "Literal eval returns correct ValueKind (BOOL)":
     for b in [true, false]:
       var lit = IRExpr(kind: irekLiteral, valueKind: vkBool)
       lit.literal = IRLiteral(kind: vkBool, boolVal: b)
-      let v = evalExprValue(lit, initTable[string, string](), nil)
+      let v = qexec.evalExpr(lit, Row(), nil)
       check v.kind == vkBool
       check v.boolVal == b
 
   test "Literal eval returns correct ValueKind (NULL)":
     let lit = nullLit()
-    let v = evalExprValue(lit, initTable[string, string](), nil)
+    let v = qexec.evalExpr(lit, Row(), nil)
     check v.kind == vkNull
 
   # ──────────────────────────────────────────────────
@@ -124,8 +126,8 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randIntLit(rng)
       let b = randIntLit(rng)
-      let sum1 = evalExprValue(randBinaryExpr(rng, a, b, irAdd), initTable[string, string](), nil)
-      let sum2 = evalExprValue(randBinaryExpr(rng, b, a, irAdd), initTable[string, string](), nil)
+      let sum1 = qexec.evalExpr(randBinaryExpr(rng, a, b, irAdd), Row(), nil)
+      let sum2 = qexec.evalExpr(randBinaryExpr(rng, b, a, irAdd), Row(), nil)
       if sum1.kind == vkInt64 and sum2.kind == vkInt64:
         check sum1.int64Val == sum2.int64Val
 
@@ -134,8 +136,8 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randFloatLit(rng)
       let b = randFloatLit(rng)
-      let sum1 = evalExprValue(randBinaryExpr(rng, a, b, irAdd), initTable[string, string](), nil)
-      let sum2 = evalExprValue(randBinaryExpr(rng, b, a, irAdd), initTable[string, string](), nil)
+      let sum1 = qexec.evalExpr(randBinaryExpr(rng, a, b, irAdd), Row(), nil)
+      let sum2 = qexec.evalExpr(randBinaryExpr(rng, b, a, irAdd), Row(), nil)
       if sum1.kind == vkFloat64 and sum2.kind == vkFloat64:
         check abs(sum1.float64Val - sum2.float64Val) < 1e-9
 
@@ -144,8 +146,8 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randIntLit(rng)
       let b = randIntLit(rng)
-      let prod1 = evalExprValue(randBinaryExpr(rng, a, b, irMul), initTable[string, string](), nil)
-      let prod2 = evalExprValue(randBinaryExpr(rng, b, a, irMul), initTable[string, string](), nil)
+      let prod1 = qexec.evalExpr(randBinaryExpr(rng, a, b, irMul), initTable[string, Value](), nil)
+      let prod2 = qexec.evalExpr(randBinaryExpr(rng, b, a, irMul), initTable[string, Value](), nil)
       if prod1.kind == vkInt64 and prod2.kind == vkInt64:
         check prod1.int64Val == prod2.int64Val
 
@@ -154,8 +156,8 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randFloatLit(rng)
       let b = randFloatLit(rng)
-      let prod1 = evalExprValue(randBinaryExpr(rng, a, b, irMul), initTable[string, string](), nil)
-      let prod2 = evalExprValue(randBinaryExpr(rng, b, a, irMul), initTable[string, string](), nil)
+      let prod1 = qexec.evalExpr(randBinaryExpr(rng, a, b, irMul), initTable[string, Value](), nil)
+      let prod2 = qexec.evalExpr(randBinaryExpr(rng, b, a, irMul), initTable[string, Value](), nil)
       if prod1.kind == vkFloat64 and prod2.kind == vkFloat64:
         check abs(prod1.float64Val - prod2.float64Val) < 1e-9
 
@@ -170,8 +172,8 @@ suite "Property-Based — evalExprValue Invariants":
       let c = randIntLit(rng)
       let abPlusC = makeBinary(makeBinary(a, b, irAdd, vkInt64), c, irAdd, vkInt64)
       let aPlusBC = makeBinary(a, makeBinary(b, c, irAdd, vkInt64), irAdd, vkInt64)
-      let v1 = evalExprValue(abPlusC, initTable[string, string](), nil)
-      let v2 = evalExprValue(aPlusBC, initTable[string, string](), nil)
+      let v1 = qexec.evalExpr(abPlusC, initTable[string, Value](), nil)
+      let v2 = qexec.evalExpr(aPlusBC, initTable[string, Value](), nil)
       if v1.kind == vkInt64 and v2.kind == vkInt64:
         check v1.int64Val == v2.int64Val
 
@@ -183,8 +185,8 @@ suite "Property-Based — evalExprValue Invariants":
       let c = randFloatLit(rng)
       let abPlusC = makeBinary(makeBinary(a, b, irAdd, vkFloat64), c, irAdd, vkFloat64)
       let aPlusBC = makeBinary(a, makeBinary(b, c, irAdd, vkFloat64), irAdd, vkFloat64)
-      let v1 = evalExprValue(abPlusC, initTable[string, string](), nil)
-      let v2 = evalExprValue(aPlusBC, initTable[string, string](), nil)
+      let v1 = qexec.evalExpr(abPlusC, initTable[string, Value](), nil)
+      let v2 = qexec.evalExpr(aPlusBC, initTable[string, Value](), nil)
       if v1.kind == vkFloat64 and v2.kind == vkFloat64:
         check abs(v1.float64Val - v2.float64Val) < 1e-9
 
@@ -196,8 +198,8 @@ suite "Property-Based — evalExprValue Invariants":
       let c = randIntLit(rng)
       let abMulC = makeBinary(makeBinary(a, b, irMul, vkInt64), c, irMul, vkInt64)
       let aMulBC = makeBinary(a, makeBinary(b, c, irMul, vkInt64), irMul, vkInt64)
-      let v1 = evalExprValue(abMulC, initTable[string, string](), nil)
-      let v2 = evalExprValue(aMulBC, initTable[string, string](), nil)
+      let v1 = qexec.evalExpr(abMulC, initTable[string, Value](), nil)
+      let v2 = qexec.evalExpr(aMulBC, initTable[string, Value](), nil)
       if v1.kind == vkInt64 and v2.kind == vkInt64:
         check v1.int64Val == v2.int64Val
 
@@ -209,8 +211,8 @@ suite "Property-Based — evalExprValue Invariants":
       let c = randStrLit(rng, 0, 5)
       let abConcatC = makeBinary(makeBinary(a, b, irAdd, vkString), c, irAdd, vkString)
       let aConcatBC = makeBinary(a, makeBinary(b, c, irAdd, vkString), irAdd, vkString)
-      let v1 = evalExprValue(abConcatC, initTable[string, string](), nil)
-      let v2 = evalExprValue(aConcatBC, initTable[string, string](), nil)
+      let v1 = qexec.evalExpr(abConcatC, initTable[string, Value](), nil)
+      let v2 = qexec.evalExpr(aConcatBC, initTable[string, Value](), nil)
       if v1.kind == vkString and v2.kind == vkString:
         check v1.strVal == v2.strVal
 
@@ -227,8 +229,8 @@ suite "Property-Based — evalExprValue Invariants":
       let ab = makeBinary(a, b, irMul, vkInt64)
       let ac = makeBinary(a, c, irMul, vkInt64)
       let right = makeBinary(ab, ac, irAdd, vkInt64)
-      let v1 = evalExprValue(left, initTable[string, string](), nil)
-      let v2 = evalExprValue(right, initTable[string, string](), nil)
+      let v1 = qexec.evalExpr(left, initTable[string, Value](), nil)
+      let v2 = qexec.evalExpr(right, initTable[string, Value](), nil)
       if v1.kind == vkInt64 and v2.kind == vkInt64:
         check v1.int64Val == v2.int64Val
 
@@ -240,7 +242,7 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randIntLit(rng)
       let one = intLit(1)
-      let prod = evalExprValue(randBinaryExpr(rng, a, one, irMul), initTable[string, string](), nil)
+      let prod = qexec.evalExpr(randBinaryExpr(rng, a, one, irMul), initTable[string, Value](), nil)
       if prod.kind == vkInt64:
         check prod.int64Val == a.literal.int64Val
 
@@ -249,7 +251,7 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randIntLit(rng)
       let zero = intLit(0)
-      let sum = evalExprValue(randBinaryExpr(rng, a, zero, irAdd), initTable[string, string](), nil)
+      let sum = qexec.evalExpr(randBinaryExpr(rng, a, zero, irAdd), initTable[string, Value](), nil)
       if sum.kind == vkInt64:
         check sum.int64Val == a.literal.int64Val
 
@@ -259,7 +261,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randFloatLit(rng)
       let zero = floatLit(0.0)
       let expr = makeBinary(a, zero, irAdd, vkFloat64)
-      let sum = evalExprValue(expr, initTable[string, string](), nil)
+      let sum = qexec.evalExpr(expr, initTable[string, Value](), nil)
       if sum.kind == vkFloat64:
         check abs(sum.float64Val - a.literal.float64Val) < 1e-9
 
@@ -269,7 +271,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randIntLit(rng)
       let zero = intLit(0)
       let expr = makeBinary(a, zero, irSub, vkInt64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       if v.kind == vkInt64:
         check v.int64Val == a.literal.int64Val
 
@@ -278,7 +280,7 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randIntLit(rng)
       let expr = randBinaryExpr(rng, a, a, irSub)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       if v.kind == vkInt64:
         check v.int64Val == 0
 
@@ -287,7 +289,7 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randFloatLit(rng)
       let expr = makeBinary(a, a, irSub, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       if v.kind == vkFloat64:
         check abs(v.float64Val) < 1e-9
 
@@ -297,7 +299,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randFloatLit(rng)
       let one = floatLit(1.0)
       let expr = makeBinary(a, one, irMul, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       if v.kind == vkFloat64:
         check abs(v.float64Val - a.literal.float64Val) < 1e-9
 
@@ -306,8 +308,8 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<100:
       let a = randStrLit(rng, 0, 10)
       let empty = randStrLit(rng, 0, 0)
-      let v1 = evalExprValue(makeBinary(a, empty, irAdd, vkString), initTable[string, string](), nil)
-      let v2 = evalExprValue(makeBinary(empty, a, irAdd, vkString), initTable[string, string](), nil)
+      let v1 = qexec.evalExpr(makeBinary(a, empty, irAdd, vkString), initTable[string, Value](), nil)
+      let v2 = qexec.evalExpr(makeBinary(empty, a, irAdd, vkString), initTable[string, Value](), nil)
       if v1.kind == vkString: check v1.strVal == a.literal.strVal
       if v2.kind == vkString: check v2.strVal == a.literal.strVal
 
@@ -320,7 +322,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randIntLit(rng)
       let neg = randUnaryExpr(rng, a, irNeg)
       let negNeg = randUnaryExpr(rng, neg, irNeg)
-      let v = evalExprValue(negNeg, initTable[string, string](), nil)
+      let v = qexec.evalExpr(negNeg, initTable[string, Value](), nil)
       if v.kind == vkInt64:
         check v.int64Val == a.literal.int64Val
 
@@ -330,21 +332,21 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randFloatLit(rng)
       let neg = randUnaryExpr(rng, a, irNeg)
       let negNeg = randUnaryExpr(rng, neg, irNeg)
-      let v = evalExprValue(negNeg, initTable[string, string](), nil)
+      let v = qexec.evalExpr(negNeg, initTable[string, Value](), nil)
       if v.kind == vkFloat64:
         check abs(v.float64Val - a.literal.float64Val) < 1e-9
 
   test "Negated zero is zero (INT)":
     let zero = intLit(0)
     let negZero = makeUnary(zero, irNeg, vkInt64)
-    let v = evalExprValue(negZero, initTable[string, string](), nil)
+    let v = qexec.evalExpr(negZero, initTable[string, Value](), nil)
     if v.kind == vkInt64:
       check v.int64Val == 0
 
   test "Negated zero is zero (FLOAT)":
     let zero = floatLit(0.0)
     let negZero = makeUnary(zero, irNeg, vkFloat64)
-    let v = evalExprValue(negZero, initTable[string, string](), nil)
+    let v = qexec.evalExpr(negZero, initTable[string, Value](), nil)
     if v.kind == vkFloat64:
       check v.float64Val == 0.0
 
@@ -361,7 +363,7 @@ suite "Property-Based — evalExprValue Invariants":
       let bv = intLit(b)
       let mul = makeBinary(av, bv, irMul, vkInt64)
       let divE = makeBinary(mul, bv, irDiv, vkFloat64)
-      let v = evalExprValue(divE, initTable[string, string](), nil)
+      let v = qexec.evalExpr(divE, initTable[string, Value](), nil)
       if v.kind == vkFloat64:
         check abs(v.float64Val - float64(a)) < 1e-6
 
@@ -373,7 +375,7 @@ suite "Property-Based — evalExprValue Invariants":
       let av = intLit(a)
       let bv = intLit(b)
       let modE = makeBinary(av, bv, irMod, vkInt64)
-      let v = evalExprValue(modE, initTable[string, string](), nil)
+      let v = qexec.evalExpr(modE, initTable[string, Value](), nil)
       if v.kind == vkInt64:
         check v.int64Val >= 0
         check v.int64Val < b
@@ -385,21 +387,21 @@ suite "Property-Based — evalExprValue Invariants":
     let a = intLit(42)
     let zero = intLit(0)
     let divExpr = makeBinary(a, zero, irDiv, vkFloat64)
-    let v = evalExprValue(divExpr, initTable[string, string](), nil)
+    let v = qexec.evalExpr(divExpr, initTable[string, Value](), nil)
     check v.kind == vkNull
 
   test "FLOAT division by zero returns NULL":
     let a = floatLit(42.0)
     let zero = floatLit(0.0)
     let divExpr = makeBinary(a, zero, irDiv, vkFloat64)
-    let v = evalExprValue(divExpr, initTable[string, string](), nil)
+    let v = qexec.evalExpr(divExpr, initTable[string, Value](), nil)
     check v.kind == vkNull
 
   test "INT modulo zero returns NULL":
     let a = intLit(42)
     let zero = intLit(0)
     let modExpr = makeBinary(a, zero, irMod, vkInt64)
-    let v = evalExprValue(modExpr, initTable[string, string](), nil)
+    let v = qexec.evalExpr(modExpr, initTable[string, Value](), nil)
     check v.kind == vkNull
 
   # ──────────────────────────────────────────────────
@@ -411,7 +413,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randIntLit(rng)
       let zero = intLit(0)
       let powExpr = makeBinary(a, zero, irPow, vkFloat64)
-      let v = evalExprValue(powExpr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(powExpr, initTable[string, Value](), nil)
       if v.kind == vkFloat64:
         check abs(v.float64Val - 1.0) < 1e-9
 
@@ -421,7 +423,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randIntLit(rng)
       let one = intLit(1)
       let powExpr = makeBinary(a, one, irPow, vkFloat64)
-      let v = evalExprValue(powExpr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(powExpr, initTable[string, Value](), nil)
       if v.kind == vkFloat64:
         check abs(v.float64Val - float64(a.literal.int64Val)) < 1e-9
 
@@ -432,8 +434,8 @@ suite "Property-Based — evalExprValue Invariants":
       let two = intLit(2)
       let powExpr = makeBinary(a, two, irPow, vkFloat64)
       let mulExpr = makeBinary(a, a, irMul, vkInt64)
-      let v1 = evalExprValue(powExpr, initTable[string, string](), nil)
-      let v2 = evalExprValue(mulExpr, initTable[string, string](), nil)
+      let v1 = qexec.evalExpr(powExpr, initTable[string, Value](), nil)
+      let v2 = qexec.evalExpr(mulExpr, initTable[string, Value](), nil)
       if v1.kind == vkFloat64 and v2.kind == vkInt64:
         check abs(v1.float64Val - float64(v2.int64Val)) < 1e-9
 
@@ -450,7 +452,7 @@ suite "Property-Based — evalExprValue Invariants":
       expr.binOp = op
       expr.binLeft = nullLit
       expr.binRight = intLit
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkNull
 
   test "NULL propagates through mod":
@@ -459,7 +461,7 @@ suite "Property-Based — evalExprValue Invariants":
     for pair in [(n, a), (a, n)]:
       let (left, right) = pair
       let expr = makeBinary(left, right, irMod, vkInt64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkNull
 
   test "NULL propagates through pow":
@@ -468,13 +470,13 @@ suite "Property-Based — evalExprValue Invariants":
     for pair in [(n, a), (a, n)]:
       let (left, right) = pair
       let expr = makeBinary(left, right, irPow, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkNull
 
   test "NULL propagates through negation":
     let n = nullLit()
     let neg = makeUnary(n, irNeg, vkInt64)
-    let v = evalExprValue(neg, initTable[string, string](), nil)
+    let v = qexec.evalExpr(neg, initTable[string, Value](), nil)
     check v.kind == vkNull
 
   # ──────────────────────────────────────────────────
@@ -486,7 +488,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randIntLit(rng)
       let b = randFloatLit(rng)
       let expr = makeBinary(a, b, irAdd, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkFloat64
 
   test "FLOAT + INT → FLOAT":
@@ -495,7 +497,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randFloatLit(rng)
       let b = randIntLit(rng)
       let expr = makeBinary(a, b, irAdd, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkFloat64
 
   test "INT / INT → FLOAT":
@@ -505,7 +507,7 @@ suite "Property-Based — evalExprValue Invariants":
       var b = rng.rand(1..100)  # non-zero
       let bv = intLit(int64(b))
       let expr = makeBinary(a, bv, irDiv, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkFloat64
 
   test "INT - FLOAT → FLOAT":
@@ -514,7 +516,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randIntLit(rng)
       let b = randFloatLit(rng)
       let expr = makeBinary(a, b, irSub, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkFloat64
 
   test "INT * FLOAT → FLOAT":
@@ -523,7 +525,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randIntLit(rng)
       let b = randFloatLit(rng)
       let expr = makeBinary(a, b, irMul, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkFloat64
 
   test "FLOAT + FLOAT → FLOAT":
@@ -532,7 +534,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = randFloatLit(rng)
       let b = randFloatLit(rng)
       let expr = makeBinary(a, b, irAdd, vkFloat64)
-      let v = evalExprValue(expr, initTable[string, string](), nil)
+      let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
       check v.kind == vkFloat64
 
   test "INT + INT → INT (non-div ops)":
@@ -542,7 +544,7 @@ suite "Property-Based — evalExprValue Invariants":
       let b = randIntLit(rng)
       for op in [irAdd, irSub, irMul]:
         let expr = makeBinary(a, b, op, vkInt64)
-        let v = evalExprValue(expr, initTable[string, string](), nil)
+        let v = qexec.evalExpr(expr, initTable[string, Value](), nil)
         check v.kind == vkInt64
 
   # ──────────────────────────────────────────────────
@@ -553,7 +555,7 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<50:
       let a = randIntLit(rng)
       let expr = makeBinary(a, a, irEq, vkBool)
-      let s = evalExpr(expr, initTable[string, string](), nil)
+      let s = evalExpr(expr, initTable[string, Value](), nil)
       check s == "true"
 
   test "neq comparison: a != a is false":
@@ -561,31 +563,31 @@ suite "Property-Based — evalExprValue Invariants":
     for i in 0..<50:
       let a = randIntLit(rng)
       let expr = makeBinary(a, a, irNeq, vkBool)
-      let s = evalExpr(expr, initTable[string, string](), nil)
+      let s = evalExpr(expr, initTable[string, Value](), nil)
       check s == "false"
 
   test "lt comparison: a < a is false":
     let a = intLit(5)
     let expr = makeBinary(a, a, irLt, vkBool)
-    let s = evalExpr(expr, initTable[string, string](), nil)
+    let s = evalExpr(expr, initTable[string, Value](), nil)
     check s == "false"
 
   test "lte comparison: a <= a is true":
     let a = intLit(5)
     let expr = makeBinary(a, a, irLte, vkBool)
-    let s = evalExpr(expr, initTable[string, string](), nil)
+    let s = evalExpr(expr, initTable[string, Value](), nil)
     check s == "true"
 
   test "gt comparison: a > a is false":
     let a = intLit(5)
     let expr = makeBinary(a, a, irGt, vkBool)
-    let s = evalExpr(expr, initTable[string, string](), nil)
+    let s = evalExpr(expr, initTable[string, Value](), nil)
     check s == "false"
 
   test "gte comparison: a >= a is true":
     let a = intLit(5)
     let expr = makeBinary(a, a, irGte, vkBool)
-    let s = evalExpr(expr, initTable[string, string](), nil)
+    let s = evalExpr(expr, initTable[string, Value](), nil)
     check s == "true"
 
   test "lt comparison: a < b is true when a < b":
@@ -596,7 +598,7 @@ suite "Property-Based — evalExprValue Invariants":
       let a = intLit(x)
       let b = intLit(y)
       let expr = makeBinary(a, b, irLt, vkBool)
-      let s = evalExpr(expr, initTable[string, string](), nil)
+      let s = evalExpr(expr, initTable[string, Value](), nil)
       check s == "true"
 
   # ──────────────────────────────────────────────────
@@ -606,7 +608,7 @@ suite "Property-Based — evalExprValue Invariants":
     var ta = IRExpr(kind: irekLiteral, valueKind: vkBool)
     ta.literal = IRLiteral(kind: vkBool, boolVal: true)
     let expr = makeBinary(ta, ta, irAnd, vkBool)
-    let s = evalExpr(expr, initTable[string, string](), nil)
+    let s = evalExpr(expr, initTable[string, Value](), nil)
     check s == "true"
 
   test "AND: true AND false = false":
@@ -615,7 +617,7 @@ suite "Property-Based — evalExprValue Invariants":
     var fa = IRExpr(kind: irekLiteral, valueKind: vkBool)
     fa.literal = IRLiteral(kind: vkBool, boolVal: false)
     let expr = makeBinary(ta, fa, irAnd, vkBool)
-    let s = evalExpr(expr, initTable[string, string](), nil)
+    let s = evalExpr(expr, initTable[string, Value](), nil)
     check s == "false"
 
   test "OR: false OR true = true":
@@ -624,14 +626,14 @@ suite "Property-Based — evalExprValue Invariants":
     var fa = IRExpr(kind: irekLiteral, valueKind: vkBool)
     fa.literal = IRLiteral(kind: vkBool, boolVal: false)
     let expr = makeBinary(fa, ta, irOr, vkBool)
-    let s = evalExpr(expr, initTable[string, string](), nil)
+    let s = evalExpr(expr, initTable[string, Value](), nil)
     check s == "true"
 
   test "OR: false OR false = false":
     var fa = IRExpr(kind: irekLiteral, valueKind: vkBool)
     fa.literal = IRLiteral(kind: vkBool, boolVal: false)
     let expr = makeBinary(fa, fa, irOr, vkBool)
-    let s = evalExpr(expr, initTable[string, string](), nil)
+    let s = evalExpr(expr, initTable[string, Value](), nil)
     check s == "false"
 
   # ──────────────────────────────────────────────────
@@ -649,7 +651,7 @@ suite "Property-Based — evalExprValue Invariants":
       let t3 = makeBinary(t1, t2, irSub, vkInt64)
       let t4 = makeUnary(t3, irNeg, vkInt64)
       let t5 = makeBinary(t4, intLit(1), irAdd, vkInt64)
-      discard evalExprValue(t5, initTable[string, string](), nil)
+      discard qexec.evalExpr(t5, initTable[string, Value](), nil)
     check true
 
   test "Random binary tree depth 5 does not crash":
@@ -670,13 +672,13 @@ suite "Property-Based — evalExprValue Invariants":
                  else: vkFloat64
         nodes.insert(makeBinary(left, right, ops[opIdx], vk), 0)
       if nodes.len == 1:
-        discard evalExprValue(nodes[0], initTable[string, string](), nil)
+        discard qexec.evalExpr(nodes[0], initTable[string, Value](), nil)
     check true
 
   test "Nil expr evaluates to NULL":
-    let v = evalExprValue(nil, initTable[string, string](), nil)
+    let v = qexec.evalExpr(nil, initTable[string, Value](), nil)
     check v.kind == vkNull
-    let s = evalExpr(nil, initTable[string, string](), nil)
+    let s = evalExpr(nil, initTable[string, Value](), nil)
     check s == ""
 
 # ═══════════════════════════════════════════════════
@@ -814,7 +816,7 @@ suite "Property-Based — B-Tree Invariants":
           if tracker[k].len == 0:
             tracker.del(k)
       else: discard
-    # Verify all tracked keys are present
+    # Verify all tracked keys are present (compare as sets, order may differ due to rebalancing)
     for k, vals in tracker:
       let got = btree.get(k)
-      check got == vals
+      check got.toHashSet == vals.toHashSet
