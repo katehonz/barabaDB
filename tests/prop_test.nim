@@ -678,8 +678,8 @@ suite "Property-Based — evalExprValue Invariants":
   test "Nil expr evaluates to NULL":
     let v = qexec.evalExpr(nil, initTable[string, Value](), nil)
     check v.kind == vkNull
-    let s = evalExpr(nil, initTable[string, Value](), nil)
-    check s == ""
+    let s = qexec.evalExpr(nil, initTable[string, Value](), nil)
+    check s.kind == vkNull
 
 # ═══════════════════════════════════════════════════
 # B-Tree Property-Based Invariants
