@@ -547,11 +547,11 @@ proc readNumber(l: var Lexer, startLine, startCol: int): Token =
 proc readIdent(l: var Lexer, startLine, startCol: int): Token =
   var ident = ""
   while l.pos < l.input.len:
-    let r = l.peekRune()
+    var p = l.pos
+    var r: Rune
+    fastRuneAt(l.input, p, r, true)
     if isIdentPartRune(r):
-      var run: Rune
-      fastRuneAt(l.input, l.pos, run, true)
-      ident.add($run)
+      ident.add($r)
       inc l.col
       discard l.advanceRune()
     else:

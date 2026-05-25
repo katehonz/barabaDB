@@ -1,5 +1,6 @@
 ## Codegen — compile IR plan to storage operations
 import std/strutils
+import ../core/types
 import ../query/ir
 
 type

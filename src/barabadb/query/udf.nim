@@ -191,7 +191,7 @@ proc registerStdlib*(reg: UDFRegistry) =
           let length = int(args[2].int64Val)
           let endIdx = min(start + length, s.len)
           return Value(kind: vkString, strVal: s[start ..< endIdx])
-        return Value(kind: vkString, strVal: s[start])
+        return Value(kind: vkString, strVal: s[start .. start])
       return Value(kind: vkNull))
 
   # Type conversion
@@ -240,11 +240,11 @@ proc registerStdlib*(reg: UDFRegistry) =
             else: discard
           elif (item.kind in {vkInt64, vkInt32, vkFloat64}) and
                (target.kind in {vkInt64, vkInt32, vkFloat64}):
-            let a = case item.kind of vkInt64: float64(item.int64Val)
-                    of vkInt32: float64(item.int32Val)
+            let a = if item.kind == vkInt64: float64(item.int64Val)
+                    elif item.kind == vkInt32: float64(item.int32Val)
                     else: item.float64Val
-            let b = case target.kind of vkInt64: float64(target.int64Val)
-                    of vkInt32: float64(target.int32Val)
+            let b = if target.kind == vkInt64: float64(target.int64Val)
+                    elif target.kind == vkInt32: float64(target.int32Val)
                     else: target.float64Val
             if a == b:
               return Value(kind: vkBool, boolVal: true)

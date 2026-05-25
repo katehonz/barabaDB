@@ -35,7 +35,7 @@ proc match(p: var Parser, kind: TokenKind): bool =
   return false
 
 # Token kinds that can also serve as identifiers in table/column name positions
-const identLikeKinds = {tkIdent, tkLabels, tkCount, tkSum, tkAvg, tkMin, tkMax, tkArrayAgg, tkStringAgg}
+const identLikeKinds = {tkIdent, tkLabels, tkCount, tkSum, tkAvg, tkMin, tkMax, tkArrayAgg, tkStringAgg, tkJsonFmt, tkArray, tkVector, tkGraph, tkDocument}
 
 proc expectIdent(p: var Parser): Token =
   ## Expect a token that can serve as an identifier (table name, column name, alias, etc.).
@@ -1154,16 +1154,21 @@ proc parseCreateTable(p: var Parser): Node =
     # Parse column definition
     let colName = p.expectIdent().value
     var colType = ""
-    if p.peek().kind == tkIdent:
-      colType = p.advance().value.toUpper()
-      if p.peek().kind == tkLParen:
-        discard p.advance()
-        let size = p.expect(tkIntLit).value
-        colType &= "(" & size & ")"
-        discard p.expect(tkRParen)
-    elif p.peek().kind == tkVector:
-      discard p.advance()
-      colType = "VECTOR"
+    let typeKinds = {tkIdent, tkVector, tkJsonFmt, tkArray, tkDocument, tkGraph}
+    if p.peek().kind in typeKinds:
+      let typeTok = p.advance()
+      if typeTok.kind == tkVector:
+        colType = "VECTOR"
+      elif typeTok.kind == tkJsonFmt:
+        colType = "JSON"
+      elif typeTok.kind == tkArray:
+        colType = "ARRAY"
+      elif typeTok.kind == tkDocument:
+        colType = "DOCUMENT"
+      elif typeTok.kind == tkGraph:
+        colType = "GRAPH"
+      else:
+        colType = typeTok.value.toUpper()
       if p.peek().kind == tkLParen:
         discard p.advance()
         let size = p.expect(tkIntLit).value

@@ -148,8 +148,8 @@ proc escapeSqlValue(val: JsonNode): string =
 proc formatSql*(sql: string, args: seq[JsonNode]): string =
   result = sql
   var placeholderCount = 0
-  for i in 0..<result.len:
-    if result[i] == '?':
+  for ch in result:
+    if ch == '?':
       placeholderCount += 1
   if placeholderCount != args.len:
     raise newException(DbError, "Placeholder count mismatch: expected " & $placeholderCount & " but got " & $args.len & " arguments")
@@ -438,6 +438,7 @@ proc exec(self: BaradbQuery, queryString: string) {.async.} =
   defer:
     if not self.isInTransaction:
       self.returnConn(connI).await
+    self.placeHolder = newJArray()
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 
@@ -475,6 +476,7 @@ proc insertId(self: BaradbQuery, queryString: string, key: string): Future[strin
   defer:
     if not self.isInTransaction:
       self.returnConn(connI).await
+    self.placeHolder = newJArray()
   if connI == errorConnectionNum:
     raisePoolTimeout(self)
 

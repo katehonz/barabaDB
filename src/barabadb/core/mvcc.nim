@@ -196,7 +196,7 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
           if victimId in tm.activeTxns:
             tm.activeTxns[victimId].state = tsAborted
             tm.activeTxns.del(victimId)
-        tm.deadlockDetector.removeWait(uint64(txn.id), uint64(otherId))
+        # Keep the wait edge so subsequent transactions can detect cycles
         release(tm.lock)
         return false  # write-write conflict with uncommitted txn
 

@@ -1247,13 +1247,13 @@ suite "Sharding":
 
   test "Rebalance assigns nodes":
     var router = newShardRouter(ShardConfig(numShards: 3, replicas: 2, strategy: ssHash))
-    router.rebalance(@["node1", "node2", "node3"])
+    discard router.rebalance(@["node1", "node2", "node3"])
     for shard in router.shards:
       check shard.nodeIds.len == 2  # 2 replicas
 
   test "Replicas of key":
     var router = newShardRouter(ShardConfig(numShards: 2, replicas: 1, strategy: ssHash))
-    router.rebalance(@["n1", "n2"])
+    discard router.rebalance(@["n1", "n2"])
     let replicas = router.replicasOf("test_key")
     check replicas.len == 1
 
@@ -1989,7 +1989,7 @@ suite "Cluster Auto-Rebalance":
 
   test "Node fail re-assigns shards":
     var router = newShardRouter(ShardConfig(numShards: 4, replicas: 2))
-    router.rebalance(@["node1", "node2", "node3"])
+    discard router.rebalance(@["node1", "node2", "node3"])
     var cm = newClusterMembership(router)
     cm.nodes = @["node1", "node2", "node3"]
     cm.onNodeFail("node1")
