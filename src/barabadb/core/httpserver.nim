@@ -7,6 +7,7 @@ import json
 import tables
 import strutils
 import times
+import os
 import std/asyncdispatch
 import config
 import ../query/lexer
@@ -21,6 +22,7 @@ import jwt as jwtlib
 import ../protocol/auth
 import ../protocol/ratelimit
 import ../core/registry
+import ../core/backup
 
 type
   HttpServer* = ref object
@@ -121,6 +123,36 @@ proc checkAuth(server: HttpServer, request: Request, ctx: Context): bool =
     return false
   return true
 
+proc checkAdmin(server: HttpServer, request: Request, ctx: Context): bool =
+  if not server.config.authEnabled:
+    return true
+  let authHeader = request.headers["Authorization"]
+  if authHeader.len == 0 or not authHeader.startsWith("Bearer "):
+    ctx.json(%*{"error": "Unauthorized"}, 401)
+    return false
+  let tokenStr = authHeader[7..^1]
+  let (valid, _, role) = server.verifyToken(tokenStr)
+  if not valid:
+    ctx.json(%*{"error": "Unauthorized"}, 401)
+    return false
+  if role != "admin":
+    ctx.json(%*{"error": "Forbidden: admin role required"}, 403)
+    return false
+  return true
+
+proc getRequestDatabaseContext(server: HttpServer, request: Request): ExecutionContext =
+  ## Return execution context for the requested database (via X-Database header)
+  ## Falls back to server.ctx (default database) if not specified.
+  let dbName = request.headers["X-Database"]
+  if dbName.len > 0 and server.registry != nil:
+    try:
+      let dbInfo = getOrCreateDatabase(server.registry, dbName)
+      if dbInfo != nil and dbInfo.db != nil:
+        return newExecutionContext(dbInfo.db, server.registry)
+    except CatchableError:
+      discard
+  return newExecutionContext(server.db, server.registry)
+
 # ----------------------------------------------------------------------
 # Handlers
 # ----------------------------------------------------------------------
@@ -164,7 +196,7 @@ proc queryHandler(server: HttpServer): RequestHandler =
         ctx.json(%*{"error": "Empty query"}, 400)
         return
 
-      var reqCtx = cloneForConnection(server.ctx)
+      var reqCtx = getRequestDatabaseContext(server, request)
       reqCtx.currentUser = userId
       reqCtx.currentRole = role
       let tokens = tokenize(queryStr)
@@ -297,11 +329,14 @@ proc openApiHandler(): RequestHandler =
     let ctx = newContext(request)
     ctx.json(%*{
       "openapi": "3.0.0",
-      "info": {"title": "BaraDB API", "version": "0.1.0"},
+      "info": {"title": "BaraDB API", "version": "1.1.6"},
       "paths": {
         "/query": {
           "post": {
             "summary": "Execute SQL query",
+            "parameters": [
+              {"name": "X-Database", "in": "header", "schema": {"type": "string"}, "description": "Target database (default: default)"}
+            ],
             "requestBody": {
               "content": {
                 "application/json": {
@@ -315,6 +350,20 @@ proc openApiHandler(): RequestHandler =
             }
           }
         },
+        "/tables": {"get": {"summary": "List tables", "parameters": [{"name": "X-Database", "in": "header", "schema": {"type": "string"}}]}},
+        "/databases": {
+          "get": {"summary": "List databases"},
+          "post": {"summary": "Create database (admin)"}
+        },
+        "/backup": {
+          "post": {"summary": "Create backup (admin)"}
+        },
+        "/backups": {
+          "get": {"summary": "List backups"}
+        },
+        "/restore": {
+          "post": {"summary": "Restore from backup (admin)"}
+        },
         "/health": {"get": {"summary": "Health check"}},
         "/metrics": {"get": {"summary": "Prometheus metrics"}},
         "/auth": {"post": {"summary": "Authenticate and get JWT token"}}
@@ -327,8 +376,9 @@ proc tablesHandler(server: HttpServer): RequestHandler =
       let ctx = newContext(request)
       if not server.checkAuth(request, ctx):
         return
+      let reqCtx = getRequestDatabaseContext(server, request)
       var tables = newJArray()
-      for name, tbl in server.ctx.tables:
+      for name, tbl in reqCtx.tables:
         var cols = newJArray()
         for col in tbl.columns:
           cols.add(%*{"name": col.name, "type": col.colType,
@@ -336,6 +386,162 @@ proc tablesHandler(server: HttpServer): RequestHandler =
         tables.add(%*{"name": name, "columns": cols,
           "pkColumns": tbl.pkColumns, "fkCount": tbl.foreignKeys.len})
       ctx.json(%*{"tables": tables})
+
+proc databasesHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      if not server.checkAuth(request, ctx):
+        return
+      let dbs = server.registry.listDatabases()
+      var arr = newJArray()
+      for dbName in dbs:
+        var obj = newJObject()
+        obj["name"] = %dbName
+        try:
+          let dbInfo = getDatabaseInfo(server.registry, dbName)
+          if dbInfo != nil and dbInfo.ctx != nil:
+            let dbCtx = cast[ExecutionContext](cast[pointer](dbInfo.ctx))
+            obj["tables"] = %dbCtx.tables.len
+            obj["connections"] = %getConnectionCount(server.registry, dbName)
+          else:
+            obj["tables"] = %0
+            obj["connections"] = %0
+        except CatchableError:
+          obj["tables"] = %0
+          obj["connections"] = %0
+        arr.add(obj)
+      ctx.json(%*{"databases": arr})
+
+proc createDatabaseHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      if not server.checkAdmin(request, ctx):
+        return
+      let body = parseJson(request.body)
+      if body == nil or "name" notin body:
+        ctx.json(%*{"error": "Missing 'name' in request body"}, 400)
+        return
+      let dbName = body["name"].getStr()
+      if dbName.len == 0:
+        ctx.json(%*{"error": "Empty database name"}, 400)
+        return
+      try:
+        discard getOrCreateDatabase(server.registry, dbName)
+        ctx.json(%*{"success": true, "name": dbName, "message": "Database created"})
+      except CatchableError as e:
+        ctx.json(%*{"error": e.msg}, 400)
+
+proc dropDatabaseHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      if not server.checkAdmin(request, ctx):
+        return
+      let dbName = request.pathParams.getOrDefault("name", "")
+      if dbName.len == 0:
+        ctx.json(%*{"error": "Missing database name"}, 400)
+        return
+      try:
+        let ok = dropDatabase(server.registry, dbName)
+        if ok:
+          ctx.json(%*{"success": true, "name": dbName, "message": "Database dropped"})
+        else:
+          ctx.json(%*{"error": "Database not found"}, 404)
+      except CatchableError as e:
+        ctx.json(%*{"error": e.msg}, 400)
+
+proc backupHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      if not server.checkAdmin(request, ctx):
+        return
+      let body = parseJson(request.body)
+      let dataRoot = server.registry.dataRoot
+      let allDatabases = if body != nil and "all" in body: body["all"].getBool() else: false
+      let dbName = if body != nil and "database" in body: body["database"].getStr() else: ""
+      let outputFile = if body != nil and "output" in body: body["output"].getStr() else: "backup_" & $getTime().toUnix() & ".tar.gz"
+      let compression = if body != nil and "level" in body: body["level"].getInt() else: 6
+      try:
+        var ok = false
+        if allDatabases:
+          ok = backupAllDatabases(dataRoot, outputFile, @[], compression, false)
+        elif dbName.len > 0:
+          let dbDir = dataRoot / dbName
+          ok = backupDataDir(dbDir, outputFile, @[], compression, false)
+        else:
+          ok = backupAllDatabases(dataRoot, outputFile, @[], compression, false)
+        if ok:
+          ctx.json(%*{"success": true, "output": outputFile, "message": "Backup created"})
+        else:
+          ctx.json(%*{"error": "Backup failed"}, 500)
+      except CatchableError as e:
+        ctx.json(%*{"error": e.msg}, 500)
+
+proc listBackupsHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      if not server.checkAuth(request, ctx):
+        return
+      let dataRoot = server.registry.dataRoot
+      let backups = listBackups(dataRoot)
+      var arr = newJArray()
+      for b in backups:
+        var meta: JsonNode = nil
+        try:
+          meta = readBackupMeta(b.path)
+        except CatchableError:
+          discard
+        var obj = newJObject()
+        obj["path"] = %b.path
+        obj["size"] = %b.size
+        obj["sizeHuman"] = %formatBytes(b.size)
+        obj["timestamp"] = %b.timestamp
+        obj["compressed"] = %b.compressed
+        if meta != nil and meta{"databases"} != nil:
+          obj["databases"] = meta{"databases"}
+          obj["type"] = %"multi"
+        else:
+          obj["type"] = %"single"
+        arr.add(obj)
+      ctx.json(%*{"backups": arr})
+
+proc restoreHandler(server: HttpServer): RequestHandler =
+  return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      if not server.checkAdmin(request, ctx):
+        return
+      let body = parseJson(request.body)
+      if body == nil or "input" notin body:
+        ctx.json(%*{"error": "Missing 'input' in request body"}, 400)
+        return
+      let inputFile = body["input"].getStr()
+      let allDatabases = if body != nil and "all" in body: body["all"].getBool() else: false
+      let dbName = if body != nil and "database" in body: body["database"].getStr() else: ""
+      let dataRoot = server.registry.dataRoot
+      try:
+        let meta = readBackupMeta(inputFile)
+        let isMultiDb = meta != nil and meta{"databases"} != nil
+        var ok = false
+        if isMultiDb or allDatabases:
+          ok = restoreAllDatabases(inputFile, dataRoot, false, false)
+        elif dbName.len > 0:
+          let dbDir = dataRoot / dbName
+          ok = restoreDataDir(inputFile, dbDir, false, false)
+        else:
+          ok = restoreAllDatabases(inputFile, dataRoot, false, false)
+        if ok:
+          # Reload databases after restore
+          server.registry.loadExistingDatabases()
+          ctx.json(%*{"success": true, "message": "Restore completed"})
+        else:
+          ctx.json(%*{"error": "Restore failed"}, 500)
+      except CatchableError as e:
+        ctx.json(%*{"error": e.msg}, 500)
 
 proc adminHandler(server: HttpServer): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
@@ -389,7 +595,7 @@ tr:hover td{background:#1a2744}
 <button onclick='doLogin()' style='width:100%'>Login</button>
 <p class='status' id='login-status'></p>
 </div></div>
-<header><h1>BaraDB Admin</h1><span id='user-info'></span></header>
+<header><h1>BaraDB Admin</h1><div style='display:flex;align-items:center;gap:12px'><select id='db-select' onchange='switchDatabase()' style='width:auto;padding:4px 8px;font-size:13px'><option value=''>Loading...</option></select><span id='user-info'></span></div></header>
 <div id='tabs'>
   <span class='tab active' onclick='showTab(0)'>SQL Playground</span>
   <span class='tab' onclick='showTab(1)'>Tables</span>
@@ -397,6 +603,8 @@ tr:hover td{background:#1a2744}
   <span class='tab' onclick='showTab(3)'>Live</span>
   <span class='tab' onclick='showTab(4)'>Metrics</span>
   <span class='tab' onclick='showTab(5)'>Cluster</span>
+  <span class='tab' onclick='showTab(6)'>Databases</span>
+  <span class='tab' onclick='showTab(7)'>Backups</span>
 </div>
 <div class='panel active'>
   <div class='card'><textarea id='sql' placeholder='SELECT * FROM users'></textarea>
@@ -434,10 +642,33 @@ tr:hover td{background:#1a2744}
 <div class='panel'>
   <div class='card'><h3>Cluster Status</h3><div id='cluster-data'>Cluster status not available</div></div>
 </div>
+<div class='panel'>
+  <div class='card'><h3>Databases</h3>
+    <div style='display:flex;gap:8px;margin-bottom:12px'>
+      <input id='new-db-name' placeholder='Database name' style='flex:1'>
+      <button onclick='createDatabase()'>Create</button>
+    </div>
+    <div id='db-list'>Loading...</div>
+  </div>
+</div>
+<div class='panel'>
+  <div class='card'><h3>Backups</h3>
+    <div style='display:flex;gap:8px;margin-bottom:12px'>
+      <button onclick='createBackup()'>Backup All</button>
+      <button class='secondary' onclick='createBackupSingle()'>Backup Current DB</button>
+    </div>
+    <div id='backup-list'>Loading...</div>
+  </div>
+</div>
 <script>
 let token = localStorage.getItem('baradb_token') || ''
+let currentDatabase = localStorage.getItem('baradb_db') || 'default'
 let ws = null
-function authHeader(){ return token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'} }
+function authHeader(){
+  let h = token ? {'Authorization':'Bearer '+token,'Content-Type':'application/json'} : {'Content-Type':'application/json'}
+  if(currentDatabase) h['X-Database'] = currentDatabase
+  return h
+}
 async function api(path, body, method='POST') {
   const r = await fetch(path, {method, headers:authHeader(), body: body?JSON.stringify(body):undefined})
   return r.json().catch(() => r.text())
@@ -446,13 +677,67 @@ async function doLogin(){
   const u = document.getElementById('username').value
   const p = document.getElementById('password').value
   const r = await api('/auth', {username:u, password:p})
-  if(r.token){ token = r.token; localStorage.setItem('baradb_token', token); hideLogin(); showUser(r.user); connectWS() }
+  if(r.token){ token = r.token; localStorage.setItem('baradb_token', token); hideLogin(); showUser(r.user); connectWS(); loadDatabases() }
   else { document.getElementById('login-status').textContent = r.error || 'Login failed' }
 }
 function hideLogin(){ document.getElementById('login-overlay').style.display='none' }
 function showUser(u){ document.getElementById('user-info').innerHTML = 'User: <b>'+u+'</b> <a href="#" onclick="logout()">logout</a>' }
-function logout(){ token=''; localStorage.removeItem('baradb_token'); location.reload() }
-if(token){ hideLogin(); showUser('...'); api('/health',null,'GET').then(()=>showUser('authed')).catch(()=>logout()); connectWS() }
+function logout(){ token=''; localStorage.removeItem('baradb_token'); localStorage.removeItem('baradb_db'); location.reload() }
+if(token){ hideLogin(); showUser('...'); api('/health',null,'GET').then(()=>{showUser('authed'); loadDatabases()}).catch(()=>logout()); connectWS() }
+function switchDatabase(){
+  currentDatabase = document.getElementById('db-select').value
+  localStorage.setItem('baradb_db', currentDatabase)
+  loadTables()
+  loadSchema()
+}
+async function loadDatabases(){
+  try{
+    const r = await api('/databases', null, 'GET')
+    const sel = document.getElementById('db-select')
+    if(!r.databases){ sel.innerHTML = '<option value="default">default</option>'; return }
+    sel.innerHTML = r.databases.map(d => '<option value="'+d.name+'"'+(d.name===currentDatabase?' selected':'')+'>'+d.name+' ('+d.tables+' tables)</option>').join('')
+    // Databases tab
+    const el = document.getElementById('db-list')
+    el.innerHTML = '<table><tr><th>Name</th><th>Tables</th><th>Connections</th><th>Action</th></tr>'+r.databases.map(d => '<tr><td>'+d.name+'</td><td>'+d.tables+'</td><td>'+d.connections+'</td><td>'+(d.name!=="default"?'<button class="secondary" onclick="dropDatabase(\''+d.name+'\')">Drop</button>':'')+'</td></tr>').join('')+'</table>'
+  }catch(e){}
+}
+async function createDatabase(){
+  const name = document.getElementById('new-db-name').value.trim()
+  if(!name) return alert('Enter database name')
+  const r = await api('/databases', {name:name})
+  if(r.success){ document.getElementById('new-db-name').value=''; loadDatabases() }
+  else alert(r.error || 'Failed')
+}
+async function dropDatabase(name){
+  if(!confirm('Drop database '+name+'?')) return
+  const r = await api('/databases/'+name, null, 'DELETE')
+  if(r.success){ loadDatabases() }
+  else alert(r.error || 'Failed')
+}
+async function createBackup(){
+  const r = await api('/backup', {all:true})
+  if(r.success){ alert('Backup created: '+r.output); loadBackups() }
+  else alert(r.error || 'Failed')
+}
+async function createBackupSingle(){
+  const r = await api('/backup', {database:currentDatabase})
+  if(r.success){ alert('Backup created: '+r.output); loadBackups() }
+  else alert(r.error || 'Failed')
+}
+async function loadBackups(){
+  try{
+    const r = await api('/backups', null, 'GET')
+    const el = document.getElementById('backup-list')
+    if(!r.backups || !r.backups.length){ el.innerHTML = 'No backups'; return }
+    el.innerHTML = '<table><tr><th>File</th><th>Type</th><th>Size</th><th>Date</th><th>Databases</th><th>Action</th></tr>'+r.backups.map(b => '<tr><td>'+b.path.split('/').pop()+'</td><td>'+b.type+'</td><td>'+b.sizeHuman+'</td><td>'+new Date(b.timestamp*1000).toLocaleString()+'</td><td>'+(b.databases?b.databases.join(', '):'-')+'</td><td><button class="secondary" onclick="restoreBackup(\''+b.path+'\')">Restore</button></td></tr>').join('')+'</table>'
+  }catch(e){}
+}
+async function restoreBackup(path){
+  if(!confirm('Restore from '+path+'? This replaces current data.')) return
+  const r = await api('/restore', {input:path, all:true})
+  if(r.success){ alert('Restore completed'); loadDatabases(); loadBackups() }
+  else alert(r.error || 'Failed')
+}
 async function runQuery(){
   const sql = document.getElementById('sql').value
   const res = await api('/query', {query: sql})
@@ -548,6 +833,8 @@ function showTab(idx){
   if(idx===1) loadTables()
   if(idx===2) loadSchema()
   if(idx===4) loadMetrics()
+  if(idx===6) loadDatabases()
+  if(idx===7) loadBackups()
 }
 setInterval(() => { if(document.querySelectorAll('.panel')[4].classList.contains('active')) loadMetrics() }, 5000)
 </script>
@@ -567,6 +854,12 @@ proc run*(server: HttpServer, port: int = 9470) =
   router.post("/auth/scram/finish", server.scramFinishHandler())
   router.get("/tables", server.tablesHandler())
   router.get("/api", openApiHandler())
+  router.get("/databases", server.databasesHandler())
+  router.post("/databases", server.createDatabaseHandler())
+  # router.delete("/databases/@name", server.dropDatabaseHandler()) -- disabled due to ORC memory issue with LSMTree close
+  router.post("/backup", server.backupHandler())
+  router.get("/backups", server.listBackupsHandler())
+  router.post("/restore", server.restoreHandler())
 
   var stack = newMiddlewareStack(router)
   stack.use(corsMiddleware())

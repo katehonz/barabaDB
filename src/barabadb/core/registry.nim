@@ -158,13 +158,16 @@ proc dropDatabase*(reg: DatabaseRegistry, name: string): bool =
       "Cannot drop database '" & name & "': " &
       $info.activeConnections & " active connections")
 
+  # Copy needed references before deletion
+  let db = info.db
+  let dbDir = reg.dataRoot / name
+
   # Remove from registry first so no new references can be obtained
   reg.databases.del(name)
   release(reg.lock)
 
   # Close LSMTree and remove directory outside the lock
-  info.db.close()
-  let dbDir = reg.dataRoot / name
+  db.close()
   if dirExists(dbDir):
     removeDir(dbDir)
   true

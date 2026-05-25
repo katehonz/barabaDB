@@ -240,9 +240,19 @@ Content-Type: application/json
 ```http
 POST /backup
 Content-Type: application/json
+Authorization: Bearer <token>
 
 {
-  "destination": "/backup/snapshot.db"
+  "all": true
+}
+```
+
+Отговор:
+```json
+{
+  "success": true,
+  "output": "backup_1234567890.tar.gz",
+  "message": "Backup created"
 }
 ```
 

@@ -102,8 +102,8 @@ services:
       sh -c '
         while true; do
           sleep 86400;
-          /app/backup backup --data-dir=/data --output=/backups/baradb_$$(date +%Y%m%d_%H%M%S).tar.gz --level=6;
-          /app/backup cleanup --keep=7;
+          /app/backup backup --all-databases --data-root=/data/databases --output=/backups/baradb_$$(date +%Y%m%d_%H%M%S).tar.gz --level=6;
+          /app/backup cleanup --data-root=/data/databases --keep=7;
         done
       '
     volumes:

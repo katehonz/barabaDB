@@ -38,9 +38,11 @@ type
 
 const
   DEFAULT_DATA_DIR = "data/server"
+  DEFAULT_DATA_ROOT = "data/databases"
   DEFAULT_KEEP_COUNT = 5
   DEFAULT_COMPRESSION = 6
   HISTORY_FILE = "backup_history.log"
+  BACKUP_META_FILE = "backup.json"
   HELP_TEXT = """
 BaraDB Backup Manager — Archive and restore your database safely
 ================================================================
@@ -73,19 +75,32 @@ COMMANDS:
   help     Show this help message.
 
 OPTIONS:
-  -d, --data-dir <DIR>   Path to data directory (default: data/server)
+  -d, --data-dir <DIR>   Path to single data directory (default: data/server)
+  -r, --data-root <DIR>  Path to multi-database root (default: data/databases)
   -o, --output   <FILE>  Destination path for new backup archive
   -i, --input    <FILE>  Source archive for restore or verify
   -k, --keep     <N>     Retention count for cleanup (default: 5)
   -e, --exclude  <PAT>   Exclude files matching pattern (repeatable)
   -l, --level    <0-9>   Gzip compression level (default: 6, max: 9)
+      --all-databases    Backup/restore all databases under --data-root
+      --database <NAME>  Backup/restore a specific database under --data-root
+      --online           Create consistent backup via checkpoint (freeze + flush)
       --dry-run          Show what restore would do without changing anything
   -f, --force            Skip confirmation prompts (use with caution!)
   -v, --verbose          Print detailed progress information
 
 EXAMPLES:
-  # Quick backup with default settings
+  # Quick backup of single directory (legacy)
   backup backup
+
+  # Backup all databases (recommended for multi-DB setups)
+  backup backup --all-databases --output=all_backup.tar.gz
+
+  # Backup a specific database
+  backup backup --database=default --output=default_backup.tar.gz
+
+  # Restore all databases
+  backup restore --input=all_backup.tar.gz --all-databases
 
   # Backup with maximum compression and custom name
   backup backup --output=prod_backup_$(date +%F).tar.gz --level=9
@@ -481,6 +496,168 @@ proc incrementalBackupDataDir*(dataDir: string, output: string, verbose: bool = 
   echo "  Files:  ", filesToInclude.len
   return true
 
+proc discoverDatabases*(dataRoot: string): seq[string] =
+  ## Scan dataRoot for database directories
+  result = @[]
+  if not dirExists(dataRoot):
+    return
+  for kind, path in walkDir(dataRoot):
+    if kind == pcDir:
+      let dbName = lastPathPart(path)
+      if dbName.len > 0 and dbName notin [".", ".."]:
+        result.add(dbName)
+  result.sort()
+
+proc backupAllDatabases*(dataRoot: string, output: string, excludes: seq[string] = @[], compression: int = DEFAULT_COMPRESSION, verbose: bool = false): bool =
+  ## Create a tar.gz backup of all databases under dataRoot.
+  ## Archive layout: databases/<name>/... + backup.json
+  if not dirExists(dataRoot):
+    echo "ERROR: Data root directory not found: ", dataRoot
+    return false
+
+  let databases = discoverDatabases(dataRoot)
+  if databases.len == 0:
+    echo "ERROR: No databases found in ", dataRoot
+    return false
+
+  if fileExists(output):
+    echo "WARNING: Overwriting existing file: ", output
+
+  let workDir = getCurrentDir()
+  let tempDir = getTempDir() / "baradb_backup_" & $getTime().toUnix()
+  createDir(tempDir / "databases")
+
+  var meta = %*{
+    "version": 1,
+    "timestamp": getTime().toUnix(),
+    "databases": databases,
+    "createdBy": "baradb-backup"
+  }
+
+  # Copy each database into temp staging area
+  for dbName in databases:
+    let src = dataRoot / dbName
+    let dst = tempDir / "databases" / dbName
+    if verbose:
+      echo "Staging database: ", dbName
+    copyDir(src, dst)
+
+  # Write metadata
+  writeFile(tempDir / BACKUP_META_FILE, $meta)
+
+  var excludeArgs = ""
+  for pattern in excludes:
+    excludeArgs.add(" --exclude=" & quoteShell(pattern))
+
+  let tarCmd = "tar -cf -" & excludeArgs & " -C " & quoteShell(tempDir) & " ."
+  let gzipCmd = "gzip -" & $compression
+  let cmd = tarCmd & " | " & gzipCmd & " > " & quoteShell(output)
+
+  if verbose:
+    echo "Running: ", cmd
+    echo "Databases: ", databases.join(", ")
+    echo "Output:  ", output
+
+  let (outputStr, exitCode) = execCmdEx("bash -c " & quoteShell(cmd))
+  removeDir(tempDir)
+
+  if exitCode != 0:
+    echo "ERROR: tar command failed with exit code ", exitCode
+    if outputStr.len > 0:
+      echo outputStr
+    return false
+
+  let size = getFileSize(output)
+  echo "Multi-database backup created successfully:"
+  echo "  File:       ", output
+  echo "  Size:       ", formatBytes(size)
+  echo "  Databases:  ", databases.len, " (", databases.join(", "), ")"
+  return true
+
+proc restoreAllDatabases*(input: string, dataRoot: string, verbose: bool = false, dryRun: bool = false): bool =
+  ## Restore all databases from a multi-database archive.
+  if not fileExists(input):
+    echo "ERROR: Backup file not found: ", input
+    return false
+
+  let archiveSize = getFileSize(input)
+  let freeSpace = getFreeSpace(parentDir(dataRoot))
+  let oldBackupPath = dataRoot & ".old_" & $getTime().toUnix()
+
+  if dryRun:
+    echo "DRY-RUN: The following actions would be performed:"
+    echo "  1. Verify archive integrity: ", input
+    echo "  2. Move existing data root to: ", oldBackupPath
+    echo "  3. Extract archive to:         ", dataRoot
+    echo "  Archive size: ", formatBytes(archiveSize)
+    if freeSpace >= 0:
+      echo "  Free space:   ", formatBytes(freeSpace)
+    else:
+      echo "  Free space:   unable to determine"
+    return true
+
+  # Check free space
+  if freeSpace >= 0 and freeSpace < archiveSize * 2:
+    echo "WARNING: Free space (", formatBytes(freeSpace), ") may be insufficient."
+    echo "         Archive is ", formatBytes(archiveSize), " — at least 2x is recommended."
+
+  if dirExists(dataRoot):
+    if verbose:
+      echo "Moving existing data root to: ", oldBackupPath
+    moveDir(dataRoot, oldBackupPath)
+
+  createDir(dataRoot)
+
+  let cmd = "tar -xzf " & quoteShell(input) & " -C " & quoteShell(dataRoot)
+  if verbose:
+    echo "Running: ", cmd
+
+  let (outputStr, exitCode) = execCmdEx(cmd)
+  if exitCode != 0:
+    echo "ERROR: tar extraction failed with exit code ", exitCode
+    if outputStr.len > 0:
+      echo outputStr
+    # Attempt rollback
+    if dirExists(oldBackupPath):
+      echo "Attempting rollback..."
+      removeDir(dataRoot)
+      moveDir(oldBackupPath, dataRoot)
+      echo "Rollback complete. Data restored to previous state."
+    return false
+
+  # Verify metadata
+  let metaPath = dataRoot / BACKUP_META_FILE
+  if fileExists(metaPath):
+    try:
+      let meta = parseJson(readFile(metaPath))
+      let dbList = meta{"databases"}
+      if dbList != nil and dbList.kind == JArray:
+        echo "Restored databases: ", dbList.len
+        for db in dbList:
+          echo "  - ", db.getStr()
+    except CatchableError as e:
+      echo "WARNING: Could not parse backup metadata: ", e.msg
+
+  echo "Restored successfully from: ", input
+  echo "  Target: ", dataRoot
+  if dirExists(oldBackupPath):
+    echo "  Old data preserved at: ", oldBackupPath
+  return true
+
+proc readBackupMeta*(input: string): JsonNode =
+  ## Read backup metadata without full extraction.
+  ## Returns nil if not a multi-db archive or no metadata.
+  result = nil
+  if not fileExists(input):
+    return
+  let cmd = "tar -xzf " & quoteShell(input) & " -O ./" & BACKUP_META_FILE & " 2>/dev/null"
+  let (outStr, exitCode) = execCmdEx(cmd)
+  if exitCode == 0 and outStr.len > 0:
+    try:
+      result = parseJson(outStr)
+    except CatchableError:
+      discard
+
 # =============================================================================
 # CLI Entry Point
 # =============================================================================
@@ -488,6 +665,7 @@ when isMainModule:
   var
     command = ""
     dataDir = DEFAULT_DATA_DIR
+    dataRoot = DEFAULT_DATA_ROOT
     target = ""
     keepCount = DEFAULT_KEEP_COUNT
     excludes: seq[string] = @[]
@@ -496,6 +674,8 @@ when isMainModule:
     dryRun = false
     force = false
     online = false
+    allDatabases = false
+    databaseName = ""
 
   for kind, key, val in getopt():
     case kind
@@ -507,6 +687,7 @@ when isMainModule:
     of cmdLongOption, cmdShortOption:
       case key
       of "data-dir", "d": dataDir = val
+      of "data-root", "r": dataRoot = val
       of "output", "o": target = val
       of "input", "i": target = val
       of "keep", "k":
@@ -522,6 +703,8 @@ when isMainModule:
       of "dry-run": dryRun = true
       of "force", "f": force = true
       of "online": online = true
+      of "all-databases": allDatabases = true
+      of "database": databaseName = val
       of "verbose", "v": verbose = true
       of "help", "h":
         echo HELP_TEXT
@@ -537,35 +720,78 @@ when isMainModule:
   case command
   of "backup":
     let outputFile = if target.len > 0: target else: "backup_" & $getTime().toUnix() & ".tar.gz"
-    if online:
-      echo "Creating online backup with checkpoint..."
-      echo "  Data dir: ", dataDir
-      echo "  Output:   ", outputFile
-      try:
-        var db = newLSMTree(dataDir)
-        db.checkpoint()
-        db.close()
-        echo "Checkpoint complete."
-      except CatchableError as e:
-        echo "ERROR: Checkpoint failed: ", e.msg
-        quit(1)
-      let ok = incrementalBackupDataDir(dataDir, outputFile, verbose)
+    if allDatabases:
+      let ok = backupAllDatabases(dataRoot, outputFile, excludes, compression, verbose)
       if not ok:
-        quit("Online backup failed", 1)
+        quit("Multi-database backup failed", 1)
+    elif databaseName.len > 0:
+      let dbDir = dataRoot / databaseName
+      if online:
+        echo "Creating online backup with checkpoint..."
+        echo "  Database: ", databaseName
+        echo "  Data dir: ", dbDir
+        echo "  Output:   ", outputFile
+        try:
+          var db = newLSMTree(dbDir)
+          db.checkpoint()
+          db.close()
+          echo "Checkpoint complete."
+        except CatchableError as e:
+          echo "ERROR: Checkpoint failed: ", e.msg
+          quit(1)
+        let ok = incrementalBackupDataDir(dbDir, outputFile, verbose)
+        if not ok:
+          quit("Online backup failed", 1)
+      else:
+        let ok = backupDataDir(dbDir, outputFile, excludes, compression, verbose)
+        if not ok:
+          quit("Backup failed", 1)
     else:
-      let ok = backupDataDir(dataDir, outputFile, excludes, compression, verbose)
-      if not ok:
-        quit("Backup failed", 1)
+      if online:
+        echo "Creating online backup with checkpoint..."
+        echo "  Data dir: ", dataDir
+        echo "  Output:   ", outputFile
+        try:
+          var db = newLSMTree(dataDir)
+          db.checkpoint()
+          db.close()
+          echo "Checkpoint complete."
+        except CatchableError as e:
+          echo "ERROR: Checkpoint failed: ", e.msg
+          quit(1)
+        let ok = incrementalBackupDataDir(dataDir, outputFile, verbose)
+        if not ok:
+          quit("Online backup failed", 1)
+      else:
+        let ok = backupDataDir(dataDir, outputFile, excludes, compression, verbose)
+        if not ok:
+          quit("Backup failed", 1)
 
   of "incremental":
     let outputFile = if target.len > 0: target else: "backup_inc_" & $getTime().toUnix() & ".tar.gz"
-    let ok = incrementalBackupDataDir(dataDir, outputFile, verbose)
-    if not ok:
-      quit("Incremental backup failed", 1)
+    if databaseName.len > 0:
+      let dbDir = dataRoot / databaseName
+      let ok = incrementalBackupDataDir(dbDir, outputFile, verbose)
+      if not ok:
+        quit("Incremental backup failed", 1)
+    else:
+      let ok = incrementalBackupDataDir(dataDir, outputFile, verbose)
+      if not ok:
+        quit("Incremental backup failed", 1)
 
   of "restore":
     if target.len == 0:
       quit("ERROR: restore requires --input=<file.tar.gz>\nUse 'backup help' for usage.", 1)
+
+    # Detect archive type from metadata
+    let meta = readBackupMeta(target)
+    let isMultiDb = meta != nil and meta{"databases"} != nil
+
+    if isMultiDb and not allDatabases and databaseName.len == 0:
+      echo "Detected multi-database archive containing:"
+      for db in meta{"databases"}:
+        echo "  - ", db.getStr()
+      echo "Use --all-databases to restore all, or --database=<name> for a single database."
 
     # Always verify first unless dry-run
     if not dryRun:
@@ -575,19 +801,32 @@ when isMainModule:
         logRestore(target, dataDir, false)
         quit("Restore aborted: archive verification failed.", 1)
 
-    if not dryRun and not force:
-      echo "WARNING: This will REPLACE the data in: ", dataDir
-      echo "Continue? [y/N] "
-      let answer = readLine(stdin)
-      if answer.toLowerAscii() notin ["y", "yes"]:
-        echo "Restore cancelled."
-        logRestore(target, dataDir, false, dryRun = false)
-        quit(0)
-
-    let ok = restoreDataDir(target, dataDir, verbose, dryRun)
-    logRestore(target, dataDir, ok, dryRun)
-    if not ok and not dryRun:
-      quit("Restore failed", 1)
+    if allDatabases or isMultiDb:
+      if not dryRun and not force:
+        echo "WARNING: This will REPLACE all databases in: ", dataRoot
+        echo "Continue? [y/N] "
+        let answer = readLine(stdin)
+        if answer.toLowerAscii() notin ["y", "yes"]:
+          echo "Restore cancelled."
+          logRestore(target, dataRoot, false, dryRun = false)
+          quit(0)
+      let ok = restoreAllDatabases(target, dataRoot, verbose, dryRun)
+      logRestore(target, dataRoot, ok, dryRun)
+      if not ok and not dryRun:
+        quit("Restore failed", 1)
+    else:
+      if not dryRun and not force:
+        echo "WARNING: This will REPLACE the data in: ", dataDir
+        echo "Continue? [y/N] "
+        let answer = readLine(stdin)
+        if answer.toLowerAscii() notin ["y", "yes"]:
+          echo "Restore cancelled."
+          logRestore(target, dataDir, false, dryRun = false)
+          quit(0)
+      let ok = restoreDataDir(target, dataDir, verbose, dryRun)
+      logRestore(target, dataDir, ok, dryRun)
+      if not ok and not dryRun:
+        quit("Restore failed", 1)
 
   of "list":
     let backups = listBackups(dataDir)
@@ -601,7 +840,10 @@ when isMainModule:
       quit("Verification failed", 1)
 
   of "cleanup":
-    cleanupOldBackups(dataDir, keepCount, verbose)
+    if allDatabases:
+      cleanupOldBackups(dataRoot, keepCount, verbose)
+    else:
+      cleanupOldBackups(dataDir, keepCount, verbose)
 
   of "history":
     printHistory()
