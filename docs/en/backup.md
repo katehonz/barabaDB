@@ -1,36 +1,125 @@
 # Backup & Recovery
 
-BaraDB provides multiple backup strategies ranging from full snapshots to incremental and online consistent backups.
-
-> ⚠️ **Multi-Database Setup**
-> BaraDB supports multiple databases (`CREATE DATABASE`). Each database has its own isolated data directory (e.g. `data/databases/<name>/`). Backup, repair, checkpoint, and migration commands operate on **one directory at a time**. If you use multiple databases, run the commands for each database separately or back up the entire `data/databases/` parent directory.
+BaraDB provides multiple backup strategies ranging from full snapshots to incremental, online consistent backups, and multi-database archiving.
 
 ## Architecture
 
 ```
 ┌─────────────────────────────────────────┐
-│  Data Directory                         │
-│  ├── MANIFEST          (atomic catalog) │
-│  ├── sstables/         (SSTable v3 CRC) │
-│  │   ├── 1.sst                          │
-│  │   └── 2.sst                          │
-│  └── wal/                               │
-│      ├── wal.log       (active segment) │
-│      └── wal_archive/  (rotated segments│
+│  Data Root                              │
+│  └── databases/                         │
+│      ├── default/                       │
+│      │   ├── MANIFEST                   │
+│      │   ├── sstables/                  │
+│      │   └── wal/                       │
+│      ├── mydb/                          │
+│      │   ├── MANIFEST                   │
+│      │   ├── sstables/                  │
+│      │   └── wal/                       │
+│      └── ...                            │
 └─────────────────────────────────────────┘
 ```
 
 ## Backup Tool
 
-The backup tool is shipped as `src/barabadb/core/backup.nim`. Build it before use:
-
 ```bash
 nim c -o:build/backup src/barabadb/core/backup.nim
 ```
 
-## SSTable Integrity (v3 CRC Footer)
+## Multi-Database Backup (Recommended)
 
-Every SSTable file written by BaraDB includes a CRC32 footer:
+### Backup all databases
+
+```bash
+./build/backup backup --all-databases --data-root=./data/databases --output=all_$(date +%s).tar.gz
+```
+
+The archive contains:
+- `backup.json` — metadata (version, timestamp, database list)
+- `databases/<name>/` — each database with its MANIFEST, SSTables, and WAL
+
+### Backup a single database
+
+```bash
+./build/backup backup --database=default --data-root=./data/databases --output=default_$(date +%s).tar.gz
+```
+
+### Restore all databases
+
+```bash
+./build/backup restore --input=all_1234567890.tar.gz --all-databases --data-root=./data/databases
+```
+
+### Restore a single database
+
+```bash
+./build/backup restore --input=default_1234567890.tar.gz --database=default --data-root=./data/databases
+```
+
+## Legacy Single-Directory Backup
+
+For backward compatibility with older installations (single database in `data/server`):
+
+```bash
+./build/backup backup --data-dir=./data/server --output=legacy_$(date +%s).tar.gz
+./build/backup restore --input=legacy_1234567890.tar.gz --data-dir=./data/server
+```
+
+## Incremental Backup
+
+```bash
+./build/backup incremental --database=default --data-root=./data/databases --output=inc_$(date +%s).tar.gz
+```
+
+Includes only:
+- `MANIFEST`
+- Active SSTables (from MANIFEST)
+- Current WAL (`wal/wal.log`)
+- WAL archive (`wal/wal_archive/*.log`)
+
+All SSTables are **CRC-verified** before archiving.
+
+## Online Consistent Backup
+
+```bash
+./build/backup backup --online --database=default --data-root=./data/databases --output=online_$(date +%s).tar.gz
+```
+
+Equivalent to:
+1. `checkpoint` (freeze memtable, flush, rotate WAL)
+2. `incremental backup`
+
+Safe to run while the server is running.
+
+## HTTP API Backup
+
+Backup/restore is also available via REST API (requires admin JWT token):
+
+```bash
+# Backup all databases
+curl -X POST http://localhost:9912/backup \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"all": true}'
+
+# Backup single database
+curl -X POST http://localhost:9912/backup \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"database": "default"}'
+
+# List backups
+curl http://localhost:9912/backups \
+  -H "Authorization: Bearer <token>"
+
+# Restore
+curl -X POST http://localhost:9912/restore \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "backup_1234567890.tar.gz", "all": true}'
+```
+
+## SSTable Integrity (v3 CRC Footer)
 
 ```
 [Header] 36 bytes
@@ -43,35 +132,17 @@ Every SSTable file written by BaraDB includes a CRC32 footer:
   dataCrc32, indexCrc32, bloomCrc32, reserved
 ```
 
-This enables independent verification of each SSTable:
-
-```bash
-# Via Nim API
-import barabadb/storage/lsm
-let (ok, msg) = verifySSTable("data/databases/default/sstables/1.sst")
-```
-
 ## Storage Repair (`baradadb repair`)
-
-If corruption is suspected, run the repair tool against a specific database directory:
 
 ```bash
 # Dry run — preview only
 ./build/baradadb repair --data-dir=./data/databases/default --dry-run
 
-# Full repair — verify, move corrupt files, replay WAL
+# Full repair
 ./build/baradadb repair --data-dir=./data/databases/default
 ```
 
-**What repair does:**
-1. Scans all `sstables/*.sst` and verifies CRC
-2. Moves corrupt SSTables to `<data-dir>/corrupt/`
-3. Replays WAL to recover unflushed committed data
-4. Reports results
-
 ## MANIFEST Catalog
-
-The `MANIFEST` file is the single source of truth for active SSTables. It is updated atomically on every flush and compaction.
 
 ```json
 {
@@ -84,135 +155,53 @@ The `MANIFEST` file is the single source of truth for active SSTables. It is upd
 }
 ```
 
-Benefits:
-- **Consistent view** — no orphan SSTables after crash
-- **Fast startup** — load from MANIFEST instead of directory scan
-- **Orphan detection** — `checkStorageConsistency()` reports extra/missing files
-
-In a multi-database setup, each database maintains its own independent MANIFEST inside its data directory.
-
-## WAL Rotation
-
-The Write-Ahead Log rotates when it reaches 64MB:
-
-```
-wal/wal.log          → active segment
-wal/wal_archive/
-  ├── wal.000001.log
-  ├── wal.000002.log
-  └── wal.000003.log
-```
-
-Rotation happens:
-- Every 1000 WAL entries (lightweight size check)
-- On every `flush` / `checkpoint`
-
 ## Checkpoint
-
-A checkpoint creates a consistent storage boundary without stopping the server:
 
 ```bash
 ./build/baradadb checkpoint --data-dir=./data/databases/default
 ```
 
 **How it works:**
-1. Freeze memtable (swap to immutable, new memtable for writes)
-2. Flush frozen memtable to SSTable
+1. Freeze memtable (< 1ms)
+2. Flush to SSTable
 3. Rotate WAL
 4. Write MANIFEST
 
-The freeze takes **< 1ms**; the flush proceeds concurrently with writes.
-
-## Backup Commands
-
-> Build the backup tool first: `nim c -o:build/backup src/barabadb/core/backup.nim`
-
-### Full Backup (tar.gz)
-
-```bash
-./build/backup backup --data-dir=./data/databases/default --output=backup_$(date +%s).tar.gz
-```
-
-Archives the entire data directory of the specified database.
-
-### Incremental Backup
-
-```bash
-./build/backup incremental --data-dir=./data/databases/default --output=backup_inc_$(date +%s).tar.gz
-```
-
-Includes only:
-- `MANIFEST`
-- Active SSTables (from MANIFEST)
-- Current WAL (`wal/wal.log`)
-- WAL archive (`wal/wal_archive/*.log`)
-
-All SSTables are **CRC-verified** before archiving.
-
-### Online Consistent Backup
-
-```bash
-./build/backup backup --online --data-dir=./data/databases/default --output=backup_online_$(date +%s).tar.gz
-```
-
-Equivalent to:
-1. `checkpoint`
-2. `incremental backup`
-
-Safe to run while the server is running. The checkpoint creates a consistent snapshot, then the incremental backup archives it.
-
 ## SSTable Version Migration
 
-If you have legacy v1/v2 SSTables, migrate them to v3 per database:
-
 ```bash
-# Preview
 ./build/baradadb migrate --data-dir=./data/databases/default --dry-run
-
-# Migrate
 ./build/baradadb migrate --data-dir=./data/databases/default
 ```
 
-Migration rewrites each legacy SSTable with the current v3 format (CRC footer) and updates the MANIFEST.
-
 ## Recovery Procedures
 
-### Scenario 1: Corrupt SSTable Detected
+### Scenario 1: Corrupt SSTable
 
 ```bash
-# Repair moves corrupt files and replays WAL
 ./build/baradadb repair --data-dir=./data/databases/default
-
-# Verify consistency
-./build/baradadb repair --data-dir=./data/databases/default --dry-run
 ```
 
-### Scenario 2: Restore from Backup (Single Database)
+### Scenario 2: Restore from Multi-Database Backup
 
 ```bash
-# Stop the server
-# Extract backup into the database directory
-tar -xzf backup_1234567890.tar.gz -C ./data/databases/default
+# 1. Extract
+./build/backup restore --input=backup_latest.tar.gz --all-databases --data-root=./data/databases
 
-# Restart — LSMTree loads from MANIFEST
-./build/baradadb
-```
-
-### Scenario 3: Restore All Databases
-
-If you back up the entire `data/databases/` tree:
-
-```bash
-# 1. Extract latest backup
-tar -xzf backup_latest.tar.gz -C ./data
-
-# 2. Run repair for each database to replay any available WAL
+# 2. Repair each database
 for db in ./data/databases/*/; do
   ./build/baradadb repair --data-dir="$db" --dry-run
 done
 
 # 3. Start server
 ./build/baradadb
+```
+
+### Scenario 3: Manual extraction
+
+```bash
+tar -xzf backup_latest.tar.gz -C ./data
+# Archive contains: databases/<name>/ + backup.json
 ```
 
 ## Storage Requirements
@@ -225,9 +214,9 @@ done
 
 ## Best Practices
 
-1. **Run repair after unclean shutdown** — `./build/baradadb repair`
-2. **Migrate legacy SSTables** — `./build/baradadb migrate`
-3. **Test restores regularly** — A backup you can't restore is useless
-4. **Use incremental + checkpoint** — For frequent consistent snapshots
-5. **Store backups offsite** — S3, GCS, or another server
-6. **Monitor MANIFEST sequence** — Should grow monotonically with flushes
+1. **Use `--all-databases`** for full backups in multi-DB setups
+2. **Test restores regularly** — A backup you can't restore is useless
+3. **Run repair after unclean shutdown**
+4. **Store backups offsite** — S3, GCS, or another server
+5. **Use incremental + checkpoint** — For frequent consistent snapshots
+6. **Monitor `/backups` endpoint** — Via admin panel or API

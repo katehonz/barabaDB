@@ -1,36 +1,125 @@
 # Backup и Възстановяване
 
-BaraDB предоставя няколко стратегии за backup — от пълни snapshot-ове до инкрементални и online consistent backups.
-
-> ⚠️ **Настройка с множество бази данни**
-> BaraDB поддържа множество бази данни (`CREATE DATABASE`). Всяка база има собствена изолирана data директория (напр. `data/databases/<име>/`). Командите за backup, repair, checkpoint и migration работят върху **една директория наведнъж**. Ако използвате множество бази, пускайте командите за всяка база отделно или архивирайте цялата `data/databases/` директория.
+BaraDB предоставя няколко стратегии за backup — от пълни snapshot-ове до инкрементални, online consistent backups и multi-database архивиране.
 
 ## Архитектура
 
 ```
 ┌─────────────────────────────────────────┐
-│  Data Directory                         │
-│  ├── MANIFEST          (atomic catalog) │
-│  ├── sstables/         (SSTable v3 CRC) │
-│  │   ├── 1.sst                          │
-│  │   └── 2.sst                          │
-│  └── wal/                               │
-│      ├── wal.log       (активен сегмент)│
-│      └── wal_archive/  (ротирани сегменти
+│  Data Root                              │
+│  └── databases/                         │
+│      ├── default/                       │
+│      │   ├── MANIFEST                   │
+│      │   ├── sstables/                  │
+│      │   └── wal/                       │
+│      ├── mydb/                          │
+│      │   ├── MANIFEST                   │
+│      │   ├── sstables/                  │
+│      │   └── wal/                       │
+│      └── ...                            │
 └─────────────────────────────────────────┘
 ```
 
 ## Backup Инструмент
 
-Backup инструментът е в `src/barabadb/core/backup.nim`. Компилирайте го преди употреба:
-
 ```bash
 nim c -o:build/backup src/barabadb/core/backup.nim
 ```
 
-## SSTable Integrity (v3 CRC Footer)
+## Multi-Database Backup (Препоръчително)
 
-Всеки SSTable файл, записан от BaraDB, включва CRC32 footer:
+### Архивиране на всички бази
+
+```bash
+./build/backup backup --all-databases --data-root=./data/databases --output=all_$(date +%s).tar.gz
+```
+
+Архивът съдържа:
+- `backup.json` — метаданни (версия, timestamp, списък бази)
+- `databases/<име>/` — всяка база със своя MANIFEST, SSTables и WAL
+
+### Backup на единична база
+
+```bash
+./build/backup backup --database=default --data-root=./data/databases --output=default_$(date +%s).tar.gz
+```
+
+### Възстановяване на всички бази
+
+```bash
+./build/backup restore --input=all_1234567890.tar.gz --all-databases --data-root=./data/databases
+```
+
+### Възстановяване на единична база
+
+```bash
+./build/backup restore --input=default_1234567890.tar.gz --database=default --data-root=./data/databases
+```
+
+## Legacy Single-Directory Backup
+
+За обратна съвместимост със стари инсталации (една база в `data/server`):
+
+```bash
+./build/backup backup --data-dir=./data/server --output=legacy_$(date +%s).tar.gz
+./build/backup restore --input=legacy_1234567890.tar.gz --data-dir=./data/server
+```
+
+## Инкрементален Backup
+
+```bash
+./build/backup incremental --database=default --data-root=./data/databases --output=inc_$(date +%s).tar.gz
+```
+
+Включва само:
+- `MANIFEST`
+- Активни SSTables (от MANIFEST)
+- Текущ WAL (`wal/wal.log`)
+- WAL архив (`wal/wal_archive/*.log`)
+
+Всички SSTables се **проверяват с CRC** преди архивиране.
+
+## Online Consistent Backup
+
+```bash
+./build/backup backup --online --database=default --data-root=./data/databases --output=online_$(date +%s).tar.gz
+```
+
+Еквивалентно на:
+1. `checkpoint` (freeze memtable, flush, rotate WAL)
+2. `incremental backup`
+
+Безопасно за пускане докато сървърът работи.
+
+## HTTP API Backup
+
+Backup/restore е достъпен и през REST API (изисква admin JWT токен):
+
+```bash
+# Backup на всички бази
+curl -X POST http://localhost:9912/backup \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"all": true}'
+
+# Backup на единична база
+curl -X POST http://localhost:9912/backup \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"database": "default"}'
+
+# Списък с архиви
+curl http://localhost:9912/backups \
+  -H "Authorization: Bearer <token>"
+
+# Restore
+curl -X POST http://localhost:9912/restore \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"input": "backup_1234567890.tar.gz", "all": true}'
+```
+
+## SSTable Integrity (v3 CRC Footer)
 
 ```
 [Header] 36 байта
@@ -43,35 +132,17 @@ nim c -o:build/backup src/barabadb/core/backup.nim
   dataCrc32, indexCrc32, bloomCrc32, reserved
 ```
 
-Това позволява независима проверка на всеки SSTable:
-
-```bash
-# Чрез Nim API
-import barabadb/storage/lsm
-let (ok, msg) = verifySSTable("data/databases/default/sstables/1.sst")
-```
-
 ## Storage Repair (`baradadb repair`)
-
-При съмнение за повреда, пуснете repair инструмента за конкретна база данни:
 
 ```bash
 # Dry run — само преглед
 ./build/baradadb repair --data-dir=./data/databases/default --dry-run
 
-# Пълен ремонт — проверка, преместване на битите файлове, WAL replay
+# Пълен ремонт
 ./build/baradadb repair --data-dir=./data/databases/default
 ```
 
-**Какво прави repair:**
-1. Сканира всички `sstables/*.sst` и проверява CRC
-2. Премества корумпираните SSTables в `<data-dir>/corrupt/`
-3. Пуска WAL replay за възстановяване на незаписани данни
-4. Докладва резултати
-
 ## MANIFEST Каталог
-
-Файлът `MANIFEST` е единственият източник на истина за активните SSTables. Обновява се атомично при всеки flush и compaction.
 
 ```json
 {
@@ -84,135 +155,53 @@ let (ok, msg) = verifySSTable("data/databases/default/sstables/1.sst")
 }
 ```
 
-Предимства:
-- **Консистентен изглед** — няма orphan SSTables след crash
-- **Бързо стартиране** — зарежда от MANIFEST вместо scan на директория
-- **Откриване на orphans** — `checkStorageConsistency()` докладва излишни/липсващи файлове
-
-При настройка с множество бази данни, всяка база поддържа собствен независим MANIFEST в своята data директория.
-
-## WAL Ротация
-
-Write-Ahead Log се ротира при достигане на 64MB:
-
-```
-wal/wal.log          → активен сегмент
-wal/wal_archive/
-  ├── wal.000001.log
-  ├── wal.000002.log
-  └── wal.000003.log
-```
-
-Ротацията се случва:
-- На всеки 1000 WAL записа (лека проверка на размер)
-- При всеки `flush` / `checkpoint`
-
 ## Checkpoint
-
-Checkpoint създава консистентна граница на storage без спиране на сървъра:
 
 ```bash
 ./build/baradadb checkpoint --data-dir=./data/databases/default
 ```
 
 **Как работи:**
-1. Freeze на memtable (swap към immutable, нов memtable за writes)
-2. Flush на frozen memtable към SSTable
+1. Freeze на memtable (< 1ms)
+2. Flush към SSTable
 3. Ротация на WAL
 4. Запис на MANIFEST
 
-Freeze-ът отнема **< 1ms**; flush-ът продължава паралелно с writes.
-
-## Backup Команди
-
-> Компилирайте backup инструмента първо: `nim c -o:build/backup src/barabadb/core/backup.nim`
-
-### Пълен Backup (tar.gz)
-
-```bash
-./build/backup backup --data-dir=./data/databases/default --output=backup_$(date +%s).tar.gz
-```
-
-Архивира цялата data директория на посочената база данни.
-
-### Инкрементален Backup
-
-```bash
-./build/backup incremental --data-dir=./data/databases/default --output=backup_inc_$(date +%s).tar.gz
-```
-
-Включва само:
-- `MANIFEST`
-- Активни SSTables (от MANIFEST)
-- Текущ WAL (`wal/wal.log`)
-- WAL архив (`wal/wal_archive/*.log`)
-
-Всички SSTables се **проверяват с CRC** преди архивиране.
-
-### Online Consistent Backup
-
-```bash
-./build/backup backup --online --data-dir=./data/databases/default --output=backup_online_$(date +%s).tar.gz
-```
-
-Еквивалентно на:
-1. `checkpoint`
-2. `incremental backup`
-
-Безопасно за пускане докато сървърът работи. Checkpoint-ът създава консистентен snapshot, след което инкременталният backup го архивира.
-
 ## Миграция на SSTable Версии
 
-Ако имате legacy v1/v2 SSTables, мигрирайте ги към v3 за всяка база данни:
-
 ```bash
-# Преглед
 ./build/baradadb migrate --data-dir=./data/databases/default --dry-run
-
-# Миграция
 ./build/baradadb migrate --data-dir=./data/databases/default
 ```
 
-Миграцията пренаписва всеки legacy SSTable в текущия v3 формат (CRC footer) и обновява MANIFEST.
-
 ## Процедури за Възстановяване
 
-### Сценарий 1: Открит е Корумпиран SSTable
+### Сценарий 1: Корумпиран SSTable
 
 ```bash
-# Repair премества битите файлове и пуска WAL replay
 ./build/baradadb repair --data-dir=./data/databases/default
-
-# Проверка на консистентност
-./build/baradadb repair --data-dir=./data/databases/default --dry-run
 ```
 
-### Сценарий 2: Възстановяване от Backup (Единична База)
+### Сценарий 2: Възстановяване от Multi-Database Backup
 
 ```bash
-# Спиране на сървъра
-# Разархивиране на backup в директорията на базата
-tar -xzf backup_1234567890.tar.gz -C ./data/databases/default
+# 1. Разархивиране
+./build/backup restore --input=backup_latest.tar.gz --all-databases --data-root=./data/databases
 
-# Рестарт — LSMTree зарежда от MANIFEST
-./build/baradadb
-```
-
-### Сценарий 3: Възстановяване на Всички Бази
-
-Ако сте архивирали цялото `data/databases/` дърво:
-
-```bash
-# 1. Разархивиране на последния backup
-tar -xzf backup_latest.tar.gz -C ./data
-
-# 2. Repair за всяка база за replay на наличния WAL
+# 2. Repair за всяка база
 for db in ./data/databases/*/; do
   ./build/baradadb repair --data-dir="$db" --dry-run
 done
 
-# 3. Стартиране на сървъра
+# 3. Стартиране
 ./build/baradadb
+```
+
+### Сценарий 3: Ръчно разархивиране
+
+```bash
+tar -xzf backup_latest.tar.gz -C ./data
+# Архивът съдържа: databases/<име>/ + backup.json
 ```
 
 ## Изисквания за Съхранение
@@ -225,9 +214,9 @@ done
 
 ## Най-добри Практики
 
-1. **Пускайте repair след некоректно спиране** — `./build/baradadb repair`
-2. **Мигрирайте legacy SSTables** — `./build/baradadb migrate`
-3. **Тествайте възстановяването редовно** — Backup, който не може да бъде възстановен, е безполезен
-4. **Използвайте incremental + checkpoint** — За чести консистентни snapshot-ове
-5. **Съхранявайте backups извън локацията** — S3, GCS или друг сървър
-6. **Следете MANIFEST sequence** — Трябва да расте монотонно с flush-овете
+1. **Използвайте `--all-databases`** за пълен backup в multi-DB сетъп
+2. **Тествайте възстановяването редовно** — Backup, който не може да бъде възстановен, е безполезен
+3. **Пускайте repair след некоректно спиране**
+4. **Съхранявайте backups извън локацията** — S3, GCS или друг сървър
+5. **Използвайте incremental + checkpoint** — За чести консистентни snapshot-ове
+6. **Мониторирайте `/backups` endpoint** — През админ панела или API
