@@ -151,28 +151,37 @@ proc formatTimestamp*(ts: int64): string =
     result = $ts
 
 proc parseBackupFilename*(filename: string): int64 =
-  ## Try to extract timestamp from backup_1234567890.tar.gz
+  ## Try to extract timestamp from backup_1234567890.tar.gz (or .tar)
   try:
     let name = extractFilename(filename)
     if name.startsWith("backup_"):
-      let tsStr = name[7..^8]  # skip "backup_" and ".tar.gz"
-      result = parseBiggestInt(tsStr)
+      let tsStr = if name.endsWith(".tar.gz"): name[7..^8]
+                  elif name.endsWith(".tar"): name[7..^5]
+                  else: ""
+      if tsStr.len > 0:
+        result = parseBiggestInt(tsStr)
+      else:
+        result = 0
     else:
       result = 0
   except:
     result = 0
 
 proc getArchiveSize*(input: string): int64 =
-  ## Return uncompressed size estimate from tar archive
-  let cmd = "tar -tzf " & quoteShell(input) & " | wc -l"
-  let (outStr, exitCode) = execCmdEx(cmd)
-  if exitCode == 0:
-    try:
-      result = parseBiggestInt(strip(outStr))
-    except:
-      result = 0
+  ## Return uncompressed size in bytes from archive.
+  ## Uses gzip -l for .gz; falls back to file size for plain .tar.
+  if input.endsWith(".gz"):
+    let cmd = "gzip -l " & quoteShell(input) & " 2>/dev/null | awk 'NR==2{print $2}'"
+    let (outStr, exitCode) = execCmdEx(cmd)
+    if exitCode == 0:
+      try:
+        result = parseBiggestInt(strip(outStr))
+      except:
+        result = getFileSize(input)  # fallback
+    else:
+      result = getFileSize(input)
   else:
-    result = 0
+    result = getFileSize(input)
 
 proc getFreeSpace*(path: string): int64 =
   ## Return free disk space in bytes for the filesystem containing path
@@ -287,7 +296,7 @@ proc restoreDataDir*(input: string, dataDir: string, verbose: bool = false, dryR
 
   createDir(dataDir)
 
-  let cmd = "tar -xzf " & quoteShell(input) & " -C " & quoteShell(dataDir)
+  let cmd = "tar -xzf " & quoteShell(input) & " --strip-components=1 -C " & quoteShell(dataDir)
   if verbose:
     echo "Running: ", cmd
 
@@ -523,7 +532,6 @@ proc backupAllDatabases*(dataRoot: string, output: string, excludes: seq[string]
   if fileExists(output):
     echo "WARNING: Overwriting existing file: ", output
 
-  let workDir = getCurrentDir()
   let tempDir = getTempDir() / "baradb_backup_" & $getTime().toUnix()
   createDir(tempDir / "databases")
 
@@ -608,7 +616,7 @@ proc restoreAllDatabases*(input: string, dataRoot: string, verbose: bool = false
 
   createDir(dataRoot)
 
-  let cmd = "tar -xzf " & quoteShell(input) & " -C " & quoteShell(dataRoot)
+  let cmd = "tar -xzf " & quoteShell(input) & " -C " & quoteShell(parentDir(dataRoot))
   if verbose:
     echo "Running: ", cmd
 
@@ -625,8 +633,8 @@ proc restoreAllDatabases*(input: string, dataRoot: string, verbose: bool = false
       echo "Rollback complete. Data restored to previous state."
     return false
 
-  # Verify metadata
-  let metaPath = dataRoot / BACKUP_META_FILE
+  # Verify metadata (extracted to parent dir due to archive layout)
+  let metaPath = parentDir(dataRoot) / BACKUP_META_FILE
   if fileExists(metaPath):
     try:
       let meta = parseJson(readFile(metaPath))

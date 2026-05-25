@@ -524,6 +524,12 @@ proc restoreHandler(server: HttpServer): RequestHandler =
       let dbName = if body != nil and "database" in body: body["database"].getStr() else: ""
       let dataRoot = server.registry.dataRoot
       try:
+        # Verify archive integrity first
+        if not verifyArchive(inputFile, false):
+          logRestore(inputFile, dataRoot, false)
+          ctx.json(%*{"error": "Archive verification failed — file may be corrupted"}, 500)
+          return
+
         let meta = readBackupMeta(inputFile)
         let isMultiDb = meta != nil and meta{"databases"} != nil
         var ok = false
@@ -534,6 +540,8 @@ proc restoreHandler(server: HttpServer): RequestHandler =
           ok = restoreDataDir(inputFile, dbDir, false, false)
         else:
           ok = restoreAllDatabases(inputFile, dataRoot, false, false)
+
+        logRestore(inputFile, dataRoot, ok)
         if ok:
           # Reload databases after restore
           server.registry.loadExistingDatabases()

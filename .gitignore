@@ -18,6 +18,7 @@ clients/nim/tests/test_client
 src/baradadb
 src/barabadb/client/client
 src/barabadb/core/raft
+src/barabadb/core/backup
 
 # Temp
 *.tmp
