@@ -10,7 +10,7 @@ binDir        = "build"
 # Dependencies
 requires "nim >= 2.2.0"
 requires "https://github.com/katehonz/hunos >= 1.3.0"
-requires "https://github.com/katehonz/jwt-nim-baraba >= 2.1.0"
+requires "https://github.com/katehonz/jwt-nim-baraba#fbe084b" # v2.1.2 - security fixes & Nim 2.2 compat
 requires "checksums >= 0.2.0"
 
 # Tasks
