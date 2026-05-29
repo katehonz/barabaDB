@@ -191,7 +191,7 @@ proc registerStdlib*(reg: UDFRegistry) =
           let length = int(args[2].int64Val)
           let endIdx = min(start + length, s.len)
           return Value(kind: vkString, strVal: s[start ..< endIdx])
-        return Value(kind: vkString, strVal: s[start .. start])
+        return Value(kind: vkString, strVal: s[start ..< s.len])
       return Value(kind: vkNull))
 
   # Type conversion

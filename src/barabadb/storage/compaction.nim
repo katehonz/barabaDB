@@ -75,12 +75,13 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
   var failedLoad = false
   for t in tables:
     try:
-      let sst = loadSSTable(t.path)
+      var sst = loadSSTable(t.path)
       for key, offset in sst.index:
         let (found, entry) = readSSTableEntry(sst, key)
         if found:
           allEntries.add(entry)
           inc entriesRead
+      sst.close()
     except CatchableError as e:
       echo "[ERROR] Failed to load SSTable for compaction: ", t.path, ": ", e.msg
       failedLoad = true

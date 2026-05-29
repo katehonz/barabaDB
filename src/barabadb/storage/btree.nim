@@ -247,8 +247,7 @@ proc mergeWithLeft[K, V](node: BTreeNode[K, V], parent: BTreeNode[K, V], parentI
   let sibling = parent.children[parentIdx - 1]
   let sepKey = parent.keys[parentIdx - 1]
   if node.isLeaf:
-    sibling.keys.add(sepKey)
-    sibling.values.add(newSeq[V]())
+    # Leaf merge: do NOT insert separator key, just concatenate data entries
     for i in 0..<node.keys.len:
       sibling.keys.add(node.keys[i])
       sibling.values.add(node.values[i])
@@ -267,8 +266,7 @@ proc mergeWithRight[K, V](node: BTreeNode[K, V], parent: BTreeNode[K, V], parent
   let sibling = parent.children[parentIdx + 1]
   let sepKey = parent.keys[parentIdx]
   if node.isLeaf:
-    node.keys.add(sepKey)
-    node.values.add(newSeq[V]())
+    # Leaf merge: do NOT insert separator key, just concatenate data entries
     for i in 0..<sibling.keys.len:
       node.keys.add(sibling.keys[i])
       node.values.add(sibling.values[i])

@@ -552,7 +552,6 @@ proc readIdent(l: var Lexer, startLine, startCol: int): Token =
     fastRuneAt(l.input, p, r, true)
     if isIdentPartRune(r):
       ident.add($r)
-      inc l.col
       discard l.advanceRune()
     else:
       break

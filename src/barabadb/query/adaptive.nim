@@ -95,16 +95,20 @@ proc endExecution*(planner: AdaptivePlanner, plan: var QueryPlan) =
   plan.stats.wallTime = getMonoTime().ticks() - plan.stats.wallTime
   plan.actualCost = float64(plan.stats.wallTime) / 1_000_000_000.0
 
+const maxPlanCacheSize = 10000
+
+proc evictCache*(planner: AdaptivePlanner) =
+  planner.planCache.clear()
+
 proc cachePlan*(planner: AdaptivePlanner, query: string, plan: QueryPlan) =
+  if planner.planCache.len >= maxPlanCacheSize:
+    planner.evictCache()
   let hash = hashQuery(query)
   planner.planCache[hash] = plan
 
 proc getCachedPlan*(planner: AdaptivePlanner, query: string): QueryPlan =
   let hash = hashQuery(query)
   return planner.planCache.getOrDefault(hash, nil)
-
-proc evictCache*(planner: AdaptivePlanner) =
-  planner.planCache.clear()
 
 proc cacheSize*(planner: AdaptivePlanner): int = planner.planCache.len
 

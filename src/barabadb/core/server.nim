@@ -49,6 +49,12 @@ type
     activeConnectionsLock*: Lock
 
 proc newServerWithRegistry*(config: BaraConfig, registry: DatabaseRegistry): Server =
+  # CRITICAL: Reject empty JWT secret when auth is enabled
+  if config.authEnabled and config.jwtSecret.len == 0:
+    raise newException(ValueError, 
+      "Security error: authEnabled is true but jwtSecret is empty. " &
+      "Set BARADB_JWT_SECRET environment variable or jwt_secret in baradb.json")
+  
   let dbInfo = getOrCreateDatabase(registry, "default")
   let db = dbInfo.db
   let ctx = cast[ExecutionContext](cast[pointer](dbInfo.ctx))
@@ -369,6 +375,9 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
       # Detect text-based DISTTXN RPC (starts with "DISTTXN")
       if headerData.len >= 7 and headerData[0..6] == "DISTTXN":
+        if not authenticated:
+          await client.send("ERR auth required\n")
+          continue
         var rest = headerData[7..^1]
         while '\n' notin rest:
           let more = await client.recvWithTimeout(1024, idleTimeout)
@@ -405,6 +414,9 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
       # Detect replication data (starts with "REP ")
       if headerData.len >= 4 and headerData[0..3] == "REP ":
+        if not authenticated:
+          await client.send("ERR auth required\n")
+          continue
         var rest = headerData[4..^1]
         while '\n' notin rest:
           let more = await client.recvWithTimeout(1024, idleTimeout)

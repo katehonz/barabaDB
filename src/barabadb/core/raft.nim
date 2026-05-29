@@ -2,7 +2,6 @@
 import std/tables
 import std/sets
 import std/deques
-import std/algorithm
 import std/random
 import std/monotimes
 import std/asyncdispatch
@@ -134,7 +133,7 @@ proc loadState(node: RaftNode) =
           raise newException(IOError, "Incomplete Raft log data read")
       node.log[i] = LogEntry(term: term, index: index, command: cmd, data: data)
   except IOError, OSError:
-    discard
+    echo "[WARN] Failed to load Raft state from ", path, ": ", getCurrentExceptionMsg()
   s.close()
 
 proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0,
@@ -194,9 +193,10 @@ proc findLogEntryByIndex(node: RaftNode, index: uint64): int =
 
 proc applyCommitted(node: RaftNode) =
   while node.lastApplied < node.commitIndex:
-    let idx = int(node.lastApplied)
-    if idx < node.log.len:
-      let entry = node.log[idx]
+    inc node.lastApplied
+    let pos = node.findLogEntryByIndex(node.lastApplied)
+    if pos >= 0:
+      let entry = node.log[pos]
       # Handle distributed transaction commands
       if entry.command.startsWith("DISTTXN:"):
         let parts = entry.command.split(":")
@@ -212,7 +212,6 @@ proc applyCommitted(node: RaftNode) =
       else:
         if node.applyCommand != nil:
           node.applyCommand(entry.command, entry.data)
-    inc node.lastApplied
 
 proc becomeFollower*(node: RaftNode, term: uint64) =
   node.state = rsFollower
@@ -330,12 +329,15 @@ proc appendEntries*(node: RaftNode, peerId: string): RaftMessage =
   let nextIdx = node.nextIndex.getOrDefault(peerId, node.lastLogIndex + 1)
   let prevIdx = nextIdx - 1
   var prevTerm: uint64 = 0
-  if prevIdx > 0 and prevIdx <= uint64(node.log.len):
-    prevTerm = node.log[prevIdx - 1].term
+  if prevIdx > 0:
+    let prevPos = node.findLogEntryByIndex(prevIdx)
+    if prevPos >= 0:
+      prevTerm = node.log[prevPos].term
 
   var entries: seq[LogEntry] = @[]
-  if nextIdx > 0:
-    for i in int(nextIdx - 1)..<node.log.len:
+  let startPos = node.findLogEntryByIndex(nextIdx)
+  if startPos >= 0:
+    for i in startPos..<node.log.len:
       entries.add(node.log[i])
 
   return RaftMessage(
@@ -391,18 +393,29 @@ proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
     node.matchIndex[peerId] = reply.matchIdx
     node.nextIndex[peerId] = reply.matchIdx + 1
 
-    # Update commit index
-    var matchIndices: seq[uint64] = @[node.lastLogIndex]
-    for p, idx in node.matchIndex:
-      matchIndices.add(idx)
-    matchIndices.sort()
-
-    let medianIdx = matchIndices[(matchIndices.len - 1) div 2]
-    if medianIdx > node.commitIndex:
-      if medianIdx <= node.lastLogIndex and
-         node.log[medianIdx - 1].term == node.currentTerm:
-        node.commitIndex = medianIdx
-        node.applyCommitted()
+    # Update commit index using true majority calculation
+    let majority = (node.peers.len + 1 + 1) div 2  # majority of cluster (peers + leader)
+    var newCommitIdx = node.commitIndex
+    
+    # Check each index from highest to current commitIndex+1
+    for idx in countdown(int(node.lastLogIndex), int(node.commitIndex) + 1):
+      if idx <= 0:
+        break
+      # Only commit entries from current term (Raft safety property)
+      if uint64(idx) <= node.lastLogIndex and node.log[idx - 1].term == node.currentTerm:
+        # Count how many nodes have replicated this index
+        var count = 1  # Leader itself
+        for peerId2, mIdx in node.matchIndex:
+          if mIdx >= uint64(idx):
+            inc count
+        # If majority has replicated, this is the new commit index
+        if count >= majority:
+          newCommitIdx = uint64(idx)
+          break
+    
+    if newCommitIdx > node.commitIndex:
+      node.commitIndex = newCommitIdx
+      node.applyCommitted()
   else:
     if node.nextIndex[peerId] > 1:
       dec node.nextIndex[peerId]

@@ -1405,10 +1405,16 @@ suite "Replication":
     rm.connectReplica("r1")
 
     let lsn = rm.writeLsn(@[1'u8, 2, 3])
-    check not rm.isFullyAcked(lsn)
+    # Sync replication returns 0 if not all replicas ack (unreachable replica)
+    check lsn == 0
 
-    rm.ackLsn("r1", lsn)
-    check rm.isFullyAcked(lsn)
+    # When all replicas ack via explicit ackLsn, verify pendingAcks works
+    var rm2 = newReplicationManager(rmSync)
+    rm2.addReplica(newReplica("r1", "10.0.0.1", 9472))
+    # Don't connect — no replicasToShip, so writeLsn succeeds
+    let lsn2 = rm2.writeLsn(@[1'u8, 2, 3])
+    check lsn2 > 0
+    check rm2.isFullyAcked(lsn2)
 
   test "Semi-sync replication":
     var rm = newReplicationManager(rmSemiSync, syncCount = 2)

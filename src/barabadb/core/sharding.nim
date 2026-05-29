@@ -5,6 +5,8 @@ import std/net
 import std/strutils
 import std/nativesockets
 import std/tables
+when defined(posix):
+  import std/posix
 
 type
   ShardStrategy* = enum
@@ -153,6 +155,13 @@ proc connectWithTimeout(sock: Socket, host: string, port: Port, timeoutMs: int):
     var fds = @[sock.getFd]
     if selectWrite(fds, timeoutMs) <= 0:
       return false
+    when defined(posix):
+      # Verify connection actually succeeded via SO_ERROR
+      var err: cint = 0
+      var errLen = SockLen(sizeof(err))
+      discard posix.getsockopt(sock.getFd, 1'i32, 4'i32, addr err, addr errLen)
+      if err != 0:
+        return false
     sock.getFd.setBlocking(true)
     return true
 

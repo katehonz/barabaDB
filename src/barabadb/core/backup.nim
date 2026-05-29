@@ -25,7 +25,6 @@ import std/osproc
 import std/strutils
 import std/times
 import std/algorithm
-import std/parseopt
 import std/json
 import barabadb/storage/lsm
 
@@ -670,6 +669,8 @@ proc readBackupMeta*(input: string): JsonNode =
 # CLI Entry Point
 # =============================================================================
 when isMainModule:
+  import std/parseopt
+
   var
     command = ""
     dataDir = DEFAULT_DATA_DIR

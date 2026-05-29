@@ -32,6 +32,7 @@ proc newTLSContext*(config: TLSConfig): TLSContext =
     result.sslCtx = newContext(
       certFile = config.certFile,
       keyFile = config.keyFile,
+      verifyMode = if config.verifyPeer: CVerifyPeer else: CVerifyNone,
     )
   else:
     raise newException(IOError, "TLS certificate or key file not found: " &

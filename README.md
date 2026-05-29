@@ -4,7 +4,7 @@
 
 **A multimodal database engine written in Nim — 100% native, zero dependencies.**
 
-[![Version](https://img.shields.io/badge/version-1.1.6-blue.svg)](baradadb.nimble)
+[![Version](https://img.shields.io/badge/version-1.1.7-blue.svg)](baradadb.nimble)
 [![Documentation](https://img.shields.io/badge/docs-2_languages-blue.svg)](docs/index.md)
 [![Stars](https://img.shields.io/github/stars/katehonz/barabaDB?style=social)](https://github.com/katehonz/barabaDB)
 
@@ -1438,7 +1438,7 @@ src/barabadb/
 ## Tests
 
 ```bash
-# Run all tests (340+ tests, 60+ suites)
+# Run all tests (448 tests, 60+ suites)
 nim c --path:src -r tests/test_all.nim
 
 # Run benchmarks
@@ -1488,6 +1488,10 @@ features are still being refined:
 
 All core functionality is complete and production-tested. The roadmap above
 reflects 100% completion across all major phases.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for full release history. The latest release (**v1.1.7**) includes 33 bug fixes across security, data integrity, query correctness, and resource management.
 
 ## License
 

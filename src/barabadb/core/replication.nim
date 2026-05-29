@@ -150,8 +150,9 @@ proc writeLsn*(rm: ReplicationManager, data: seq[byte]): uint64 =
         rm.pendingAcks.del(lsn)
     release(rm.lock)
     if replicasToShip.len > 0 and ackCount < replicasToShip.len:
-      when defined(debug):
-        echo "Replication sync: only ", ackCount, "/", replicasToShip.len, " replicas acked for LSN ", lsn
+      # Sync replication requires ALL replicas to ack — fail if any missed
+      echo "[ERROR] Sync replication failed: only ", ackCount, "/", replicasToShip.len, " replicas acked for LSN ", lsn
+      return 0  # Indicate failure to satisfy sync replication guarantee
     return lsn
   of rmSemiSync:
     if replicasToShip.len > 0:
@@ -259,7 +260,6 @@ proc healthCheck*(rm: ReplicationManager) =
       if not connectWithTimeout(sock, replica.host, Port(replica.port), 1000):
         connected = false
       else:
-        defer: sock.close()
         sock.send("PING\n")
         var response = ""
         try:
@@ -271,7 +271,7 @@ proc healthCheck*(rm: ReplicationManager) =
     except:
       connected = false
     finally:
-      sock.close()
+      try: sock.close() except: discard
 
     if not connected:
       acquire(rm.lock)

@@ -148,9 +148,10 @@ const
   SSTableFooterSize* = 16
 
 proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
-  let s = newFileStream(path, fmWrite)
+  let tmpPath = path & ".tmp"
+  let s = newFileStream(tmpPath, fmWrite)
   if s.isNil:
-    raise newException(IOError, "Cannot create SSTable file: " & path)
+    raise newException(IOError, "Cannot create SSTable file: " & tmpPath)
 
   # Write header (v3: 36 bytes)
   s.write(SSTableMagic)
@@ -205,9 +206,10 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
   s.close()
 
   # Compute CRCs via mmap
-  let mf = openMmap(path, mmReadOnly)
+  let mf = openMmap(tmpPath, mmReadOnly)
   if mf.regions.len == 0:
-    raise newException(IOError, "Cannot mmap SSTable for CRC: " & path)
+    removeFile(tmpPath)
+    raise newException(IOError, "Cannot mmap SSTable for CRC: " & tmpPath)
 
   let headerSize = 40
   let dataCrc = crc32(unsafeAddr mf.regions[0].data[headerSize], int(indexOffset) - headerSize)
@@ -216,9 +218,10 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
   mf.close()
 
   # Write footer and patch header
-  let s2 = newFileStream(path, fmReadWriteExisting)
+  let s2 = newFileStream(tmpPath, fmReadWriteExisting)
   if s2.isNil:
-    raise newException(IOError, "Cannot reopen SSTable for footer write: " & path)
+    removeFile(tmpPath)
+    raise newException(IOError, "Cannot reopen SSTable for footer write: " & tmpPath)
 
   s2.setPosition(int(footerOffset))
   s2.write(dataCrc)
@@ -233,6 +236,11 @@ proc writeSSTable*(entries: seq[Entry], path: string, level: int): SSTable =
   s2.setPosition(int(footerOffsetPos))
   s2.write(footerOffset)
   s2.close()
+
+  # Atomic rename: tmp -> final path
+  if fileExists(path):
+    removeFile(path)
+  moveFile(tmpPath, path)
 
   # Build in-memory index
   var idxTable = initTable[string, int64]()
@@ -308,6 +316,8 @@ proc loadSSTable*(path: string): SSTable =
   let mf = openMmap(path)
   if mf.regions.len == 0:
     raise newException(IOError, "Cannot mmap SSTable: " & path)
+  if mf.totalSize < 40:
+    raise newException(ValueError, "SSTable file too small: " & path)
 
   if mf.readUint32(0) != SSTableMagic:
     raise newException(ValueError, "Invalid SSTable magic")
@@ -690,12 +700,12 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
 
 proc put*(db: LSMTree, key: string, value: seq[byte]) =
   let ts = uint64(getMonoTime().ticks())
+  acquire(db.lock)
+  defer: release(db.lock)
   acquire(db.walLock)
   db.wal.writePut(cast[seq[byte]](key), value, ts)
   release(db.walLock)
 
-  acquire(db.lock)
-  defer: release(db.lock)
   if not db.memTable.put(key, value, ts):
     if db.immutableMem.len > 0:
       db.flushUnsafe()
@@ -706,12 +716,11 @@ proc put*(db: LSMTree, key: string, value: seq[byte]) =
 
 proc delete*(db: LSMTree, key: string) =
   let ts = uint64(getMonoTime().ticks())
+  acquire(db.lock)
+  defer: release(db.lock)
   acquire(db.walLock)
   db.wal.writeDelete(cast[seq[byte]](key), ts)
   release(db.walLock)
-
-  acquire(db.lock)
-  defer: release(db.lock)
   if not db.memTable.put(key, @[], ts, deleted = true):
     if db.immutableMem.len > 0:
       db.flushUnsafe()

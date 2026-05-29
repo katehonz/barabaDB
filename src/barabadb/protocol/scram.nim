@@ -248,10 +248,10 @@ proc verifyClientProof*(state: ScramServerState, clientProof: openArray[byte]): 
     return false
   let clientKey = xorBytes(clientProof, @(hmacSha256(state.storedKey, state.authMessage)))
   let computedStoredKey = sha256(clientKey)
+  var diff = 0'u8
   for i in 0..<32:
-    if computedStoredKey[i] != state.storedKey[i]:
-      return false
-  return true
+    diff = diff or (computedStoredKey[i] xor state.storedKey[i])
+  return diff == 0
 
 proc computeServerSignature*(state: ScramServerState): array[32, byte] =
   return hmacSha256(state.serverKey, state.authMessage)

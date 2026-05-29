@@ -65,7 +65,8 @@ proc acquire*(pool: ConnectionPool): PoolConnection =
     let conn = pool.connections[idx]
     if not conn.inUse:
       let age = getMonoTime().ticks() - conn.lastUsed
-      if age < pool.config.maxIdleTime:
+      let lifetime = getMonoTime().ticks() - conn.created
+      if age < pool.config.maxIdleTime and lifetime < pool.config.maxLifetime:
         conn.inUse = true
         inc pool.inUseCount
         release(pool.lock)

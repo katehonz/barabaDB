@@ -100,11 +100,12 @@ proc hmacSha256(key, message: string): string =
   return $outerHash
 
 proc constantTimeCompare(a, b: string): bool =
-  if a.len != b.len:
-    return false
-  var diff = 0
-  for i in 0..<a.len:
-    diff = diff or (ord(a[i]) xor ord(b[i]))
+  let n = max(a.len, b.len)
+  var diff = a.len xor b.len
+  for i in 0..<n:
+    let ca = if i < a.len: ord(a[i]) else: 0
+    let cb = if i < b.len: ord(b[i]) else: 0
+    diff = diff or (ca xor cb)
   return diff == 0
 
 # ---------------------------------------------------------------------------
@@ -159,8 +160,18 @@ proc verifyToken*(am: AuthManager, token: string): (bool, JWTClaims) =
       if i < payload.len and payload[i] == '"':
         inc i
         while i < payload.len and payload[i] != '"':
-          val &= payload[i]
-          inc i
+          if payload[i] == '\\' and i + 1 < payload.len:
+            case payload[i+1]
+            of '"': val &= '"'
+            of '\\': val &= '\\'
+            of '/': val &= '/'
+            of 'n': val &= '\n'
+            of 't': val &= '\t'
+            else: val &= payload[i+1]
+            inc i; inc i
+          else:
+            val &= payload[i]
+            inc i
         inc i
       elif i < payload.len and payload[i] in {'0'..'9', '-'}:
         while i < payload.len and payload[i] notin {',', '}'}:

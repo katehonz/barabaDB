@@ -9,7 +9,6 @@
 import std/os
 import std/strutils
 import std/times
-import std/parseopt
 import ../storage/lsm
 import ../storage/recovery
 
@@ -242,6 +241,8 @@ proc printReport*(report: RepairReport, quiet: bool = false) =
 # CLI Entry Point
 # =============================================================================
 when isMainModule:
+  import std/parseopt
+
   var
     dataDir = DEFAULT_DATA_DIR
     dryRun = false

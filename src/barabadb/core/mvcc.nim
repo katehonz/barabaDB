@@ -3,6 +3,7 @@ import std/tables
 import std/locks
 import std/monotimes
 import std/sets
+import std/sequtils
 import deadlock
 
 type
@@ -196,7 +197,6 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
           if victimId in tm.activeTxns:
             tm.activeTxns[victimId].state = tsAborted
             tm.activeTxns.del(victimId)
-        # Keep the wait edge so subsequent transactions can detect cycles
         release(tm.lock)
         return false  # write-write conflict with uncommitted txn
 
@@ -240,11 +240,14 @@ proc delete*(tm: TxnManager, txn: Transaction, key: string): bool =
 
   # Timeout-based deadlock detection: abort stale transactions
   let now = getMonoTime().ticks()
+  var toAbort: seq[TxnId] = @[]
   for otherId, otherTxn in tm.activeTxns:
     if otherId != txn.id and otherTxn.state == tsActive:
       if now - otherTxn.startTime > tm.txnTimeoutMs * 1_000_000:
-        otherTxn.state = tsAborted
-        tm.activeTxns.del(otherId)
+        toAbort.add(otherId)
+  for otherId in toAbort:
+    tm.activeTxns[otherId].state = tsAborted
+    tm.activeTxns.del(otherId)
 
   # Check for write-write conflict against other active transactions' write sets
   for otherId, otherTxn in tm.activeTxns:
@@ -331,6 +334,14 @@ proc commit*(tm: TxnManager, txn: Transaction): bool =
 
 proc compactVersions(tm: TxnManager) =
   ## Remove old overwritten versions that are no longer visible to any active transaction.
+  ## Also prune stale committed/aborted transaction IDs.
+
+  # Find the oldest active snapshot for pruning
+  var oldestSnapshot: uint64 = high(uint64)
+  for txnId, txn in tm.activeTxns:
+    if txn.state == tsActive and uint64(txn.snapshotMaxTxn) < oldestSnapshot:
+      oldestSnapshot = uint64(txn.snapshotMaxTxn)
+
   for key, versions in tm.globalVersions.mpairs:
     if versions.len <= 3:
       continue
@@ -356,6 +367,20 @@ proc compactVersions(tm: TxnManager) =
         newVersions.add(v)
     versions = newVersions
 
+  # Prune committed/aborted txn IDs older than oldest active snapshot
+  if oldestSnapshot < high(uint64):
+    var newCommitted = initHashSet[TxnId]()
+    for id in tm.committedTxnsSet:
+      if uint64(id) >= oldestSnapshot:
+        newCommitted.incl(id)
+    tm.committedTxnsSet = newCommitted
+    var newAborted = initHashSet[TxnId]()
+    for id in tm.abortedTxns:
+      if uint64(id) >= oldestSnapshot:
+        newAborted.incl(id)
+    tm.abortedTxns = newAborted
+    tm.committedTxns = tm.committedTxns.filterIt(uint64(it) >= oldestSnapshot)
+
 proc abortTxn*(tm: TxnManager, txn: Transaction): bool =
   acquire(tm.lock)
   if txn.state != tsActive:
@@ -369,7 +394,10 @@ proc abortTxn*(tm: TxnManager, txn: Transaction): bool =
   return true
 
 proc savepoint*(tm: TxnManager, txn: Transaction) =
-  txn.savepoints.add(txn.writeSet)
+  var saved = initTable[string, VersionedRecord]()
+  for k, v in txn.writeSet:
+    saved[k] = v
+  txn.savepoints.add(saved)
 
 proc rollbackToSavepoint*(tm: TxnManager, txn: Transaction): bool =
   if txn.savepoints.len == 0:

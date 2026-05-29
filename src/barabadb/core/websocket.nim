@@ -6,6 +6,8 @@ import std/tables
 import std/base64
 import std/sets
 import std/nativesockets
+import std/times
+import std/json
 when defined(windows):
   from std/winlean import TCP_NODELAY
 else:
@@ -105,6 +107,8 @@ proc decodeFrame(data: string): (WsFrame, int) =
   if uint64(data.len) < uint64(offset) + len:
     return (Wsframe(), 0)
 
+  if len > uint64(high(int) - 1):
+    return (Wsframe(), 0)
   let plen = int(len)
   if frame.masked:
     for i in 0..<plen:
@@ -294,6 +298,13 @@ proc handleConnection(server: WsServer, client: AsyncSocket) {.async.} =
         await client.send("HTTP/1.1 401 Unauthorized\r\n\r\n")
         client.close()
         return
+      # Validate JWT expiration
+      if "exp" in token.claims:
+        let exp = token.claims["exp"].node.getInt()
+        if exp > 0 and epochTime().int64 > exp:
+          await client.send("HTTP/1.1 401 Unauthorized\r\n\r\n")
+          client.close()
+          return
     except:
       await client.send("HTTP/1.1 401 Unauthorized\r\n\r\n")
       client.close()

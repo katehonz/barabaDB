@@ -142,8 +142,15 @@ proc prepare*(txn: DistributedTransaction): bool =
   acquire(txn.lock)
   if allOk:
     txn.state = dtsPrepared
-    for nodeId, _ in txn.participants.mpairs:
-      txn.participants[nodeId].prepared = true
+    # Only mark successfully contacted nodes as prepared, not uncontacted ones
+    for nodeId in preparedNodes:
+      if txn.participants.hasKey(nodeId):
+        txn.participants[nodeId].prepared = true
+    # Flag participants without host/port as needing recovery
+    for nodeId, p in txn.participants.mpairs:
+      if p.host.len == 0 or p.port == 0:
+        p.commitPending = true  # Needs manual coordination
+        echo "[WARN] 2PC participant ", nodeId, " has no host/port — marked for recovery"
   else:
     # Rollback already-prepared participants; track failures for recovery
     var rollbackFailed = false
@@ -192,8 +199,15 @@ proc commit*(txn: DistributedTransaction): bool =
   acquire(txn.lock)
   if allOk:
     txn.state = dtsCommitted
-    for nodeId, _ in txn.participants.mpairs:
-      txn.participants[nodeId].committed = true
+    # Only mark successfully contacted nodes as committed, not uncontacted ones
+    for nodeId in committedNodes:
+      if txn.participants.hasKey(nodeId):
+        txn.participants[nodeId].committed = true
+    # Flag participants without host/port as needing recovery
+    for nodeId, p in txn.participants.mpairs:
+      if not p.committed and not p.commitPending:
+        p.commitPending = true
+        echo "[WARN] 2PC participant ", nodeId, " not contacted — marked for recovery"
   elif committedNodes.len > 0:
     # Partial commit — mark committed, flag uncommitted for recovery
     txn.state = dtsCommitted

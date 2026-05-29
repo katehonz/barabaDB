@@ -463,6 +463,10 @@ proc backupHandler(server: HttpServer): RequestHandler =
       let allDatabases = if body != nil and "all" in body: body["all"].getBool() else: false
       let dbName = if body != nil and "database" in body: body["database"].getStr() else: ""
       let outputFile = if body != nil and "output" in body: body["output"].getStr() else: "backup_" & $getTime().toUnix() & ".tar.gz"
+      # Path traversal protection: reject paths with .. or absolute paths outside dataRoot
+      if ".." in outputFile or outputFile.startsWith("/"):
+        ctx.json(%*{"error": "Invalid output path: must be relative and not contain '..'"}, 400)
+        return
       let compression = if body != nil and "level" in body: body["level"].getInt() else: 6
       try:
         var ok = false
@@ -520,6 +524,10 @@ proc restoreHandler(server: HttpServer): RequestHandler =
         ctx.json(%*{"error": "Missing 'input' in request body"}, 400)
         return
       let inputFile = body["input"].getStr()
+      # Path traversal protection: reject paths with .. or absolute paths
+      if ".." in inputFile or inputFile.startsWith("/"):
+        ctx.json(%*{"error": "Invalid input path: must be relative and not contain '..'"}, 400)
+        return
       let allDatabases = if body != nil and "all" in body: body["all"].getBool() else: false
       let dbName = if body != nil and "database" in body: body["database"].getStr() else: ""
       let dataRoot = server.registry.dataRoot
@@ -553,6 +561,10 @@ proc restoreHandler(server: HttpServer): RequestHandler =
 
 proc adminHandler(server: HttpServer): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
+    {.cast(gcsafe).}:
+      let ctx = newContext(request)
+      if server.config.authEnabled and not server.checkAuth(request, ctx):
+        return
     let html = """
 <!DOCTYPE html><html><head>
 <meta charset='utf-8'><meta name='viewport' content='width=device-width,initial-scale=1'>

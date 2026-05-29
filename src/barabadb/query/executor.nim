@@ -444,10 +444,16 @@ proc migrationLockKey(): string = "_schema:migrations:_lock"
 
 proc acquireMigrationLock(ctx: ExecutionContext): bool =
   let lockKey = migrationLockKey()
-  let (locked, _) = ctx.db.get(lockKey)
+  let (locked, lockVal) = ctx.db.get(lockKey)
   if locked:
-    return false
-  ctx.db.put(lockKey, cast[seq[byte]]("locked"))
+    # Check for stale lock (older than 1 hour)
+    let lockTime = try: parseInt(cast[string](lockVal)) except: 0
+    if lockTime > 0 and (epochTime().int64 - lockTime) > 3600:
+      # Stale lock — force release
+      ctx.db.delete(lockKey)
+    else:
+      return false
+  ctx.db.put(lockKey, cast[seq[byte]]($epochTime().int64))
   return true
 
 proc releaseMigrationLock(ctx: ExecutionContext) =
@@ -930,7 +936,7 @@ proc evalExpr*(expr: IRExpr, row: Row, ctx: ExecutionContext = nil): Value =
       of vkNull:
         return Value(kind: vkNull)
       else:
-        # Heuristic type inference from string content for untyped fields
+        # Heuristic type coercion for arithmetic on string-stored fields
         if s.len == 0: return Value(kind: vkString, strVal: s)
         try:
           return Value(kind: vkInt64, int64Val: parseInt(s))
@@ -1457,7 +1463,8 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
       let results = doHybridSearchFiltered(ctx, table, vecCol, textCol, queryText, queryVec, k, filterCol, filterVal)
       var parts: seq[string] = @[]
       for (id, score) in results:
-        parts.add("{\"id\":\"" & id & "\",\"score\":\"" & $score & "\"}")
+        let safeId = id.replace("\\", "\\\\").replace("\"", "\\\"")
+        parts.add("{\"id\":\"" & safeId & "\",\"score\":\"" & $score & "\"}")
       return "[" & parts.join(",") & "]"
     of "rerank":
       if expr.irFuncArgs.len < 2: return "[]"
@@ -1550,7 +1557,8 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
       let isSafeQuery = sqlLower.startsWith("select") or sqlLower.startsWith("explain") or
                         sqlLower.startsWith("with")
       let allowDml = ctx.sessionVars.getOrDefault("nl_to_sql.allow_dml", "false") == "true"
-      if not isSafeQuery and not allowDml:
+      let isSuperuser = ctx.sessionVars.getOrDefault("is_superuser", "false") == "true"
+      if not isSafeQuery and (not allowDml or not isSuperuser):
         # For non-SELECT: only do syntax validation via tokenize+parse, no execution
         let tokens = qlex.tokenize(sql)
         let astNode = qpar.parse(tokens)
@@ -2642,6 +2650,7 @@ proc lowerExpr*(node: Node): IRExpr =
       result.binRight = lowerExpr(node.inRight)
   of nkExists:
     result = IRExpr(kind: irekExists)
+    result.existsSubquery = lowerSelect(node.existsExpr)
   of nkSubquery:
     result = IRExpr(kind: irekSubquery)
     result.subqueryPlan = lowerSelect(node.subQuery)
@@ -3134,7 +3143,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
                 var count = 0
                 for row in filteredRows:
                   let v = evalExpr(expr.aggArgs[0], row, ctx)
-                  if valueToString(v).len > 0: count += 1
+                  if v.kind != vkNull: count += 1
                 newRow[alias] = $count
             of irSum:
               var sum = 0.0
@@ -3239,8 +3248,10 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     let sourceRows = executePlan(ctx, plan.limitSource)
     var start = int(plan.limitOffset)
     if start > sourceRows.len: start = sourceRows.len
+    if plan.limitCount == 0:
+      return @[]
     var endIdx = start + int(plan.limitCount)
-    if endIdx > sourceRows.len or plan.limitCount == 0:
+    if endIdx > sourceRows.len:
       endIdx = sourceRows.len
     return sourceRows[start..<endIdx]
 
@@ -3311,7 +3322,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               var count = 0
               for row in filteredRows:
                 let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-                if valueToString(v).len > 0: count += 1
+                if v.kind != vkNull: count += 1
               aggRow[aggKey] = $count
           of irSum:
             var sum = 0.0
@@ -3833,7 +3844,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               var count = 0
               for row in matchingRows:
                 let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-                if valueToString(v).len > 0: count += 1
+                if v.kind != vkNull: count += 1
               aggResult = $count
           of irSum:
             var sum = 0.0
@@ -4291,7 +4302,9 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         else:
           var inner = Node(kind: nkStatementList, stmts: @[])
           inner.stmts.add(cteQuery)
+          let savedCte = ctx.cteTables
           let cteRes = executeQueryImpl(ctx, inner)
+          ctx.cteTables = savedCte
           var cteRows: seq[Row] = @[]
           for row in cteRes.rows:
             cteRows.add(row)
