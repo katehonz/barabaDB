@@ -48,3 +48,9 @@ src/barabadb/query/executor
 tests/join_tests
 *.tar.gz
 tests/nimforum_smoke_test
+
+benchmark_results.json
+pg_benchmark_results.json
+benchmarks/bench_all
+benchmarks/compare
+.qwen/

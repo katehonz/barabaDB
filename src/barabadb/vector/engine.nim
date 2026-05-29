@@ -53,32 +53,62 @@ type
   NodeDist = tuple[dist: float64, id: uint64]
 
 proc cosineDistance*(a, b: Vector): float64 =
-  var dot, normA, normB: float64
-  for i in 0..<min(a.len, b.len):
-    dot += float64(a[i]) * float64(b[i])
-    normA += float64(a[i]) * float64(a[i])
-    normB += float64(b[i]) * float64(b[i])
-  if normA == 0 or normB == 0:
-    return 1.0
-  return 1.0 - dot / (sqrt(normA) * sqrt(normB))
+  var dot, normA, normB: float32
+  let len = min(a.len, b.len)
+  var i = 0
+  while i + 3 < len:
+    dot += a[i]*b[i] + a[i+1]*b[i+1] + a[i+2]*b[i+2] + a[i+3]*b[i+3]
+    normA += a[i]*a[i] + a[i+1]*a[i+1] + a[i+2]*a[i+2] + a[i+3]*a[i+3]
+    normB += b[i]*b[i] + b[i+1]*b[i+1] + b[i+2]*b[i+2] + b[i+3]*b[i+3]
+    i += 4
+  while i < len:
+    dot += a[i] * b[i]
+    normA += a[i] * a[i]
+    normB += b[i] * b[i]
+    inc i
+  let denom = sqrt(normA) * sqrt(normB)
+  if denom == 0: return 1.0
+  return 1.0 - float64(dot) / float64(denom)
 
 proc euclideanDistance*(a, b: Vector): float64 =
-  var sum: float64
-  for i in 0..<min(a.len, b.len):
-    let diff = float64(a[i]) - float64(b[i])
-    sum += diff * diff
+  var sum: float32
+  let len = min(a.len, b.len)
+  var i = 0
+  while i + 3 < len:
+    let d0 = a[i] - b[i]
+    let d1 = a[i+1] - b[i+1]
+    let d2 = a[i+2] - b[i+2]
+    let d3 = a[i+3] - b[i+3]
+    sum += d0*d0 + d1*d1 + d2*d2 + d3*d3
+    i += 4
+  while i < len:
+    let d = a[i] - b[i]
+    sum += d * d
+    inc i
   return sqrt(sum)
 
 proc dotProduct*(a, b: Vector): float64 =
-  var sum: float64
-  for i in 0..<min(a.len, b.len):
-    sum += float64(a[i]) * float64(b[i])
-  return -sum  # negative because we want to minimize
+  var sum: float32
+  let len = min(a.len, b.len)
+  var i = 0
+  while i + 3 < len:
+    sum += a[i]*b[i] + a[i+1]*b[i+1] + a[i+2]*b[i+2] + a[i+3]*b[i+3]
+    i += 4
+  while i < len:
+    sum += a[i] * b[i]
+    inc i
+  return -float64(sum)  # negative because we want to minimize
 
 proc manhattanDistance*(a, b: Vector): float64 =
-  var sum: float64
-  for i in 0..<min(a.len, b.len):
-    sum += abs(float64(a[i]) - float64(b[i]))
+  var sum: float32
+  let len = min(a.len, b.len)
+  var i = 0
+  while i + 3 < len:
+    sum += abs(a[i]-b[i]) + abs(a[i+1]-b[i+1]) + abs(a[i+2]-b[i+2]) + abs(a[i+3]-b[i+3])
+    i += 4
+  while i < len:
+    sum += abs(a[i] - b[i])
+    inc i
   return sum
 
 proc distance*(a, b: Vector, metric: DistanceMetric): float64 =
@@ -126,6 +156,7 @@ proc searchLayer(idx: HNSWIndex, entryId: uint64, query: Vector, ef: int,
   var visited = initHashSet[uint64]()
   var candidates: seq[NodeDist] = @[]
   var nearest: seq[NodeDist] = @[]
+  var worstNearestDist: float64 = Inf
 
   let entryDist = distance(query, idx.nodes[entryId].vector, metric)
   candidates.add((entryDist, entryId))
@@ -133,16 +164,19 @@ proc searchLayer(idx: HNSWIndex, entryId: uint64, query: Vector, ef: int,
   visited.incl(entryId)
 
   while candidates.len > 0:
-    # Pop closest candidate
+    # Pop closest candidate (linear scan — kept simple; could be heap)
     var bestIdx = 0
+    var bestDist = candidates[0].dist
     for i in 1..<candidates.len:
-      if candidates[i].dist < candidates[bestIdx].dist:
+      if candidates[i].dist < bestDist:
+        bestDist = candidates[i].dist
         bestIdx = i
     let current = candidates[bestIdx]
-    candidates.del(bestIdx)
+    candidates[bestIdx] = candidates[^1]
+    candidates.setLen(candidates.len - 1)
 
     # Stop if current is worse than the ef-th nearest
-    if nearest.len >= ef and current.dist > nearest[^1].dist:
+    if nearest.len >= ef and current.dist > worstNearestDist:
       break
 
     # Explore neighbors at this level
@@ -152,12 +186,36 @@ proc searchLayer(idx: HNSWIndex, entryId: uint64, query: Vector, ef: int,
         if neighborId notin visited:
           visited.incl(neighborId)
           let dist = distance(query, idx.nodes[neighborId].vector, metric)
-          candidates.add((dist, neighborId))
+          # Fast path: only add to candidates if it could improve nearest
+          if nearest.len < ef or dist < worstNearestDist:
+            candidates.add((dist, neighborId))
           nearest.add((dist, neighborId))
-          nearest.sort(nodeDistCmp)
+          # Track worst nearest instead of sorting every time
           if nearest.len > ef:
-            nearest.setLen(ef)
+            # Find and remove the worst element in nearest
+            var worstIdx = 0
+            var worstDist = nearest[0].dist
+            for i in 1..<nearest.len:
+              if nearest[i].dist > worstDist:
+                worstDist = nearest[i].dist
+                worstIdx = i
+            nearest[worstIdx] = nearest[^1]
+            nearest.setLen(nearest.len - 1)
+            worstNearestDist = worstDist
+            # Update worstNearestDist after removal
+            worstNearestDist = nearest[0].dist
+            for i in 1..<nearest.len:
+              if nearest[i].dist > worstNearestDist:
+                worstNearestDist = nearest[i].dist
+          else:
+            if nearest.len == ef:
+              worstNearestDist = nearest[0].dist
+              for i in 1..<nearest.len:
+                if nearest[i].dist > worstNearestDist:
+                  worstNearestDist = nearest[i].dist
 
+  # Final sort for return
+  nearest.sort(nodeDistCmp)
   return nearest
 
 proc selectNeighbors(idx: HNSWIndex, baseVector: Vector, candidates: seq[NodeDist],

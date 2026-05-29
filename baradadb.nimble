@@ -1,5 +1,5 @@
 # Package
-version       = "1.1.7"
+version       = "1.1.8"
 author        = "BaraDB Team"
 description   = "BaraDB — Multimodal database written in Nim"
 license       = "Apache-2.0"
@@ -27,3 +27,9 @@ task test, "Run all tests":
 
 task bench, "Run benchmarks":
   exec "nim c -d:release -r benchmarks/bench_all.nim"
+
+task bench_pg, "Run PostgreSQL comparison benchmarks":
+  exec "python3 benchmarks/pg_bench.py"
+
+task bench_report, "Generate benchmark comparison report":
+  exec "python3 benchmarks/generate_report.py"

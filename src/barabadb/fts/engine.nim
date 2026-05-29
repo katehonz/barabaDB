@@ -185,17 +185,26 @@ proc bm25ScoreUnsafe(idx: InvertedIndex, term: string, docId: uint64,
     return 0.0
 
   var tf = 0
-  var found = false
   for entry in idx.postings[term]:
     if entry.docId == docId:
       tf = entry.termFreq
-      found = true
       break
 
-  if not found:
+  if tf == 0:
     return 0.0
 
   let idf = ln((float64(n) - float64(df) + 0.5) / (float64(df) + 0.5) + 1.0)
+  let docLen = float64(idx.docLengths.getOrDefault(docId, 0))
+  let tfNorm = (float64(tf) * (k1 + 1.0)) /
+               (float64(tf) + k1 * (1.0 - b + b * docLen / idx.avgDocLen))
+  return idf * tfNorm
+
+# Optimized BM25 score when tf is already known (avoids linear scan)
+proc bm25ScoreUnsafeTf(idx: InvertedIndex, term: string, docId: uint64,
+                       tf: int, idf: float64,
+                       k1: float64 = 1.2, b: float64 = 0.75): float64 =
+  if tf == 0 or idx.docCount == 0:
+    return 0.0
   let docLen = float64(idx.docLengths.getOrDefault(docId, 0))
   let tfNorm = (float64(tf) * (k1 + 1.0)) /
                (float64(tf) + k1 * (1.0 - b + b * docLen / idx.avgDocLen))
@@ -223,16 +232,22 @@ proc search*(idx: InvertedIndex, query: string, limit: int = 10,
     for token in queryTokens:
       if token notin idx.postings:
         continue
-      for entry in idx.postings[token]:
-        let score = bm25ScoreUnsafe(idx, token, entry.docId)
+      let postings = idx.postings[token]
+      let df = postings.len
+      let n = idx.docCount
+      if df == 0 or n == 0:
+        continue
+      let idf = ln((float64(n) - float64(df) + 0.5) / (float64(df) + 0.5) + 1.0)
+      for entry in postings:
+        let score = bm25ScoreUnsafeTf(idx, token, entry.docId, entry.termFreq, idf)
         if entry.docId notin docScores:
           docScores[entry.docId] = 0.0
           docHighlights[entry.docId] = @[]
         docScores[entry.docId] += score
-        for pos in entry.positions:
-          let start = pos
-          let stop = pos + token.len
-          docHighlights[entry.docId].add((start, stop))
+        # Only add highlights if we have positions (skip for performance if empty)
+        if entry.positions.len > 0:
+          for pos in entry.positions:
+            docHighlights[entry.docId].add((pos, pos + token.len))
 
     var results: seq[SearchResult] = @[]
     for docId, score in docScores:

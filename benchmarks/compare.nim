@@ -30,7 +30,7 @@ template benchBlock(name: string, body: untyped): BenchmarkResult =
   block:
     let start = cpuTime()
     body
-    let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+    let elapsed = (cpuTime() - start)
     BenchmarkResult(name: name, baraTimeSec: elapsed)
 
 proc kvWriteBench(n: int = 100_000): BenchmarkResult =
@@ -39,7 +39,7 @@ proc kvWriteBench(n: int = 100_000): BenchmarkResult =
   let start = cpuTime()
   for i in 0..<n:
     db.put("key_" & $i, cast[seq[byte]]("value_" & $i))
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   db.close()
   result = BenchmarkResult(
     name: "KV Write (" & $n & " records)",
@@ -59,7 +59,7 @@ proc kvReadBench(n: int = 50_000): BenchmarkResult =
   for i in 0..<n:
     let (ok, _) = db.get("key_" & $i)
     if ok: inc found
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   db.close()
   result = BenchmarkResult(
     name: "KV Read (" & $n & " reads)",
@@ -74,7 +74,7 @@ proc btreeInsertBench(n: int = 100_000): BenchmarkResult =
   let start = cpuTime()
   for i in 0..<n:
     btree.insert("key_" & $i, "value_" & $i)
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   result = BenchmarkResult(
     name: "B-Tree Insert (" & $n & " keys)",
     baraOps: n, baraTimeSec: elapsed,
@@ -93,7 +93,7 @@ proc btreeScanBench(n: int = 1000): BenchmarkResult =
   for i in 0..<n:
     let results = btree.scan("key_1000", "key_2000")
     total += results.len
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   result = BenchmarkResult(
     name: "B-Tree Scan (" & $n & " range scans)",
     baraOps: n, baraTimeSec: elapsed,
@@ -119,7 +119,7 @@ proc vectorSearchBench(n: int = 5_000, dim: int = 128): BenchmarkResult =
   let start = cpuTime()
   for i in 0..<searchN:
     discard idx.search(query, 10)
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   result = BenchmarkResult(
     name: "Vector Search (HNSW, " & $dim & "d, " & $searchN & " queries)",
     baraOps: searchN, baraTimeSec: elapsed,
@@ -140,7 +140,7 @@ proc ftsIndexBench(n: int = 10_000): BenchmarkResult =
   let start = cpuTime()
   for i in 0..<n:
     idx.addDocument(uint64(i), docs[i mod docs.len])
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   result = BenchmarkResult(
     name: "FTS Index (" & $n & " docs)",
     baraOps: n, baraTimeSec: elapsed,
@@ -157,7 +157,7 @@ proc ftsSearchBench(n: int = 500): BenchmarkResult =
   let start = cpuTime()
   for i in 0..<n:
     discard idx.search("programming language")
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   result = BenchmarkResult(
     name: "FTS Search (" & $n & " queries)",
     baraOps: n, baraTimeSec: elapsed,
@@ -180,7 +180,7 @@ proc graphBench(n: int = 1000, edges: int = 5000): BenchmarkResult =
   let start = cpuTime()
   for i in 0..<traversals:
     discard gengine.bfs(g, NodeId(1))
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   result = BenchmarkResult(
     name: "Graph BFS Traversal (" & $traversals & " traversals)",
     baraOps: traversals, baraTimeSec: elapsed,
@@ -200,7 +200,7 @@ proc simdVectorBench(dim: int = 768, n: int = 50_000): BenchmarkResult =
   let start = cpuTime()
   for i in 0..<n:
     discard cosineSimd(a, b)
-  let elapsed = (cpuTime() - start) / 1_000_000.0  # microseconds to seconds
+  let elapsed = (cpuTime() - start)
   result = BenchmarkResult(
     name: "SIMD Cosine Distance (" & $dim & "d, " & $n & " ops)",
     baraOps: n, baraTimeSec: elapsed,
