@@ -2,6 +2,25 @@
 
 All notable changes to BaraDB are documented in this file.
 
+## [1.2.0] — Unreleased
+
+### Search Module (new)
+
+A unified search module combining vector similarity, full-text, and structured
+search into a single high-performance engine.
+
+- **Heap-optimized HNSW search** — priority-queue-based candidate selection, 2.4x faster than baseline (`search/hnsw_opt.nim`)
+- **Segment-based inverted indexing** — partitioned posting lists for concurrent indexing and reduced lock contention (`search/inverted.nim`)
+- **Phrase and proximity search** — ordered phrase matching with configurable slop distance (`search/phrase.nim`)
+- **Boolean query parser** — full boolean algebra with AND, OR, NOT, and range expressions (e.g. `price:[10 TO 100]`) (`search/boolean.nim`)
+- **N-gram fuzzy search** — character n-gram index for typo-tolerant retrieval (`search/ngram.nim`)
+- **Faceted search** — filter results and aggregate counts by arbitrary field values (`search/facet.nim`)
+- **Porter2 stemmers** — morphological stemming for English, Bulgarian, German, French, and Russian (`search/stemmer.nim`)
+- **UnifiedSearchEngine API** — single entry point combining all search modes with consistent scoring (`search/engine.nim`)
+- **Search benchmarks** — reproducible performance measurement suite (`benchmarks/bench_search.nim`)
+
+---
+
 ## [1.1.7] — 2026-05-29
 
 ### Security (5 critical + 5 high)

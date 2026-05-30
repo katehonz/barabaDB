@@ -34,6 +34,7 @@ single 3.3MB binary with no runtime dependencies.
 | Graph algorithms | None | **BFS, DFS, Dijkstra, PageRank, Louvain + Cypher** |
 | Graph SQL integration | None | **CREATE GRAPH, GRAPH_TABLE(), SQL-native** |
 | Full-text search | PG FTS extension | **Built-in BM25 + TF-IDF** |
+| Unified Search Engine | None | **HNSW + inverted index + boolean + phrase + facets + stemmers** |
 | AI Agents / NL→SQL | None | **Built-in `nl_to_sql()`, `schema_prompt()`** |
 | MCP Server | None | **STDIO JSON-RPC for AI tools** |
 | LangChain integration | External adapters | **Native Vector Store (Python + JS)** |
@@ -557,6 +558,54 @@ let fuzzy = idx.fuzzySearch("programing", maxDistance = 2)
 # Wildcard search
 let wild = idx.regexSearch("prog*")
 ```
+
+### Unified Search Engine
+
+A high-performance search module combining heap-optimized HNSW, segment-based
+inverted indexing, boolean queries, phrase/proximity search, n-gram fuzzy
+matching, faceted search, and multilingual stemming into a single
+`UnifiedSearchEngine` API.
+
+```nim
+import barabadb/search/engine
+
+var se = newUnifiedSearchEngine()
+
+# Index documents with fields and facets
+se.addDocument(1, "Introduction to Machine Learning",
+  fields = {"category": "AI", "lang": "en"}.toTable)
+se.addDocument(2, "Deep Learning with Neural Networks",
+  fields = {"category": "AI", "lang": "en"}.toTable)
+se.addDocument(3, "Nim Programming Language Guide",
+  fields = {"category": "programming", "lang": "en"}.toTable)
+
+# Boolean query (AND / OR / NOT / ranges)
+let boolResults = se.booleanSearch("machine AND learning")
+
+# Phrase search with proximity
+let phraseResults = se.phraseSearch("deep learning", slop = 2)
+
+# N-gram fuzzy search (typo-tolerant)
+let fuzzyResults = se.ngramSearch("machne lerning", n = 3)
+
+# Faceted search — filter and aggregate by field values
+let facetResults = se.facetedSearch("learning",
+  facetFields = @["category", "lang"])
+
+# Stemming in multiple languages (Porter2: EN, BG, DE, FR, RU)
+let stemmed = se.search("running", stemmer = porter2EN)
+```
+
+Features:
+- **Heap-optimized HNSW** — priority-queue-based graph traversal, 2.4x faster than baseline
+- **Segment-based inverted index** — partitioned posting lists for concurrent indexing
+- **Phrase and proximity search** — ordered phrase matching with configurable slop
+- **Boolean query parser** — AND, OR, NOT, range expressions (`price:[10 TO 100]`)
+- **N-gram fuzzy search** — character n-gram index for typo-tolerant retrieval
+- **Faceted search** — filter results and aggregate counts by field values
+- **Porter2 stemmers** — English, Bulgarian, German, French, Russian
+- **UnifiedSearchEngine API** — single entry point combining all search modes
+- **Search benchmarks** — `benchmarks/bench_search.nim` for reproducible measurement
 
 ### Columnar Engine
 
@@ -1434,6 +1483,16 @@ src/barabadb/
 ├── fts/
 │   ├── engine.nim        # Inverted index + BM25 + TF-IDF
 │   └── multilang.nim     # Tokenizers for EN, BG, DE, FR, RU
+├── search/
+│   ├── engine.nim        # UnifiedSearchEngine — single entry point
+│   ├── hnsw_opt.nim      # Heap-optimized HNSW (priority-queue traversal)
+│   ├── inverted.nim      # Segment-based inverted index
+│   ├── phrase.nim        # Phrase and proximity search
+│   ├── boolean.nim       # Boolean query parser (AND/OR/NOT/ranges)
+│   ├── ngram.nim         # N-gram fuzzy search
+│   ├── facet.nim         # Faceted search (field filtering + aggregation)
+│   ├── stemmer.nim       # Porter2 stemmers (EN/BG/DE/FR/RU)
+│   └── priority_queue.nim # Min-heap priority queue for HNSW candidates
 ├── protocol/
 │   ├── wire.nim          # Binary wire protocol (16 message types)
 │   ├── http.nim          # HTTP/REST JSON router
@@ -1488,6 +1547,7 @@ nim c -d:release -r benchmarks/bench_all.nim
 | MCP Server (STDIO JSON-RPC for AI agents) | ✅ | 100% | v1.1.6 |
 | LangChain Vector Store (Python + JS) | ✅ | 100% | v1.1.6 |
 | Production Hardening (prop tests, fuzz tests, thread safety) | ✅ | 100% | v1.1.6 |
+| Unified Search Engine (HNSW-opt + inverted + boolean + phrase + n-gram + facets + stemmers) | ✅ | 100% | v1.2.0 |
 
 ## Current Limitations
 
@@ -1508,7 +1568,7 @@ reflects 100% completion across all major phases.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for full release history. The latest release (**v1.1.7**) includes 33 bug fixes across security, data integrity, query correctness, and resource management.
+See [CHANGELOG.md](CHANGELOG.md) for full release history. The latest release (**v1.2.0**) introduces the Unified Search Engine with heap-optimized HNSW, segment-based inverted indexing, boolean queries, phrase/proximity search, n-gram fuzzy matching, faceted search, and Porter2 stemmers for 5 languages.
 
 ## License
 

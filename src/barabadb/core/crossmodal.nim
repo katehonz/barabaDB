@@ -6,6 +6,7 @@ import ../storage/lsm
 import ../vector/engine as vengine
 import ../graph/engine as gengine
 import ../fts/engine as fts
+import ../search/hnsw_opt
 
 type
   QueryMode* = enum
@@ -87,6 +88,19 @@ proc searchVector*(engine: CrossModalEngine, query: seq[float32], k: int = 10,
 proc searchVectorFiltered*(engine: CrossModalEngine, query: seq[float32], k: int,
                            filter: proc(meta: Table[string, string]): bool {.gcsafe.}): seq[(uint64, float64)] =
   vengine.searchWithFilter(engine.vectorIdx, query, k, filter)
+
+proc searchVectorOpt*(engine: CrossModalEngine, query: seq[float32], k: int = 10,
+                      metric: vengine.DistanceMetric = vengine.dmCosine): seq[(uint64, float64)] =
+  hnsw_opt.searchOpt(engine.vectorIdx, query, k, metric)
+
+proc searchVectorFilteredOpt*(engine: CrossModalEngine, query: seq[float32], k: int,
+                              filter: proc(meta: Table[string, string]): bool {.gcsafe.}): seq[(uint64, float64)] =
+  hnsw_opt.searchWithFilterOpt(engine.vectorIdx, query, k, filter)
+
+proc insertVectorOpt*(engine: CrossModalEngine, id: uint64, vector: seq[float32],
+                      meta: Table[string, string] = initTable[string, string]()) =
+  hnsw_opt.insertOpt(engine.vectorIdx, id, vector, meta)
+  engine.metadata[id] = meta
 
 # Graph operations
 proc addNode*(engine: CrossModalEngine, label: string,

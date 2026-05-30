@@ -50,7 +50,7 @@ type
     metric*: DistanceMetric
     dimensions*: int
 
-  NodeDist = tuple[dist: float64, id: uint64]
+  NodeDist* = tuple[dist: float64, id: uint64]
 
 proc cosineDistance*(a, b: Vector): float64 =
   var dot, normA, normB: float32
