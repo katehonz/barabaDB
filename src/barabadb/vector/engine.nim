@@ -53,61 +53,61 @@ type
   NodeDist* = tuple[dist: float64, id: uint64]
 
 proc cosineDistance*(a, b: Vector): float64 =
-  var dot, normA, normB: float32
+  var dot, normA, normB: float64
   let len = min(a.len, b.len)
   var i = 0
   while i + 3 < len:
-    dot += a[i]*b[i] + a[i+1]*b[i+1] + a[i+2]*b[i+2] + a[i+3]*b[i+3]
-    normA += a[i]*a[i] + a[i+1]*a[i+1] + a[i+2]*a[i+2] + a[i+3]*a[i+3]
-    normB += b[i]*b[i] + b[i+1]*b[i+1] + b[i+2]*b[i+2] + b[i+3]*b[i+3]
+    dot += float64(a[i])*float64(b[i]) + float64(a[i+1])*float64(b[i+1]) + float64(a[i+2])*float64(b[i+2]) + float64(a[i+3])*float64(b[i+3])
+    normA += float64(a[i])*float64(a[i]) + float64(a[i+1])*float64(a[i+1]) + float64(a[i+2])*float64(a[i+2]) + float64(a[i+3])*float64(a[i+3])
+    normB += float64(b[i])*float64(b[i]) + float64(b[i+1])*float64(b[i+1]) + float64(b[i+2])*float64(b[i+2]) + float64(b[i+3])*float64(b[i+3])
     i += 4
   while i < len:
-    dot += a[i] * b[i]
-    normA += a[i] * a[i]
-    normB += b[i] * b[i]
+    dot += float64(a[i]) * float64(b[i])
+    normA += float64(a[i]) * float64(a[i])
+    normB += float64(b[i]) * float64(b[i])
     inc i
   let denom = sqrt(normA) * sqrt(normB)
   if denom == 0: return 1.0
-  return 1.0 - float64(dot) / float64(denom)
+  return 1.0 - dot / denom
 
 proc euclideanDistance*(a, b: Vector): float64 =
-  var sum: float32
+  var sum: float64
   let len = min(a.len, b.len)
   var i = 0
   while i + 3 < len:
-    let d0 = a[i] - b[i]
-    let d1 = a[i+1] - b[i+1]
-    let d2 = a[i+2] - b[i+2]
-    let d3 = a[i+3] - b[i+3]
+    let d0 = float64(a[i]) - float64(b[i])
+    let d1 = float64(a[i+1]) - float64(b[i+1])
+    let d2 = float64(a[i+2]) - float64(b[i+2])
+    let d3 = float64(a[i+3]) - float64(b[i+3])
     sum += d0*d0 + d1*d1 + d2*d2 + d3*d3
     i += 4
   while i < len:
-    let d = a[i] - b[i]
+    let d = float64(a[i]) - float64(b[i])
     sum += d * d
     inc i
   return sqrt(sum)
 
 proc dotProduct*(a, b: Vector): float64 =
-  var sum: float32
+  var sum: float64
   let len = min(a.len, b.len)
   var i = 0
   while i + 3 < len:
-    sum += a[i]*b[i] + a[i+1]*b[i+1] + a[i+2]*b[i+2] + a[i+3]*b[i+3]
+    sum += float64(a[i])*float64(b[i]) + float64(a[i+1])*float64(b[i+1]) + float64(a[i+2])*float64(b[i+2]) + float64(a[i+3])*float64(b[i+3])
     i += 4
   while i < len:
-    sum += a[i] * b[i]
+    sum += float64(a[i]) * float64(b[i])
     inc i
-  return -float64(sum)  # negative because we want to minimize
+  return -sum  # negative because we want to minimize
 
 proc manhattanDistance*(a, b: Vector): float64 =
-  var sum: float32
+  var sum: float64
   let len = min(a.len, b.len)
   var i = 0
   while i + 3 < len:
-    sum += abs(a[i]-b[i]) + abs(a[i+1]-b[i+1]) + abs(a[i+2]-b[i+2]) + abs(a[i+3]-b[i+3])
+    sum += abs(float64(a[i])-float64(b[i])) + abs(float64(a[i+1])-float64(b[i+1])) + abs(float64(a[i+2])-float64(b[i+2])) + abs(float64(a[i+3])-float64(b[i+3]))
     i += 4
   while i < len:
-    sum += abs(a[i] - b[i])
+    sum += abs(float64(a[i]) - float64(b[i]))
     inc i
   return sum
 

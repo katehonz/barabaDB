@@ -78,11 +78,11 @@ Total: 55 bugs (7 critical, 21 high, 21 medium, 6 low)
 ### ~~BUG-022~~ :white_check_mark: `shipToReplica` socket leak
 **File:** `src/barabadb/core/replication.nim:94-113` — **FIXED:** Used `defer: sock.close()`.
 
-### BUG-023 :x: `pendingAcks` never cleaned up in sync/semi-sync
-**File:** `src/barabadb/core/replication.nim:131-164` — **NOT FIXED:** Requires restructuring sync replication ack flow.
+### ~~BUG-023~~ :white_check_mark: `pendingAcks` never cleaned up in sync/semi-sync
+**File:** `src/barabadb/core/replication.nim:131-199` — **FIXED:** `writeLsn` now removes acked replica IDs from `pendingAcks` and deletes the LSN entry once fully acked; `ackLsn` also cleans up on replica acknowledgement.
 
-### BUG-024 :x: `rebalance` loses old assignments
-**File:** `src/barabadb/core/sharding.nim:208-211` — **NOT FIXED:** Requires passing old assignments to `migrateData`.
+### ~~BUG-024~~ :white_check_mark: `rebalance` loses old assignments
+**File:** `src/barabadb/core/sharding.nim:221-241` — **FIXED:** `rebalance` returns the old shard assignments; callers (`addNode`/`removeNode`) pass them to `migrateData` for correct data migration.
 
 ### ~~BUG-025~~ :white_check_mark: `deserializeValue` missing bounds checks
 **File:** `src/barabadb/protocol/wire.nim:216-227` — **FIXED:** Added bounds checks for `fkBool`, `fkInt8`, `fkInt16`.
