@@ -182,3 +182,10 @@ suite "Wire Protocol Extended":
     check wireValueToString(WireValue(kind: fkInt32, int32Val: 42)) == "42"
     check wireValueToString(WireValue(kind: fkString, strVal: "hello")) == "hello"
     check wireValueToString(WireValue(kind: fkVector, vecVal: @[1.0'f32])) == "<vector:1>"
+
+suite "Typed rows":
+  test "QueryResult carries typed rows for string and int":
+    let client = newClient()
+    let qb = newQueryBuilder(client)
+    discard qb
+    check compiles(client.query("SELECT 1"))

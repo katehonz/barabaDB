@@ -15,7 +15,7 @@ Official Nim client for **BaraDB** — a multimodal database engine.
 Add to your `.nimble` file:
 
 ```nim
-requires "baradb >= 1.1.6"
+requires "baradb >= 1.2.0"
 ```
 
 Or clone locally:
@@ -91,6 +91,63 @@ proc main() {.async.} =
     .exec()
   echo result
   client.close()
+
+waitFor main()
+```
+
+## Connection Pool
+
+```nim
+import asyncdispatch, baradb/client, baradb/pool
+
+proc main() {.async.} =
+  let cfg = ClientConfig(host: "127.0.0.1", port: 9472)
+  let pool = newBaraPool(cfg, minConnections = 2, maxConnections = 10)
+  withClient(pool):
+    let r = await c.query("SELECT name FROM users WHERE id = ?",
+                          @[WireValue(kind: fkInt64, int64Val: 1)])
+    echo r.typedRows
+
+waitFor main()
+```
+
+## Typed Rows
+
+`QueryResult` now carries both a legacy string view (`rows`) and a typed view (`typedRows`):
+
+```nim
+let r = await client.query("SELECT * FROM vectors")
+for row in r.typedRows:
+  if row[0].kind == fkVector:
+    echo row[0].vecVal
+```
+
+## TLS
+
+TLS for the synchronous client is available via `when defined(ssl)`. The async binary client requires a user-supplied `sslContext` because `asyncnet` does not provide native TLS; alternatively use the HTTP fallback.
+
+## Error Handling
+
+All client errors inherit from `BaraError`:
+
+- `BaraIoError` — connection / timeout issues
+- `BaraServerError` — server returned an error frame
+- `BaraAuthError` — authentication failure
+- `BaraProtocolError` — unexpected wire response
+- `BaraPoolTimeoutError` — no connection available in time
+
+## HTTP Fallback
+
+For environments where only the HTTP port is open:
+
+```nim
+import asyncdispatch, baradb/http
+
+proc main() {.async.} =
+  let c = newBaraHttpClient()
+  let result = await c.query("SELECT * FROM users")
+  echo result
+  c.close()
 
 waitFor main()
 ```

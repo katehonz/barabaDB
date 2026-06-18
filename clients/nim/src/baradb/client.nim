@@ -1,261 +1,48 @@
-## BaraDB Client — Self-contained Nim client library
-## No dependency on BaraDB server code.
-## Communicates via the BaraDB Wire Protocol (binary, big-endian).
-
+## BaraDB Client — canonical Nim client library.
+## Self-contained; depends only on Nim stdlib.
 import std/asyncdispatch
 import std/asyncnet
 import std/net as netmod
 import std/locks
 import std/strutils
-import std/endians
 
-# === Wire Protocol (self-contained, no server dependency) ===
+import ./wire
+export wire
+import ./errors
+export errors
 
-const
-  ProtocolMagic* = 0x42415241'u32
+# === AsyncLock (stdlib-only serialization primitive) ===
 
 type
-  FieldKind* = enum
-    fkNull = 0x00
-    fkBool = 0x01
-    fkInt8 = 0x02
-    fkInt16 = 0x03
-    fkInt32 = 0x04
-    fkInt64 = 0x05
-    fkFloat32 = 0x06
-    fkFloat64 = 0x07
-    fkString = 0x08
-    fkBytes = 0x09
-    fkArray = 0x0A
-    fkObject = 0x0B
-    fkVector = 0x0C
-    fkJson = 0x0D
+  AsyncLockObj = object
+    locked: bool
+    waiters: seq[Future[void]]
 
-  MsgKind* = enum
-    # Client messages
-    mkClientHandshake = 0x01
-    mkQuery = 0x02
-    mkQueryParams = 0x03
-    mkExecute = 0x04
-    mkBatch = 0x05
-    mkTransaction = 0x06
-    mkClose = 0x07
-    mkPing = 0x08
-    mkAuth = 0x09
-    # Server messages
-    mkServerHandshake = 0x80
-    mkReady = 0x81
-    mkData = 0x82
-    mkComplete = 0x83
-    mkError = 0x84
-    mkAuthChallenge = 0x85
-    mkAuthOk = 0x86
-    mkSchemaChange = 0x87
-    mkPong = 0x88
-    mkTransactionState = 0x89
+  AsyncLock* = ref AsyncLockObj
 
-  ResultFormat* = enum
-    rfBinary = 0x00
-    rfJson = 0x01
-    rfText = 0x02
+proc initAsyncLock*(): AsyncLock =
+  new(result)
+  result.locked = false
+  result.waiters = @[]
 
-  WireValue* = object
-    case kind*: FieldKind
-    of fkNull: discard
-    of fkBool: boolVal*: bool
-    of fkInt8: int8Val*: int8
-    of fkInt16: int16Val*: int16
-    of fkInt32: int32Val*: int32
-    of fkInt64: int64Val*: int64
-    of fkFloat32: float32Val*: float32
-    of fkFloat64: float64Val*: float64
-    of fkString: strVal*: string
-    of fkBytes: bytesVal*: seq[byte]
-    of fkArray: arrayVal*: seq[WireValue]
-    of fkObject: objVal*: seq[(string, WireValue)]
-    of fkVector: vecVal*: seq[float32]
-    of fkJson: jsonVal*: string
+proc acquire*(lock: AsyncLock): Future[void] =
+  var fut = newFuture[void]("AsyncLock.acquire")
+  if not lock.locked:
+    lock.locked = true
+    fut.complete()
+  else:
+    lock.waiters.add(fut)
+  return fut
 
-proc writeUint32(buf: var seq[byte], val: uint32) =
-  var bytes: array[4, byte]
-  bigEndian32(addr bytes, unsafeAddr val)
-  buf.add(bytes)
+proc release*(lock: AsyncLock) =
+  if lock.waiters.len > 0:
+    let next = lock.waiters[0]
+    lock.waiters.delete(0)
+    next.complete()
+  else:
+    lock.locked = false
 
-proc writeUint64(buf: var seq[byte], val: uint64) =
-  var bytes: array[8, byte]
-  bigEndian64(addr bytes, unsafeAddr val)
-  buf.add(bytes)
-
-proc writeString(buf: var seq[byte], s: string) =
-  buf.writeUint32(uint32(s.len))
-  for ch in s:
-    buf.add(byte(ch))
-
-proc readUint32(buf: openArray[byte], pos: var int): uint32 =
-  var bytes: array[4, byte]
-  for i in 0..3: bytes[i] = buf[pos + i]
-  bigEndian32(addr result, unsafeAddr bytes)
-  pos += 4
-
-proc readUint64(buf: openArray[byte], pos: var int): uint64 =
-  var bytes: array[8, byte]
-  for i in 0..7: bytes[i] = buf[pos + i]
-  bigEndian64(addr result, unsafeAddr bytes)
-  pos += 8
-
-proc readString(buf: openArray[byte], pos: var int): string =
-  let len = int(readUint32(buf, pos))
-  result = newString(len)
-  for i in 0..<len:
-    result[i] = char(buf[pos + i])
-  pos += len
-
-proc toBytes(s: string): seq[byte] =
-  result = newSeq[byte](s.len)
-  for i, c in s:
-    result[i] = byte(c)
-
-proc toString(s: seq[byte]): string =
-  result = newString(s.len)
-  for i, b in s:
-    result[i] = char(b)
-
-proc serializeValue*(buf: var seq[byte], val: WireValue) =
-  buf.add(byte(val.kind))
-  case val.kind
-  of fkNull: discard
-  of fkBool: buf.add(if val.boolVal: 1'u8 else: 0'u8)
-  of fkInt8: buf.add(uint8(val.int8Val))
-  of fkInt16:
-    var bytes16: array[2, byte]
-    bigEndian16(addr bytes16, unsafeAddr val.int16Val)
-    buf.add(bytes16)
-  of fkInt32: buf.writeUint32(uint32(val.int32Val))
-  of fkInt64: buf.writeUint64(uint64(val.int64Val))
-  of fkFloat32:
-    var bytes32: array[4, byte]
-    copyMem(addr bytes32, unsafeAddr val.float32Val, 4)
-    buf.add(bytes32)
-  of fkFloat64:
-    var bytes: array[8, byte]
-    copyMem(addr bytes, unsafeAddr val.float64Val, 8)
-    buf.add(bytes)
-  of fkString: buf.writeString(val.strVal)
-  of fkBytes:
-    buf.writeUint32(uint32(val.bytesVal.len))
-    buf.add(val.bytesVal)
-  of fkArray:
-    buf.writeUint32(uint32(val.arrayVal.len))
-    for item in val.arrayVal:
-      buf.serializeValue(item)
-  of fkObject:
-    buf.writeUint32(uint32(val.objVal.len))
-    for (name, item) in val.objVal:
-      buf.writeString(name)
-      buf.serializeValue(item)
-  of fkVector:
-    buf.writeUint32(uint32(val.vecVal.len))
-    for f in val.vecVal:
-      var fb: array[4, byte]
-      copyMem(addr fb, unsafeAddr f, 4)
-      buf.add(fb)
-  of fkJson: buf.writeString(val.jsonVal)
-
-proc deserializeValue*(buf: openArray[byte], pos: var int): WireValue =
-  let kind = FieldKind(buf[pos])
-  inc pos
-  case kind
-  of fkNull: result = WireValue(kind: fkNull)
-  of fkBool:
-    result = WireValue(kind: fkBool, boolVal: buf[pos] != 0)
-    inc pos
-  of fkInt8:
-    result = WireValue(kind: fkInt8, int8Val: cast[int8](buf[pos]))
-    inc pos
-  of fkInt16:
-    var bytes16: array[2, byte]
-    for i in 0..1: bytes16[i] = buf[pos + i]
-    var v16: int16
-    bigEndian16(addr v16, unsafeAddr bytes16)
-    result = WireValue(kind: fkInt16, int16Val: v16)
-    pos += 2
-  of fkInt32:
-    result = WireValue(kind: fkInt32, int32Val: int32(readUint32(buf, pos)))
-  of fkInt64:
-    result = WireValue(kind: fkInt64, int64Val: int64(readUint64(buf, pos)))
-  of fkFloat32:
-    var v32: float32
-    copyMem(addr v32, addr buf[pos], 4)
-    result = WireValue(kind: fkFloat32, float32Val: v32)
-    pos += 4
-  of fkFloat64:
-    var v: float64
-    copyMem(addr v, addr buf[pos], 8)
-    result = WireValue(kind: fkFloat64, float64Val: v)
-    pos += 8
-  of fkString:
-    result = WireValue(kind: fkString, strVal: readString(buf, pos))
-  of fkBytes:
-    let blen = int(readUint32(buf, pos))
-    var bval: seq[byte] = @[]
-    for i in 0..<blen:
-      bval.add(buf[pos + i])
-    result = WireValue(kind: fkBytes, bytesVal: bval)
-    pos += blen
-  of fkArray:
-    let count = int(readUint32(buf, pos))
-    var arr: seq[WireValue] = @[]
-    for i in 0..<count:
-      arr.add(deserializeValue(buf, pos))
-    result = WireValue(kind: fkArray, arrayVal: arr)
-  of fkObject:
-    let count = int(readUint32(buf, pos))
-    var obj: seq[(string, WireValue)] = @[]
-    for i in 0..<count:
-      let name = readString(buf, pos)
-      let val = deserializeValue(buf, pos)
-      obj.add((name, val))
-    result = WireValue(kind: fkObject, objVal: obj)
-  of fkVector:
-    let dim = int(readUint32(buf, pos))
-    var vec: seq[float32] = @[]
-    for i in 0..<dim:
-      var fv: float32
-      copyMem(addr fv, addr buf[pos], 4)
-      vec.add(fv)
-      pos += 4
-    result = WireValue(kind: fkVector, vecVal: vec)
-  of fkJson:
-    result = WireValue(kind: fkJson, jsonVal: readString(buf, pos))
-
-proc buildMessage*(kind: MsgKind, requestId: uint32, payload: seq[byte]): seq[byte] =
-  result = @[]
-  result.writeUint32(uint32(kind))
-  result.writeUint32(uint32(payload.len))
-  result.writeUint32(requestId)
-  result.add(payload)
-
-proc makeQueryMessage*(requestId: uint32, query: string): seq[byte] =
-  var payload: seq[byte] = @[]
-  payload.writeString(query)
-  payload.add(byte(rfBinary))
-  buildMessage(mkQuery, requestId, payload)
-
-proc makeQueryParamsMessage*(requestId: uint32, query: string, params: seq[WireValue]): seq[byte] =
-  var payload: seq[byte] = @[]
-  payload.writeString(query)
-  payload.add(byte(rfBinary))
-  payload.writeUint32(uint32(params.len))
-  for p in params:
-    payload.serializeValue(p)
-  buildMessage(mkQueryParams, requestId, payload)
-
-proc makeAuthMessage*(requestId: uint32, token: string): seq[byte] =
-  var payload: seq[byte] = @[]
-  payload.writeString(token)
-  buildMessage(mkAuth, requestId, payload)
-
-# === Client Library ===
+# === Configuration & result types ===
 
 type
   ClientConfig* = object
@@ -266,36 +53,88 @@ type
     password*: string
     timeoutMs*: int
     maxRetries*: int
+    ssl*: bool
+    when defined(ssl):
+      sslContext*: netmod.SslContext
 
   QueryResult* = object
     columns*: seq[string]
-    columnTypes*: seq[string]
-    rows*: seq[seq[string]]
+    columnTypes*: seq[FieldKind]
+    rows*: seq[seq[string]]          # legacy string view
+    typedRows*: seq[seq[WireValue]]  # typed view
     rowCount*: int
     affectedRows*: int
     executionTimeMs*: float64
+    lastInsertId*: int64
 
   BaraClient* = ref object
-    config: ClientConfig
-    socket: AsyncSocket
-    connected: bool
-    requestId: uint32
+    config*: ClientConfig
+    socket*: AsyncSocket
+    connected*: bool
+    requestId*: uint32
+    sendLock*: AsyncLock
 
 proc defaultConfig*(): ClientConfig =
-  ClientConfig(
+  result = ClientConfig(
     host: "127.0.0.1", port: 9472, database: "default",
     username: "admin", password: "", timeoutMs: 30000, maxRetries: 3,
+    ssl: false,
   )
+  when defined(ssl):
+    result.sslContext = nil
 
 proc newClient*(config: ClientConfig = defaultConfig()): BaraClient =
-  BaraClient(config: config, socket: newAsyncSocket(), connected: false, requestId: 0)
+  result = BaraClient(
+    config: config,
+    socket: newAsyncSocket(),
+    connected: false,
+    requestId: 0,
+    sendLock: initAsyncLock(),
+  )
+
+proc nextId*(client: BaraClient): uint32 =
+  inc client.requestId
+  client.requestId
+
+proc awaitWithTimeout(fut: Future[void], ms: int): Future[void] {.async.} =
+  if ms <= 0:
+    await fut
+  else:
+    let ok = await withTimeout(fut, ms)
+    if not ok:
+      raise newException(BaraIoError, "Operation timed out")
+    await fut
+
+proc awaitWithTimeout(fut: Future[string], ms: int): Future[string] {.async.} =
+  if ms <= 0:
+    result = await fut
+  else:
+    let ok = await withTimeout(fut, ms)
+    if not ok:
+      raise newException(BaraIoError, "Operation timed out")
+    result = await fut
+
+proc recvExact(sock: AsyncSocket, size: int, timeoutMs: int): Future[string] {.async.} =
+  var data = ""
+  while data.len < size:
+    let chunk = await awaitWithTimeout(sock.recv(size - data.len), timeoutMs)
+    if chunk.len == 0:
+      raise newException(BaraIoError, "Connection closed while reading")
+    data.add(chunk)
+  return data
 
 proc connect*(client: BaraClient) {.async.} =
-  await client.socket.connect(client.config.host, Port(client.config.port))
+  await client.socket.connect(client.config.host, Port(client.config.port)).awaitWithTimeout(client.config.timeoutMs)
+  if client.config.ssl:
+    when defined(ssl):
+      # Async binary TLS over asyncnet is not supported by the Nim stdlib alone.
+      # Supply an sslContext only if you have wired up a platform-specific async TLS socket.
+      if client.config.sslContext.isNil:
+        raise newException(BaraIoError, "Async binary TLS requires a user-supplied sslContext")
+      # The caller is responsible for wrapping an async-compatible socket before passing it in.
+    else:
+      raise newException(BaraIoError, "SSL requested but Nim built without -d:ssl")
   client.connected = true
-
-proc nextId(client: BaraClient): uint32 =
-  inc client.requestId; client.requestId
 
 proc close*(client: BaraClient) =
   if client.connected:
@@ -325,134 +164,119 @@ proc wireValueToString*(wv: WireValue): string =
   of fkVector: return "<vector:" & $wv.vecVal.len & ">"
   of fkJson: return wv.jsonVal
 
-proc readQueryResponse(client: BaraClient): Future[QueryResult] {.async.} =
-  let headerData = await client.socket.recv(12)
-  if headerData.len < 12:
-    raise newException(IOError, "Connection closed")
-
+proc readResponsePayload(client: BaraClient): Future[(MsgKind, seq[byte])] {.async.} =
+  let headerStr = await recvExact(client.socket, 12, client.config.timeoutMs)
   var pos = 0
-  let hdrData = toBytes(headerData)
+  let hdrData = toBytes(headerStr)
   let kind = MsgKind(readUint32(hdrData, pos))
   let payloadLen = int(readUint32(hdrData, pos))
   discard readUint32(hdrData, pos)
+  let payloadStr = await recvExact(client.socket, payloadLen, client.config.timeoutMs)
+  return (kind, toBytes(payloadStr))
 
-  let payloadStr = await client.socket.recv(payloadLen)
-  var payload = toBytes(payloadStr)
-
-  result = QueryResult(columns: @[], rows: @[], rowCount: 0, affectedRows: 0)
-
+proc parseQueryResponse(client: BaraClient, kind: MsgKind, payload: seq[byte]): Future[QueryResult] {.async.} =
+  result = QueryResult(columns: @[], rows: @[], typedRows: @[], rowCount: 0, affectedRows: 0)
   if kind == mkReady:
     return
   if kind == mkError and payload.len >= 8:
     var epos = 0
     let code = readUint32(payload, epos)
     let emsg = readString(payload, epos)
-    raise newException(IOError, "Error " & $code & ": " & emsg)
+    var err = newException(BaraServerError, "Error " & $code & ": " & emsg)
+    err.code = code
+    raise err
   if kind == mkData:
     var dpos = 0
     let colCount = int(readUint32(payload, dpos))
-    var cols: seq[string] = @[]
     for i in 0..<colCount:
-      cols.add(readString(payload, dpos))
-    result.columns = cols
-    var colTypes: seq[string] = @[]
+      result.columns.add(readString(payload, dpos))
     for i in 0..<colCount:
-      colTypes.add($FieldKind(payload[dpos]))
+      result.columnTypes.add(FieldKind(payload[dpos]))
       inc dpos
-    result.columnTypes = colTypes
     let rowCount = int(readUint32(payload, dpos))
+    result.rowCount = rowCount
     for r in 0..<rowCount:
-      var row: seq[string] = @[]
+      var typedRow: seq[WireValue] = @[]
+      var stringRow: seq[string] = @[]
       for c in 0..<colCount:
         let wv = deserializeValue(payload, dpos)
-        row.add(wireValueToString(wv))
-      result.rows.add(row)
-    result.rowCount = rowCount
+        typedRow.add(wv)
+        stringRow.add(wireValueToString(wv))
+      result.typedRows.add(typedRow)
+      result.rows.add(stringRow)
     # Read following mkComplete message
-    let compHeader = await client.socket.recv(12)
-    if compHeader.len >= 12:
-      var chPos = 0
-      let chData = toBytes(compHeader)
-      let compKind = MsgKind(readUint32(chData, chPos))
-      let compLen = int(readUint32(chData, chPos))
-      discard readUint32(chData, chPos)
-      let compPayloadStr = await client.socket.recv(compLen)
-      if compKind == mkComplete:
-        var cpPos = 0
-        result.affectedRows = int(readUint32(toBytes(compPayloadStr), cpPos))
+    let (compKind, compPayload) = await client.readResponsePayload()
+    if compKind == mkComplete and compPayload.len >= 4:
+      var cpPos = 0
+      result.affectedRows = int(readUint32(compPayload, cpPos))
     return
   if kind == mkComplete:
     var rpos = 0
     result.affectedRows = int(readUint32(payload, rpos))
     return
+  raise newException(BaraProtocolError, "Unexpected response kind: 0x" & toHex(uint32(kind), 2))
+
+proc doQuery(client: BaraClient, msg: seq[byte]): Future[QueryResult] {.async.} =
+  if not client.connected:
+    raise newException(BaraIoError, "Not connected")
+  await client.sendLock.acquire()
+  try:
+    await client.socket.send(toString(msg))
+    let (kind, payload) = await client.readResponsePayload()
+    return await client.parseQueryResponse(kind, payload)
+  finally:
+    client.sendLock.release()
 
 proc query*(client: BaraClient, sql: string): Future[QueryResult] {.async.} =
-  if not client.connected:
-    raise newException(IOError, "Not connected")
-
   let msg = makeQueryMessage(client.nextId(), sql)
-  let msgStr = toString(msg)
-  await client.socket.send(msgStr)
-
-  return await client.readQueryResponse()
+  return await client.doQuery(msg)
 
 proc query*(client: BaraClient, sql: string, params: seq[WireValue]): Future[QueryResult] {.async.} =
-  if not client.connected:
-    raise newException(IOError, "Not connected")
-
   let msg = makeQueryParamsMessage(client.nextId(), sql, params)
-  let msgStr = toString(msg)
-  await client.socket.send(msgStr)
-
-  return await client.readQueryResponse()
+  return await client.doQuery(msg)
 
 proc exec*(client: BaraClient, sql: string): Future[int] {.async.} =
   let qr = await client.query(sql)
   return qr.affectedRows
 
 proc auth*(client: BaraClient, token: string) {.async.} =
-  if not client.connected:
-    raise newException(IOError, "Not connected")
-
   let msg = makeAuthMessage(client.nextId(), token)
-  let msgStr = toString(msg)
-  await client.socket.send(msgStr)
-
-  let headerData = await client.socket.recv(12)
-  if headerData.len < 12:
-    raise newException(IOError, "Connection closed")
-
-  var pos = 0
-  let hdrData = toBytes(headerData)
-  let kind = MsgKind(readUint32(hdrData, pos))
-  let payloadLen = int(readUint32(hdrData, pos))
-  discard readUint32(hdrData, pos)
-
-  if kind == mkAuthOk:
-    return
-  elif kind == mkError:
-    let payloadStr = await client.socket.recv(payloadLen)
-    var epos = 0
-    let emsg = readString(toBytes(payloadStr), epos)
-    raise newException(IOError, "Auth failed: " & emsg)
-  else:
-    raise newException(IOError, "Unexpected auth response: 0x" & toHex(uint32(kind), 2))
+  await client.sendLock.acquire()
+  try:
+    await client.socket.send(toString(msg))
+    let (kind, payload) = await client.readResponsePayload()
+    case kind
+    of mkAuthOk:
+      return
+    of mkError:
+      var epos = 0
+      discard readUint32(payload, epos)
+      let emsg = readString(payload, epos)
+      raise newException(BaraAuthError, "Auth failed: " & emsg)
+    else:
+      raise newException(BaraProtocolError, "Unexpected auth response: 0x" & toHex(uint32(kind), 2))
+  finally:
+    client.sendLock.release()
 
 proc ping*(client: BaraClient): Future[bool] {.async.} =
   if not client.connected:
     return false
   let msg = buildMessage(mkPing, client.nextId(), @[])
-  let msgStr = toString(msg)
-  await client.socket.send(msgStr)
-
-  let headerData = await client.socket.recv(12)
-  if headerData.len < 12:
+  await client.sendLock.acquire()
+  try:
+    await client.socket.send(toString(msg))
+    let (kind, _) = await client.readResponsePayload()
+    return kind == mkPong
+  except:
     return false
+  finally:
+    client.sendLock.release()
 
-  var pos = 0
-  let hdrData = toBytes(headerData)
-  let kind = MsgKind(readUint32(hdrData, pos))
-  return kind == mkPong
+proc readQueryResponse*(client: BaraClient): Future[QueryResult] {.async.} =
+  ## Read and parse the next server response. Does NOT acquire sendLock;
+  ## callers that already sent a message manually can use this.
+  let (kind, payload) = await client.readResponsePayload()
+  return await client.parseQueryResponse(kind, payload)
 
 # === Fluent Query Builder ===
 
@@ -532,7 +356,7 @@ proc build*(qb: QueryBuilder): string =
 proc exec*(qb: QueryBuilder): Future[QueryResult] {.async.} =
   return await qb.client.query(qb.build())
 
-# === Blocking Sync Client (production-grade, no waitFor) ===
+# === Blocking Sync Client ===
 
 type
   SyncClient* = ref object
@@ -547,70 +371,64 @@ proc newSyncClient*(config: ClientConfig = defaultConfig()): SyncClient =
   result.socket = netmod.newSocket()
   initLock(result.lock)
 
-proc recvExact(sock: netmod.Socket, size: int): string =
+proc recvExactBlocking(sock: netmod.Socket, size: int): string =
   result = ""
   while result.len < size:
     let chunk = sock.recv(size - result.len)
     if chunk.len == 0:
-      raise newException(IOError, "Connection closed")
+      raise newException(BaraIoError, "Connection closed")
     result.add(chunk)
 
-proc readQueryResponseBlocking(client: SyncClient): QueryResult =
-  let headerData = client.socket.recvExact(12)
+proc readResponsePayloadBlocking(client: SyncClient): (MsgKind, seq[byte]) =
+  let headerData = client.socket.recvExactBlocking(12)
   var pos = 0
   let hdrData = toBytes(headerData)
   let kind = MsgKind(readUint32(hdrData, pos))
   let payloadLen = int(readUint32(hdrData, pos))
   discard readUint32(hdrData, pos)
+  let payloadStr = client.socket.recvExactBlocking(payloadLen)
+  return (kind, toBytes(payloadStr))
 
-  let payloadStr = client.socket.recvExact(payloadLen)
-  var payload = toBytes(payloadStr)
-
-  result = QueryResult(columns: @[], rows: @[], rowCount: 0, affectedRows: 0)
-
+proc parseQueryResponseBlocking(client: SyncClient, kind: MsgKind, payload: seq[byte]): QueryResult =
+  result = QueryResult(columns: @[], rows: @[], typedRows: @[], rowCount: 0, affectedRows: 0)
   if kind == mkReady:
     return
   if kind == mkError and payload.len >= 8:
     var epos = 0
     let code = readUint32(payload, epos)
     let emsg = readString(payload, epos)
-    raise newException(IOError, "Error " & $code & ": " & emsg)
+    var err = newException(BaraServerError, "Error " & $code & ": " & emsg)
+    err.code = code
+    raise err
   if kind == mkData:
     var dpos = 0
     let colCount = int(readUint32(payload, dpos))
-    var cols: seq[string] = @[]
     for i in 0..<colCount:
-      cols.add(readString(payload, dpos))
-    result.columns = cols
-    var colTypes: seq[string] = @[]
+      result.columns.add(readString(payload, dpos))
     for i in 0..<colCount:
-      colTypes.add($FieldKind(payload[dpos]))
+      result.columnTypes.add(FieldKind(payload[dpos]))
       inc dpos
-    result.columnTypes = colTypes
     let rowCount = int(readUint32(payload, dpos))
+    result.rowCount = rowCount
     for r in 0..<rowCount:
-      var row: seq[string] = @[]
+      var typedRow: seq[WireValue] = @[]
+      var stringRow: seq[string] = @[]
       for c in 0..<colCount:
         let wv = deserializeValue(payload, dpos)
-        row.add(wireValueToString(wv))
-      result.rows.add(row)
-    result.rowCount = rowCount
-    # Read following mkComplete message
-    let compHeader = client.socket.recvExact(12)
-    var chPos = 0
-    let chData = toBytes(compHeader)
-    let compKind = MsgKind(readUint32(chData, chPos))
-    let compLen = int(readUint32(chData, chPos))
-    discard readUint32(chData, chPos)
-    let compPayloadStr = client.socket.recvExact(compLen)
-    if compKind == mkComplete:
+        typedRow.add(wv)
+        stringRow.add(wireValueToString(wv))
+      result.typedRows.add(typedRow)
+      result.rows.add(stringRow)
+    let (compKind, compPayload) = client.readResponsePayloadBlocking()
+    if compKind == mkComplete and compPayload.len >= 4:
       var cpPos = 0
-      result.affectedRows = int(readUint32(toBytes(compPayloadStr), cpPos))
+      result.affectedRows = int(readUint32(compPayload, cpPos))
     return
   if kind == mkComplete:
     var rpos = 0
     result.affectedRows = int(readUint32(payload, rpos))
     return
+  raise newException(BaraProtocolError, "Unexpected response kind: 0x" & toHex(uint32(kind), 2))
 
 proc connect*(client: SyncClient) =
   netmod.connect(client.socket, client.config.host, Port(client.config.port))
@@ -630,10 +448,11 @@ proc query*(client: SyncClient, sql: string): QueryResult =
   acquire(client.lock)
   try:
     if not client.connected:
-      raise newException(IOError, "Not connected")
+      raise newException(BaraIoError, "Not connected")
     let msg = makeQueryMessage(0, sql)
     netmod.send(client.socket, toString(msg))
-    return readQueryResponseBlocking(client)
+    let (kind, payload) = client.readResponsePayloadBlocking()
+    return client.parseQueryResponseBlocking(kind, payload)
   finally:
     release(client.lock)
 
@@ -641,10 +460,11 @@ proc query*(client: SyncClient, sql: string, params: seq[WireValue]): QueryResul
   acquire(client.lock)
   try:
     if not client.connected:
-      raise newException(IOError, "Not connected")
+      raise newException(BaraIoError, "Not connected")
     let msg = makeQueryParamsMessage(0, sql, params)
     netmod.send(client.socket, toString(msg))
-    return readQueryResponseBlocking(client)
+    let (kind, payload) = client.readResponsePayloadBlocking()
+    return client.parseQueryResponseBlocking(kind, payload)
   finally:
     release(client.lock)
 
@@ -656,24 +476,20 @@ proc auth*(client: SyncClient, token: string) =
   acquire(client.lock)
   try:
     if not client.connected:
-      raise newException(IOError, "Not connected")
+      raise newException(BaraIoError, "Not connected")
     let msg = makeAuthMessage(0, token)
     netmod.send(client.socket, toString(msg))
-    let headerData = client.socket.recvExact(12)
-    var pos = 0
-    let hdrData = toBytes(headerData)
-    let kind = MsgKind(readUint32(hdrData, pos))
-    let payloadLen = int(readUint32(hdrData, pos))
-    discard readUint32(hdrData, pos)
-    if kind == mkAuthOk:
+    let (kind, payload) = client.readResponsePayloadBlocking()
+    case kind
+    of mkAuthOk:
       return
-    elif kind == mkError:
-      let payloadStr = client.socket.recvExact(payloadLen)
+    of mkError:
       var epos = 0
-      let emsg = readString(toBytes(payloadStr), epos)
-      raise newException(IOError, "Auth failed: " & emsg)
+      discard readUint32(payload, epos)
+      let emsg = readString(payload, epos)
+      raise newException(BaraAuthError, "Auth failed: " & emsg)
     else:
-      raise newException(IOError, "Unexpected auth response")
+      raise newException(BaraProtocolError, "Unexpected auth response")
   finally:
     release(client.lock)
 
@@ -684,10 +500,7 @@ proc ping*(client: SyncClient): bool =
       return false
     let msg = buildMessage(mkPing, 0, @[])
     netmod.send(client.socket, toString(msg))
-    let headerData = client.socket.recvExact(12)
-    var pos = 0
-    let hdrData = toBytes(headerData)
-    let kind = MsgKind(readUint32(hdrData, pos))
+    let (kind, _) = client.readResponsePayloadBlocking()
     return kind == mkPong
   except:
     return false

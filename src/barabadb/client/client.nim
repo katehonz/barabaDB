@@ -1,3 +1,4 @@
+{.deprecated: "Use the canonical baradb/client from clients/nim instead.".}
 ## BaraDB Client — Nim client library
 import std/asyncdispatch
 import std/asyncnet

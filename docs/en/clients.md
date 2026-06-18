@@ -123,59 +123,43 @@ async def main():
 asyncio.run(main())
 ```
 
-## Nim (Embedded Mode)
+## Nim
 
-### Add Dependency
+Install the official client:
 
-```nim
-# In your .nimble file
-requires "barabadb >= 0.1.0"
+```bash
+nimble install baradb
 ```
 
-### Embedded Usage
+### Async with connection pool
 
 ```nim
-import barabadb/storage/lsm
-import barabadb/storage/btree
-import barabadb/vector/engine
-import barabadb/graph/engine
+import asyncdispatch, baradb/client, baradb/pool
 
-# Key-Value store
-var db = newLSMTree("./data")
-db.put("user:1", cast[seq[byte]]("Alice"))
-let (found, value) = db.get("user:1")
-db.close()
+proc main() {.async.} =
+  let cfg = ClientConfig(host: "127.0.0.1", port: 9472)
+  let pool = newBaraPool(cfg, minConnections = 2, maxConnections = 10)
+  withClient(pool):
+    let r = await c.query("SELECT name FROM users WHERE id = ?",
+                          @[WireValue(kind: fkInt64, int64Val: 1)])
+    echo r.typedRows
 
-# B-Tree index
-var btree = newBTreeIndex[string, int]()
-btree.insert("Alice", 30)
-let ages = btree.get("Alice")
-
-# Vector search
-var idx = newHNSWIndex(dimensions = 128)
-idx.insert(1, @[0.1'f32, 0.2, 0.3], {"category": "A"}.toTable)
-let results = idx.search(@[0.1'f32, 0.2, 0.3], k = 10)
-
-# Graph
-var g = newGraph()
-let alice = g.addNode("Person", {"name": "Alice"}.toTable)
-let bob = g.addNode("Person", {"name": "Bob"}.toTable)
-discard g.addEdge(alice, bob, "knows")
-let path = g.shortestPath(alice, bob)
+waitFor main()
 ```
 
-### Client Library
+### Sync client
 
 ```nim
-import barabadb/client/client
+import baradb/client
 
-var c = newBaraClient("localhost", 9472)
+let c = newSyncClient()
 c.connect()
-let result = c.query("SELECT name FROM users")
-for row in result.rows:
-  echo row["name"]
+let r = c.query("SELECT * FROM users")
+echo r.rows
 c.close()
 ```
+
+For Laravel-style query building, use `nim-allographer` with the `Baradb` driver.
 
 ## Rust
 

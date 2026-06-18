@@ -213,40 +213,53 @@ proc placeholdersToWireValuesRaw*(args: seq[JsonNode]): seq[WireValue] =
 # toJson
 # ================================================================================
 
+proc wireValueToJson*(wv: WireValue): JsonNode =
+  case wv.kind
+  of fkNull:
+    result = newJNull()
+  of fkBool:
+    result = newJBool(wv.boolVal)
+  of fkInt8:
+    result = newJInt(int(wv.int8Val))
+  of fkInt16:
+    result = newJInt(int(wv.int16Val))
+  of fkInt32:
+    result = newJInt(int(wv.int32Val))
+  of fkInt64:
+    result = newJInt(int(wv.int64Val))
+  of fkFloat32:
+    result = newJFloat(float(wv.float32Val))
+  of fkFloat64:
+    result = newJFloat(wv.float64Val)
+  of fkString:
+    result = newJString(wv.strVal)
+  of fkBytes:
+    result = newJString("<bytes:" & $wv.bytesVal.len & ">")
+  of fkArray:
+    result = newJArray()
+    for item in wv.arrayVal:
+      result.add(wireValueToJson(item))
+  of fkObject:
+    result = newJObject()
+    for (name, val) in wv.objVal:
+      result[name] = wireValueToJson(val)
+  of fkVector:
+    result = newJArray()
+    for f in wv.vecVal:
+      result.add(newJFloat(float(f)))
+  of fkJson:
+    try:
+      result = parseJson(wv.jsonVal)
+    except JsonParsingError:
+      result = newJString(wv.jsonVal)
+
 proc toJson*(resultSet: QueryResult): seq[JsonNode] =
   var response_table = newSeq[JsonNode](resultSet.rowCount)
   for r in 0 ..< resultSet.rowCount:
     var response_row = newJObject()
     for c in 0 ..< resultSet.columns.len:
       let key = resultSet.columns[c]
-      let val = resultSet.rows[r][c]
-      let colType = if c < resultSet.columnTypes.len: resultSet.columnTypes[c] else: "fkString"
-      if val.len == 0:
-        response_row[key] = newJNull()
-      else:
-        case colType
-        of "fkNull":
-          response_row[key] = newJNull()
-        of "fkBool":
-          response_row[key] = newJBool(val == "t" or val == "true" or val == "1")
-        of "fkInt8", "fkInt16", "fkInt32", "fkInt64":
-          try:
-            response_row[key] = newJInt(val.parseInt)
-          except ValueError:
-            response_row[key] = newJString(val)
-        of "fkFloat32", "fkFloat64":
-          try:
-            response_row[key] = newJFloat(val.parseFloat)
-          except ValueError:
-            response_row[key] = newJString(val)
-        of "fkJson":
-          try:
-            response_row[key] = parseJson(val)
-          except JsonParsingError:
-            response_row[key] = newJString(val)
-        else:
-          # fkString, fkBytes, fkArray, fkObject, fkVector, and unknown types
-          response_row[key] = newJString(val)
+      response_row[key] = wireValueToJson(resultSet.typedRows[r][c])
     response_table[r] = response_row
   return response_table
 
@@ -832,7 +845,9 @@ proc first*(self: RawBaradbQuery): Future[Option[JsonNode]] {.async.} =
 
 proc firstPlain*(self: RawBaradbQuery): Future[seq[string]] {.async.} =
   self.log.logger(self.queryString)
-  return await self.getRowPlain(self.queryString, self.placeHolder)
+  let row = await self.getRowPlain(self.queryString, self.placeHolder)
+  if row.isSome: return row.get()
+  return @[]
 
 
 # ================================================================================

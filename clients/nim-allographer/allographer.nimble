@@ -16,6 +16,7 @@ srcDir        = "src"
 requires "nim >= 2.0.0"
 requires "db_connector >= 0.1.0"
 requires "checksums >= 0.1.0"
+requires "baradb >= 1.2.0"
 
 
 import strformat, os
