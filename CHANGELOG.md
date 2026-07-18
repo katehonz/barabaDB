@@ -4,6 +4,36 @@ All notable changes to BaraDB are documented in this file.
 
 ## [1.2.0] — Unreleased
 
+### Core Storage Hardening
+
+Foundational LSM improvements for write performance, durability, and compaction correctness.
+
+- **Hash-table MemTable** (`storage/lsm.nim`) — O(1) put/get instead of O(n) sorted-seq insert; sort only on flush to SSTable
+- **Timestamp-aware MemTable overwrite** — WAL recovery keeps newest version per key
+- **WAL rewrite after flush** (`storage/wal.nim`) — `truncate` / `rewriteLive` so recovery is O(unflushed) not O(history); fsync on truncate/rewrite/close
+- **WAL group commit** — `WalSyncMode`: `none` | `group` (default) | `every`; fsync every N entries and/or every interval ms
+- **Config knobs** — `wal_sync_mode`, `wal_group_every`, `wal_sync_interval_ms` / env `BARADB_WAL_*`; registry opens DBs with config
+- **L0 file-count compaction trigger** — RocksDB-style `L0CompactionTrigger` (default 4) instead of size-only for overlapping L0
+- **`rebuildFromLSM` for compaction** (`storage/compaction.nim`) — strategy always syncs from live SSTable catalog (no drift after flush)
+- **Safe mmap close after compaction** — release handles for compacted inputs after unlink
+- **Recovery flag** — flush during WAL replay does not rewrite the open WAL file mid-read
+- **Fair WAL micro-bench** — `benchWalDurabilityModes` compares none/group/every on the same workload
+- **RwLock for LSM** (`storage/rwlock.nim`) — writer-preferring reader-writer lock; default API uses exclusive mode
+- **Deep-copy on get** — returned values are copied so callers never share seq buffers with the store
+- **`-d:baraConcurrentReads`** — opt-in shared read locks (unsafe with default ORC across OS threads)
+- **`scanRange(start, end)`** — inclusive multi-level range scan (memtable + SSTables)
+- **Focused tests** — `tests/test_storage_hardening.nim` (RwLock, WAL group, scanRange, stress)
+- **Note:** Nim ORC must not share GC'd `LSMTree` refs across OS threads without isolation
+- **StorageGate** (`storage/gate.nim`) — global exclusive lock serializing HTTP (Hunos workers), TCP, compaction, Raft apply
+- **HTTP stop no longer closes shared registry** — ownership stays with main; `stop(closeStorage=true)` for standalone HTTP
+- **Schema persistence** — stable keys `_schema:tables:<name>`; restore from full LSM (`scanAll`), not only memtable; DROP/ALTER update durable catalog; secondary index rebuild on open
+- **Schema tests** — `tests/test_schema_persist.nim` (create/flush/reopen, drop, alter, multi-table)
+- **Executor split** — `query/exec/{types,values,schema}.nim`; `executor.nim` re-exports for API stability; see `query/exec/README.md`
+- **Fair benchmarks** — `benchmarks/fair_bench.py` multi-tier (embedded SQLite↔LSM; client-server HTTP/wire↔PG); batch multi-row INSERT; wire protocol via Python client; `generate_report.py --fair`; `nimble bench_fair`
+- **Fix wire INSERT SIGSEGV** — ORC cycle collector crash under async TCP load; switch default MM to `--mm:arc` in `nim.cfg`; regression `tests/test_wire_insert_stress.nim`
+- **Honest bench docs** — tier warnings in `bench_all`, `pg_bench`, `compare.nim`; `benchmarks/README.md`
+- **Regression suite** — `Core Storage Hardening` tests in `tests/test_all.nim`
+
 ### Search Module (new)
 
 A unified search module combining vector similarity, full-text, and structured

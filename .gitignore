@@ -51,6 +51,18 @@ tests/nimforum_smoke_test
 
 benchmark_results.json
 pg_benchmark_results.json
+fair_benchmark_results.json
 benchmarks/bench_all
 benchmarks/compare
 .qwen/
+
+# Compiled test / module binaries
+tests/test_schema_persist
+tests/test_storage_hardening
+tests/test_wire_insert_stress
+src/barabadb/storage/lsm
+src/barabadb/storage/wal
+src/barabadb/storage/btree
+src/barabadb/storage/gate
+clients/nim/tests/test_pool
+clients/nim/tests/test_wire

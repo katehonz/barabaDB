@@ -15,6 +15,7 @@ import barabadb/core/config
 import barabadb/core/logging
 import barabadb/protocol/ssl
 import barabadb/storage/lsm
+import barabadb/storage/gate
 import barabadb/storage/compaction
 import barabadb/core/raft
 import barabadb/query/executor
@@ -36,58 +37,66 @@ type
 
 proc newCompactionManager*(db: LSMTree): CompactionManager =
   result = CompactionManager(db: db, strategy: compaction.newCompactionStrategy(db.dir))
-  for sst in db.sstables:
-    let meta = compaction.SSTableMeta(
-      path: sst.path,
-      level: sst.level,
-      minKey: sst.minKey,
-      maxKey: sst.maxKey,
-      entryCount: sst.entryCount,
-      sizeBytes: sst.entryCount * 64,
-      createdAt: 0,
-    )
-    result.strategy.addTable(meta)
+  result.strategy.rebuildFromLSM(db)
+
+proc applyCompactionResult(db: LSMTree, result: compaction.CompactionResult) =
+  ## Apply compaction output under the caller's lock: update sstables + MANIFEST.
+  ## On Linux, compact may already have unlinked inputs; we still close our mmaps.
+  if result.outputTables.len == 0:
+    return
+
+  var newSSTables: seq[SSTable] = @[]
+  var removedPaths = initTable[string, bool]()
+  for t in result.inputTables:
+    removedPaths[t.path] = true
+  for sst in db.sstables.mitems:
+    if sst.path notin removedPaths:
+      newSSTables.add(sst)
+    else:
+      # Drop mmap after compact unlinked the path (fd remains valid until close)
+      sst.close()
+
+  for meta in result.outputTables:
+    try:
+      var sst = loadSSTable(meta.path)
+      let name = splitFile(meta.path).name
+      # Prefer numeric id from filename; otherwise allocate
+      let parsed = try: parseInt(name) except: -1
+      if parsed >= 0:
+        sst.id = parsed
+      else:
+        sst.id = db.nextSSTableId
+        inc db.nextSSTableId
+      sst.level = meta.level
+      newSSTables.add(sst)
+      db.nextSSTableId = max(db.nextSSTableId, sst.id + 1)
+    except CatchableError as e:
+      warn("Compaction output SSTable failed to load: " & meta.path & " — " & e.msg)
+
+  newSSTables.sort(proc(a, b: SSTable): int = cmp(a.id, b.id))
+  db.sstables = newSSTables
+  db.needsCompaction = db.countL0() >= L0CompactionTrigger
+
+  inc db.manifestSequence
+  try:
+    writeManifest(db)
+  except CatchableError as e:
+    warn("Failed to write MANIFEST after compaction: " & e.msg)
 
 proc compact*(cm: CompactionManager) =
-  acquire(cm.db.lock)
-  defer: release(cm.db.lock)
-  for level in 0 ..< compaction.MaxLevel:
-    if cm.strategy.needsCompaction(level):
-      let result = cm.strategy.compact(level)
-      if result.outputTables.len == 0:
-        continue
-
-      # Remove compacted input SSTables from LSMTree
-      var newSSTables: seq[SSTable] = @[]
-      var removedPaths = initTable[string, bool]()
-      for t in result.inputTables:
-        removedPaths[t.path] = true
-      for sst in cm.db.sstables:
-        if sst.path notin removedPaths:
-          newSSTables.add(sst)
-
-      # Load and add output SSTables
-      for meta in result.outputTables:
-        try:
-          var sst = loadSSTable(meta.path)
-          let name = splitFile(meta.path).name
-          # Extract numeric id from filename if possible
-          sst.id = try: parseInt(name) except: cm.db.nextSSTableId
-          sst.level = meta.level
-          newSSTables.add(sst)
-          cm.db.nextSSTableId = max(cm.db.nextSSTableId, sst.id + 1)
-        except CatchableError as e:
-          warn("Compaction output SSTable failed to load: " & meta.path & " — " & e.msg)
-
-      newSSTables.sort(proc(a, b: SSTable): int = cmp(a.id, b.id))
-      cm.db.sstables = newSSTables
-
-      # Update MANIFEST
-      inc cm.db.manifestSequence
-      try:
-        writeManifest(cm.db)
-      except CatchableError as e:
-        warn("Failed to write MANIFEST after compaction: " & e.msg)
+  # Gate first (cross-thread), then per-DB write lock
+  withStorageGate:
+    acquire(cm.db.lock)
+    try:
+      # Always rebuild from LSM — flushes add L0 tables the strategy never registered
+      cm.strategy.rebuildFromLSM(cm.db)
+      for level in 0 ..< compaction.MaxLevel:
+        if cm.strategy.needsCompaction(level):
+          let result = cm.strategy.compact(level)
+          applyCompactionResult(cm.db, result)
+          cm.strategy.rebuildFromLSM(cm.db)
+    finally:
+      release(cm.db.lock)
 
 proc startCompactionLoop*(cm: CompactionManager, intervalMs: int = 60000) {.async.} =
   while true:
@@ -96,17 +105,11 @@ proc startCompactionLoop*(cm: CompactionManager, intervalMs: int = 60000) {.asyn
 
 proc newMultiCompactionManager*(registry: DatabaseRegistry): MultiCompactionManager =
   result = MultiCompactionManager(registry: registry, strategies: initTable[string, compaction.CompactionStrategy]())
-
-  # Initialize strategies for each existing database
   for name in listDatabases(registry):
     let info = getDatabaseInfo(registry, name)
     if info != nil:
       result.strategies[name] = compaction.newCompactionStrategy(info.db.dir)
-      for sst in info.db.sstables:
-        let meta = compaction.SSTableMeta(
-          path: sst.path, level: sst.level, minKey: sst.minKey, maxKey: sst.maxKey,
-          entryCount: sst.entryCount, sizeBytes: sst.entryCount * 64, createdAt: 0)
-        result.strategies[name].addTable(meta)
+      result.strategies[name].rebuildFromLSM(info.db)
 
 proc compactAll(mcm: MultiCompactionManager) =
   for name in listDatabases(mcm.registry):
@@ -114,51 +117,21 @@ proc compactAll(mcm: MultiCompactionManager) =
     if info == nil: continue
     let db = info.db
 
-    # Initialize strategy if not already
     if name notin mcm.strategies:
       mcm.strategies[name] = compaction.newCompactionStrategy(db.dir)
-      for sst in db.sstables:
-        let meta = compaction.SSTableMeta(
-          path: sst.path, level: sst.level, minKey: sst.minKey, maxKey: sst.maxKey,
-          entryCount: sst.entryCount, sizeBytes: sst.entryCount * 64, createdAt: 0)
-        mcm.strategies[name].addTable(meta)
 
     let strategy = mcm.strategies[name]
-    acquire(db.lock)
-    try:
-      for level in 0 ..< compaction.MaxLevel:
-        if strategy.needsCompaction(level):
-          let result = strategy.compact(level)
-          if result.outputTables.len == 0: continue
-
-          var newSSTables: seq[SSTable] = @[]
-          var removedPaths = initTable[string, bool]()
-          for t in result.inputTables:
-            removedPaths[t.path] = true
-          for sst in db.sstables:
-            if sst.path notin removedPaths:
-              newSSTables.add(sst)
-
-          for meta in result.outputTables:
-            try:
-              var sst = loadSSTable(meta.path)
-              let sstName = splitFile(meta.path).name
-              sst.id = try: parseInt(sstName) except: db.nextSSTableId
-              sst.level = meta.level
-              newSSTables.add(sst)
-              db.nextSSTableId = max(db.nextSSTableId, sst.id + 1)
-            except CatchableError as e:
-              warn("Compaction output SSTable failed to load: " & meta.path & " - " & e.msg)
-
-          newSSTables.sort(proc(a, b: SSTable): int = cmp(a.id, b.id))
-          db.sstables = newSSTables
-          inc db.manifestSequence
-          try:
-            writeManifest(db)
-          except CatchableError as e:
-            warn("Failed to write MANIFEST after compaction: " & e.msg)
-    finally:
-      release(db.lock)
+    withStorageGate:
+      acquire(db.lock)
+      try:
+        strategy.rebuildFromLSM(db)
+        for level in 0 ..< compaction.MaxLevel:
+          if strategy.needsCompaction(level):
+            let result = strategy.compact(level)
+            applyCompactionResult(db, result)
+            strategy.rebuildFromLSM(db)
+      finally:
+        release(db.lock)
 
 proc startMultiCompactionLoop*(mcm: MultiCompactionManager, intervalMs: int = 60000) {.async.} =
   while true:
@@ -303,10 +276,13 @@ proc main() =
         quit(0)
 
   var config = loadConfig()
+  # Global exclusive gate for multi-thread storage (HTTP workers + TCP + compact)
+  initStorageGate()
   # Init structured logger from config
   let logLvl = parseEnum[LogLevel]("ll" & capitalizeAscii(config.logLevel))
   defaultLogger = newLogger(logLvl, config.logFile)
   info("BaraDB v1.1.6 — Multimodal Database Engine")
+  info("Storage gate initialized (serializes HTTP/TCP/compaction access)")
 
   # Security check: warn if JWT secret is not configured
   if config.jwtSecret.len == 0:
@@ -358,12 +334,13 @@ proc main() =
     # Wire state machine to apply committed entries to the default database
     let defaultDbInfo = getDatabaseInfo(registry, "default")
     raftNode.applyCommand = proc(cmd: string, data: seq[byte]) {.gcsafe.} =
-      if cmd == "put":
-        let parts = cast[string](data).split("\x00")
-        if parts.len >= 2:
-          defaultDbInfo.db.put(parts[0], cast[seq[byte]](parts[1]))
-      elif cmd == "delete":
-        defaultDbInfo.db.delete(cast[string](data))
+      withStorageGate:
+        if cmd == "put":
+          let parts = cast[string](data).split("\x00")
+          if parts.len >= 2:
+            defaultDbInfo.db.put(parts[0], cast[seq[byte]](parts[1]))
+        elif cmd == "delete":
+          defaultDbInfo.db.delete(cast[string](data))
 
     # Wire RAFT ↔ DistTxn
     wireRaftDistTxn(raftNode, tcpServer)
@@ -395,11 +372,13 @@ proc main() =
   # Start TCP wire protocol server on main thread with async event loop
   waitFor runTcpServer(config)
 
-  # Shutdown
-  httpServer.stop()
+  # Shutdown: stop listeners first, then close storage under the gate
+  httpServer.stop(closeStorage = false)
   tcpServer.stop()
   if tcpServer.gossipProtocol != nil:
     tcpServer.gossipProtocol.stop()
+  withStorageGate:
+    registry.closeAll()
 
 when isMainModule:
   main()

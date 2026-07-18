@@ -22,6 +22,11 @@ type
     logFormat*: string
     memtableSizeMb*: int
     cacheSizeMb*: int
+    ## WAL durability: "none" | "group" (default) | "every"
+    walSyncMode*: string
+    ## Group commit batch size (entries between fsyncs when mode=group)
+    walGroupEvery*: int
+    ## Time-based group fsync interval in ms (0 = off); also used as legacy name
     walSyncIntervalMs*: int
     compactionIntervalMs*: int
     bloomBitsPerKey*: int
@@ -58,6 +63,8 @@ proc defaultConfig*(): BaraConfig =
     logFormat: "json",
     memtableSizeMb: 64,
     cacheSizeMb: 256,
+    walSyncMode: "group",
+    walGroupEvery: 64,
     walSyncIntervalMs: 0,
     compactionIntervalMs: 60_000,
     bloomBitsPerKey: 10,
@@ -93,6 +100,8 @@ proc loadConfigFromJson*(path: string, cfg: var BaraConfig) =
       if s.hasKey("data_dir"): cfg.dataDir = s["data_dir"].getStr()
       if s.hasKey("memtable_size_mb"): cfg.memtableSizeMb = s["memtable_size_mb"].getInt()
       if s.hasKey("cache_size_mb"): cfg.cacheSizeMb = s["cache_size_mb"].getInt()
+      if s.hasKey("wal_sync_mode"): cfg.walSyncMode = s["wal_sync_mode"].getStr()
+      if s.hasKey("wal_group_every"): cfg.walGroupEvery = s["wal_group_every"].getInt()
       if s.hasKey("wal_sync_interval_ms"): cfg.walSyncIntervalMs = s["wal_sync_interval_ms"].getInt()
       if s.hasKey("compaction_interval_ms"): cfg.compactionIntervalMs = s["compaction_interval_ms"].getInt()
       if s.hasKey("bloom_bits_per_key"): cfg.bloomBitsPerKey = s["bloom_bits_per_key"].getInt()
@@ -153,6 +162,8 @@ proc loadConfigFromEnv*(cfg: var BaraConfig) =
   cfg.logFormat = getEnv("BARADB_LOG_FORMAT", cfg.logFormat)
   cfg.memtableSizeMb = parseEnvInt(getEnv("BARADB_MEMTABLE_SIZE_MB", ""), cfg.memtableSizeMb)
   cfg.cacheSizeMb = parseEnvInt(getEnv("BARADB_CACHE_SIZE_MB", ""), cfg.cacheSizeMb)
+  cfg.walSyncMode = getEnv("BARADB_WAL_SYNC_MODE", cfg.walSyncMode)
+  cfg.walGroupEvery = parseEnvInt(getEnv("BARADB_WAL_GROUP_EVERY", ""), cfg.walGroupEvery)
   cfg.walSyncIntervalMs = parseEnvInt(getEnv("BARADB_WAL_SYNC_INTERVAL_MS", ""), cfg.walSyncIntervalMs)
   cfg.compactionIntervalMs = parseEnvInt(getEnv("BARADB_COMPACTION_INTERVAL_MS", ""), cfg.compactionIntervalMs)
   cfg.bloomBitsPerKey = parseEnvInt(getEnv("BARADB_BLOOM_BITS_PER_KEY", ""), cfg.bloomBitsPerKey)

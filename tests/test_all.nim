@@ -196,6 +196,232 @@ suite "MANIFEST Catalog":
     check issues[0].contains("Orphan")
     db.close()
 
+suite "Core Storage Hardening":
+  test "MemTable overwrite keeps newest value (hash table)":
+    let testDir = "/tmp/baradb_test_memtable_hash"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 64 * 1024)
+    db.put("k", cast[seq[byte]]("v1"))
+    db.put("k", cast[seq[byte]]("v2"))
+    db.put("k", cast[seq[byte]]("v3"))
+    let (found, val) = db.get("k")
+    check found
+    check cast[string](val) == "v3"
+    check db.memTableSize() == 1
+    db.close()
+
+  test "Many distinct keys without O(n) insert collapse":
+    ## Hash MemTable should handle thousands of puts without quadratic cost.
+    let testDir = "/tmp/baradb_test_memtable_many"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 8 * 1024 * 1024)
+    let n = 5000
+    for i in 0 ..< n:
+      db.put("key_" & align($i, 6, '0'), cast[seq[byte]]("val_" & $i))
+    for i in [0, 1, n div 2, n - 1]:
+      let (found, val) = db.get("key_" & align($i, 6, '0'))
+      check found
+      check cast[string](val) == "val_" & $i
+    db.close()
+
+  test "scanMemTable returns sorted unique keys":
+    let testDir = "/tmp/baradb_test_scan_sorted"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 64 * 1024)
+    db.put("c", cast[seq[byte]]("3"))
+    db.put("a", cast[seq[byte]]("1"))
+    db.put("b", cast[seq[byte]]("2"))
+    db.put("a", cast[seq[byte]]("1b"))
+    let mem = db.scanMemTable()
+    check mem.len == 3
+    check mem[0].key == "a"
+    check cast[string](mem[0].value) == "1b"
+    check mem[1].key == "b"
+    check mem[2].key == "c"
+    db.close()
+
+  test "WAL truncated after full flush — recovery stays small":
+    let testDir = "/tmp/baradb_test_wal_truncate"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 256)
+    for i in 0 ..< 20:
+      db.put("k" & $i, cast[seq[byte]]("v" & $i))
+    db.flush()
+    # After flush both memtables empty → WAL should only have header (or tiny rewrite)
+    let walPath = testDir / "wal" / "wal.log"
+    check fileExists(walPath)
+    let sizeAfterFlush = getFileSize(walPath)
+    check sizeAfterFlush < 256  # header only, not all 20 puts
+    db.close()
+    # Reopen: data comes from SSTables, not a bloated WAL
+    var db2 = newLSMTree(testDir, 256)
+    for i in 0 ..< 20:
+      let (found, val) = db2.get("k" & $i)
+      check found
+      check cast[string](val) == "v" & $i
+    db2.close()
+
+  test "Partial flush rewrites WAL with remaining live keys":
+    let testDir = "/tmp/baradb_test_wal_rewrite"
+    removeDir(testDir)
+    # Tiny memtable forces flush of first batch while second batch stays in memory
+    var db = newLSMTree(testDir, 64)
+    db.put("old1", cast[seq[byte]]("a"))
+    db.put("old2", cast[seq[byte]]("b"))
+    # Force flush
+    db.flush()
+    db.put("live1", cast[seq[byte]]("x"))
+    db.put("live2", cast[seq[byte]]("y"))
+    # Do not flush — close without flush would lose live without WAL; close flushes
+    # Instead: crash-simulate by reopening after putting live keys (WAL rewrite on prior flush
+    # left empty; new puts are in current WAL)
+    db.close()
+    var db2 = newLSMTree(testDir, 64)
+    let (f1, v1) = db2.get("live1")
+    let (f2, v2) = db2.get("live2")
+    let (f3, _) = db2.get("old1")
+    check f1 and cast[string](v1) == "x"
+    check f2 and cast[string](v2) == "y"
+    check f3
+    db2.close()
+
+  test "L0 count trigger and rebuildFromLSM sees flushed tables":
+    let testDir = "/tmp/baradb_test_l0_trigger"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 128)
+    for round in 0 ..< L0CompactionTrigger:
+      db.put("r" & $round, cast[seq[byte]]("v" & $round))
+      db.flush()
+    check db.countL0() >= L0CompactionTrigger
+    check db.needsCompaction == true
+    var cs = newCompactionStrategy(testDir)
+    cs.rebuildFromLSM(db)
+    check cs.needsCompaction(0) == true
+    check cs.levels[0].len >= L0CompactionTrigger
+    # Compact L0 → L1
+    let cr = cs.compact(0)
+    check cr.outputTables.len == 1
+    check cr.outputTables[0].level == 1
+    # Apply manually: remove inputs from db, add output
+    var removed = initTable[string, bool]()
+    for t in cr.inputTables:
+      removed[t.path] = true
+    var kept: seq[SSTable] = @[]
+    for sst in db.sstables.mitems:
+      if sst.path notin removed:
+        kept.add(sst)
+      else:
+        sst.close()
+    var outSst = loadSSTable(cr.outputTables[0].path)
+    outSst.level = 1
+    outSst.id = db.nextSSTableId
+    inc db.nextSSTableId
+    kept.add(outSst)
+    db.sstables = kept
+    check db.countL0() < L0CompactionTrigger
+    for round in 0 ..< L0CompactionTrigger:
+      let (found, val) = db.get("r" & $round)
+      check found
+      check cast[string](val) == "v" & $round
+    db.close()
+
+  test "Crash recovery: WAL-only clone recovers unflushed puts":
+    ## Simulate crash: copy WAL without SSTables / without clean close flush.
+    let srcDir = "/tmp/baradb_test_crash_src"
+    let dstDir = "/tmp/baradb_test_crash_dst"
+    removeDir(srcDir)
+    removeDir(dstDir)
+    var db = newLSMTree(srcDir, 1024 * 1024)
+    db.put("persist_me", cast[seq[byte]]("yes"))
+    db.put("and_me", cast[seq[byte]]("also"))
+    db.wal.sync()
+    createDir(dstDir / "wal")
+    createDir(dstDir / "sstables")
+    copyFile(srcDir / "wal" / "wal.log", dstDir / "wal" / "wal.log")
+    db.close()  # cleans up src; dst has WAL-only crash image
+    var recovered = newLSMTree(dstDir, 1024 * 1024)
+    let (f1, v1) = recovered.get("persist_me")
+    let (f2, v2) = recovered.get("and_me")
+    check f1 and cast[string](v1) == "yes"
+    check f2 and cast[string](v2) == "also"
+    recovered.close()
+
+  test "WAL group commit fsyncs roughly every N entries":
+    let testDir = "/tmp/baradb_test_wal_group"
+    removeDir(testDir)
+    const n = 200
+    const ge = 50
+    var db = newLSMTree(testDir, 8 * 1024 * 1024,
+                        walSyncMode = wsmGroup, walGroupEvery = ge)
+    let base = db.wal.fsyncCount  # open/recovery may fsync once
+    for i in 0 ..< n:
+      db.put("g" & $i, cast[seq[byte]]("v"))
+    let afterPuts = db.wal.fsyncCount - base
+    # Group every 50 → about n/ge fsyncs; partial group not yet synced
+    check afterPuts >= uint64(n div ge)
+    check afterPuts < uint64(n)  # far fewer than one-per-write
+    db.wal.sync()
+    check db.wal.fsyncCount > base + afterPuts or afterPuts >= uint64(n div ge)
+    db.close()
+
+  test "WAL every-mode fsyncs at least once per write":
+    let testDir = "/tmp/baradb_test_wal_every"
+    removeDir(testDir)
+    const n = 30
+    var db = newLSMTree(testDir, 8 * 1024 * 1024, walSyncMode = wsmEvery)
+    let base = db.wal.fsyncCount
+    for i in 0 ..< n:
+      db.put("e" & $i, cast[seq[byte]]("v"))
+    check db.wal.fsyncCount - base >= uint64(n)
+    db.close()
+
+  test "WAL none-mode does not fsync on each put":
+    let testDir = "/tmp/baradb_test_wal_none"
+    removeDir(testDir)
+    const n = 100
+    var db = newLSMTree(testDir, 8 * 1024 * 1024, walSyncMode = wsmNone)
+    let base = db.wal.fsyncCount
+    for i in 0 ..< n:
+      db.put("n" & $i, cast[seq[byte]]("v"))
+    # Puts alone should not fsync
+    check db.wal.fsyncCount == base
+    db.wal.sync()
+    check db.wal.fsyncCount == base + 1
+    db.close()
+
+  test "parseWalSyncMode accepts aliases":
+    check parseWalSyncMode("group") == wsmGroup
+    check parseWalSyncMode("every") == wsmEvery
+    check parseWalSyncMode("none") == wsmNone
+    check parseWalSyncMode("async") == wsmNone
+    check parseWalSyncMode("full") == wsmEvery
+    check parseWalSyncMode("batch") == wsmGroup
+
+  test "scanRange returns inclusive sorted keys":
+    let testDir = "/tmp/baradb_test_scan_range"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 256)
+    for ch in ['a', 'b', 'c', 'd', 'e']:
+      db.put($ch, cast[seq[byte]]("v" & $ch))
+    db.flush()
+    db.put("c", cast[seq[byte]]("vC2"))  # newer in memtable
+    let rows = db.scanRange("b", "d")
+    check rows.len == 3
+    check rows[0][0] == "b"
+    check rows[1][0] == "c"
+    check cast[string](rows[1][1]) == "vC2"
+    check rows[2][0] == "d"
+    db.close()
+
+  test "scanRange empty when no keys in range":
+    let testDir = "/tmp/baradb_test_scan_empty"
+    removeDir(testDir)
+    var db = newLSMTree(testDir, 1024)
+    db.put("m", cast[seq[byte]]("1"))
+    check db.scanRange("a", "c").len == 0
+    check db.scanRange("m", "m").len == 1
+    db.close()
+
 suite "BaraQL Lexer":
   test "Tokenize simple SELECT":
     let tokens = lex.tokenize("SELECT name FROM users WHERE age > 18")

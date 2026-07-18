@@ -111,9 +111,11 @@ proc formatOps(ops: int, secs: float64): string =
 
 proc benchLSMTree() =
   echo "=== LSM-Tree Storage ==="
+  echo "  Note: in-process embedded API (no network/SQL). Not comparable to client-server DBs."
   let benchDir = getTempDir() / "baradb_bench_lsm"
   removeDir(benchDir)
-  var db = newLSMTree(benchDir)
+  # Default group-commit WAL (production default)
+  var db = newLSMTree(benchDir, walSyncMode = wsmGroup, walGroupEvery = 64)
 
   # Write benchmark
   let n = 100_000
@@ -124,6 +126,7 @@ proc benchLSMTree() =
   let writeLabel = "LSM-Write"
   recordResult(writeLabel, n, writeTime)
   echo "  Write ", n, " keys: ", writeTime.formatFloat(ffDecimal, 3), "s (", formatOps(n, writeTime), ")", compareResult(writeLabel, currentResults[^1].opsPerSec, previousResults)
+  echo "    fsyncs: ", db.wal.fsyncCount, " (group every 64)"
 
   # Read benchmark
   let readStart = getMonoTime()
@@ -137,6 +140,36 @@ proc benchLSMTree() =
   echo "  Read ", n, " keys: ", readTime.formatFloat(ffDecimal, 3), "s (", formatOps(n, readTime), ") (", found, " found)", compareResult(readLabel, currentResults[^1].opsPerSec, previousResults)
 
   db.close()
+
+proc benchWalDurabilityModes() =
+  ## Fair comparison of WAL durability policies on the same workload.
+  echo "=== WAL Durability Modes (fair micro-bench) ==="
+  echo "  Same N puts, same memtable size; only sync policy differs."
+  let n = 50_000
+  let modes = [
+    (wsmNone, "none", 0),
+    (wsmGroup, "group64", 64),
+    (wsmGroup, "group256", 256),
+    (wsmEvery, "every", 1),
+  ]
+  for (mode, label, ge) in modes:
+    let dir = getTempDir() / ("baradb_bench_wal_" & label)
+    removeDir(dir)
+    var db = newLSMTree(dir, memMaxSize = 64 * 1024 * 1024,
+                        walSyncMode = mode, walGroupEvery = max(1, ge))
+    let t0 = getMonoTime()
+    for i in 0..<n:
+      db.put("k" & $i, cast[seq[byte]]("v" & $i))
+    # Ensure pending group is durable before measuring end-to-end
+    db.wal.sync()
+    let secs = elapsed(t0)
+    let name = "WAL-" & label
+    recordResult(name, n, secs)
+    echo "  ", label, ": ", secs.formatFloat(ffDecimal, 3), "s (",
+         formatOps(n, secs), "), fsyncs=", db.wal.fsyncCount,
+         compareResult(name, currentResults[^1].opsPerSec, previousResults)
+    db.close()
+    removeDir(dir)
 
 proc benchBTree() =
   echo "=== B-Tree Index ==="
@@ -331,10 +364,16 @@ proc benchGraph() =
 proc main() =
   echo ""
   echo "╔══════════════════════════════════════════════════╗"
-  echo "║         BaraDB Performance Benchmarks            ║"
+  echo "║     BaraDB Performance Benchmarks (EMBEDDED)     ║"
   echo "╚══════════════════════════════════════════════════╝"
   echo ""
+  echo "Tier: embedded / in-process (no network, no wire SQL)."
+  echo "For fair multi-tier numbers (SQLite / PG / HTTP):"
+  echo "  python3 benchmarks/fair_bench.py"
+  echo ""
   benchLSMTree()
+  echo ""
+  benchWalDurabilityModes()
   echo ""
   benchBTree()
   echo ""
@@ -355,6 +394,7 @@ proc main() =
   )
   saveResults(ResultsFile, report)
   echo "Results saved to ", ResultsFile
+  echo "Next: python3 benchmarks/fair_bench.py"
   echo ""
 
 when isMainModule:

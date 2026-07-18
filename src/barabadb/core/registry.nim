@@ -29,6 +29,17 @@ type
 
 const reservedDbNames* = ["system", "information_schema", "pg_catalog"]
 
+proc openLsmForRegistry(reg: DatabaseRegistry, dbDir: string): LSMTree =
+  ## Open LSM with WAL durability settings from registry config.
+  let memBytes = max(1, reg.config.memtableSizeMb) * 1024 * 1024
+  newLSMTree(
+    dbDir,
+    memMaxSize = memBytes,
+    walSyncMode = parseWalSyncMode(reg.config.walSyncMode),
+    walGroupEvery = reg.config.walGroupEvery,
+    walGroupIntervalMs = reg.config.walSyncIntervalMs,
+  )
+
 proc isValidDbName*(name: string): bool =
   if name.len == 0: return false
   if '/' in name or '\\' in name: return false
@@ -63,7 +74,7 @@ proc loadExistingDatabases*(reg: DatabaseRegistry) =
       if dbName.len > 0 and isValidDbName(dbName):
         let dbDir = reg.dataRoot / dbName
         info("Loading database '" & dbName & "' from " & dbDir)
-        let db = newLSMTree(dbDir)
+        let db = openLsmForRegistry(reg, dbDir)
         let ctx = reg.ctxFactory(db, reg)
         acquire(reg.lock)
         reg.databases[dbName] = DatabaseInfo(
@@ -89,7 +100,7 @@ proc ensureDefaultDatabase*(reg: DatabaseRegistry) =
   if not exists:
     let dbDir = reg.dataRoot / defaultDbName
     info("Creating default database at " & dbDir)
-    let db = newLSMTree(dbDir)
+    let db = openLsmForRegistry(reg, dbDir)
     let ctx = reg.ctxFactory(db, reg)
     acquire(reg.lock)
     reg.databases[defaultDbName] = DatabaseInfo(
@@ -113,7 +124,7 @@ proc getOrCreateDatabase*(reg: DatabaseRegistry, name: string): DatabaseInfo =
   # Create new database
   let dbDir = reg.dataRoot / name
   info("Creating database '" & name & "' at " & dbDir)
-  let db = newLSMTree(dbDir)
+  let db = openLsmForRegistry(reg, dbDir)
   let ctx = reg.ctxFactory(db, reg)
   let info = DatabaseInfo(name: name, db: db, ctx: ctx, activeConnections: 0)
   reg.databases[name] = info

@@ -21,6 +21,7 @@ import ../query/parser
 import ../query/ast
 import ../query/executor
 import ../storage/lsm
+import ../storage/gate
 import ../core/mvcc
 import ../core/disttxn
 import ../core/replication
@@ -206,61 +207,64 @@ proc valueToWire(val: string, colType: string): WireValue =
 
 proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[],
                    replication: ReplicationManager = nil): (bool, QueryResult, string) =
-  try:
-    let tokens = tokenize(query)
-    let astNode = parse(tokens)
+  ## All storage access is under the global StorageGate so HTTP worker threads
+  ## and the TCP event loop never touch ORC-managed LSM/executor state concurrently.
+  withStorageGate:
+    try:
+      let tokens = tokenize(query)
+      let astNode = parse(tokens)
 
-    if astNode.stmts.len == 0:
-      return (true, QueryResult(), "")
+      if astNode.stmts.len == 0:
+        return (true, QueryResult(), "")
 
-    let res = executor.executeQuery(ctx, astNode, params)
-    if res.success:
-      # Ship written key-value pairs to replicas
-      if replication != nil and res.keyValuePairs.len > 0:
-        for (key, value) in res.keyValuePairs:
-          var data = newSeq[byte](key.len + 1 + value.len)
-          for i, c in key: data[i] = byte(c)
-          data[key.len] = byte(0)
-          for i, c in value: data[key.len + 1 + i] = c
-          discard replication.writeLsn(data)
-      var qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
-      qr.columns = res.columns
+      let res = executor.executeQuery(ctx, astNode, params)
+      if res.success:
+        # Ship written key-value pairs to replicas
+        if replication != nil and res.keyValuePairs.len > 0:
+          for (key, value) in res.keyValuePairs:
+            var data = newSeq[byte](key.len + 1 + value.len)
+            for i, c in key: data[i] = byte(c)
+            data[key.len] = byte(0)
+            for i, c in value: data[key.len + 1 + i] = c
+            discard replication.writeLsn(data)
+        var qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
+        qr.columns = res.columns
 
-      var colTypes: seq[string] = @[]
-      var tableName = ""
-      if astNode.stmts[0].kind == nkSelect and astNode.stmts[0].selFrom != nil:
-        tableName = astNode.stmts[0].selFrom.fromTable
-      elif astNode.stmts[0].kind == nkInsert:
-        tableName = astNode.stmts[0].insTarget
-      elif astNode.stmts[0].kind == nkUpdate:
-        tableName = astNode.stmts[0].updTarget
+        var colTypes: seq[string] = @[]
+        var tableName = ""
+        if astNode.stmts[0].kind == nkSelect and astNode.stmts[0].selFrom != nil:
+          tableName = astNode.stmts[0].selFrom.fromTable
+        elif astNode.stmts[0].kind == nkInsert:
+          tableName = astNode.stmts[0].insTarget
+        elif astNode.stmts[0].kind == nkUpdate:
+          tableName = astNode.stmts[0].updTarget
 
-      if tableName.len > 0 and tableName in ctx.tables:
-        let tbl = ctx.tables[tableName]
-        for col in res.columns:
-          var found = ""
-          for c in tbl.columns:
-            if c.name.toLower() == col.toLower():
-              found = c.colType
-              break
-          colTypes.add(found)
+        if tableName.len > 0 and tableName in ctx.tables:
+          let tbl = ctx.tables[tableName]
+          for col in res.columns:
+            var found = ""
+            for c in tbl.columns:
+              if c.name.toLower() == col.toLower():
+                found = c.colType
+                break
+            colTypes.add(found)
+        else:
+          colTypes = newSeq[string](res.columns.len)
+
+        qr.columnTypes = colTypes.mapIt(typeToFieldKind(it))
+        qr.rows = @[]
+        for row in res.rows:
+          var wireRow: seq[WireValue] = @[]
+          for i, col in res.columns:
+            let val = if col in row: valueToString(row[col]) else: "\\N"
+            let cType = if i < colTypes.len: colTypes[i] else: ""
+            wireRow.add(valueToWire(val, cType))
+          qr.rows.add(wireRow)
+        return (true, qr, res.message)
       else:
-        colTypes = newSeq[string](res.columns.len)
-
-      qr.columnTypes = colTypes.mapIt(typeToFieldKind(it))
-      qr.rows = @[]
-      for row in res.rows:
-        var wireRow: seq[WireValue] = @[]
-        for i, col in res.columns:
-          let val = if col in row: valueToString(row[col]) else: "\\N"
-          let cType = if i < colTypes.len: colTypes[i] else: ""
-          wireRow.add(valueToWire(val, cType))
-        qr.rows.add(wireRow)
-      return (true, qr, res.message)
-    else:
-      return (false, QueryResult(), res.message)
-  except Exception as e:
-    return (false, QueryResult(), e.msg)
+        return (false, QueryResult(), res.message)
+    except Exception as e:
+      return (false, QueryResult(), e.msg)
 
 # ----------------------------------------------------------------------
 # Response Serialization

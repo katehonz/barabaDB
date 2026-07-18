@@ -4,12 +4,16 @@ import std/os
 import std/streams
 import std/strutils
 import std/posix
+import std/monotimes
+import std/times
 
 const
   WALMagic* = 0x42415241'u32  # "BARA"
   WALVersion* = 1'u32
   DefaultMaxWalSegmentSize* = 64 * 1024 * 1024  # 64MB
   WalArchiveDir* = "wal_archive"
+  ## Default group-commit batch size (entries between fsyncs).
+  DefaultWalGroupEvery* = 64
 
 type
   WalEntryKind* = enum
@@ -17,6 +21,15 @@ type
     wekDelete = 2
     wekCheckpoint = 3
     wekCommit = 4
+
+  ## Durability policy for WAL writes.
+  ## - wsmNone:  flush userspace buffer only; fsync on truncate/rewrite/close/explicit sync
+  ## - wsmGroup: group commit — fsync every N entries and/or every intervalMs (default)
+  ## - wsmEvery: fsync after every entry (strict, slow)
+  WalSyncMode* = enum
+    wsmNone = "none"
+    wsmGroup = "group"
+    wsmEvery = "every"
 
   WalEntry* = object
     kind*: WalEntryKind
@@ -34,13 +47,27 @@ type
     path: string
     stream: FileStream
     entryCount: uint64
-    syncOnWrite: bool
+    syncMode*: WalSyncMode
+    groupEvery*: int          ## entries between fsyncs when mode=group
+    groupIntervalMs*: int     ## time-based fsync when mode=group (0 = off)
+    unsyncedEntries: int      ## entries written since last fsync
+    lastSync: MonoTime
     maxSegmentSize: int64
     currentSequence: int64
+    ## Counters for observability / benchmarks
+    fsyncCount*: uint64
+    bytesSinceSync: int
 
 proc readEntries*(walPath: string, untilTimestamp: uint64 = 0): seq[WalEntry]
 proc listWalArchive*(dir: string): seq[WalSegment]
 proc maybeRotate*(wal: var WriteAheadLog)
+
+proc parseWalSyncMode*(s: string): WalSyncMode =
+  case s.toLowerAscii()
+  of "none", "async", "off", "false", "0": wsmNone
+  of "every", "sync", "full", "true", "1": wsmEvery
+  of "group", "batch", "": wsmGroup
+  else: wsmGroup
 
 proc parseWalSequence*(filename: string): int64 =
   ## Extract sequence from "wal.000042.log"
@@ -74,6 +101,12 @@ proc nextWalSequence*(dir: string): int64 =
     return 1
   return segments[^1].sequence + 1
 
+proc fsyncPath(path: string) =
+  let fd = posix.open(cstring(path), O_RDWR)
+  if fd != -1:
+    discard posix.fsync(fd)
+    discard posix.close(fd)
+
 proc rotate*(wal: var WriteAheadLog) =
   ## Close current WAL and archive it, then start a new one.
   if wal.stream != nil:
@@ -96,7 +129,12 @@ proc rotate*(wal: var WriteAheadLog) =
   wal.stream.write(WALMagic)
   wal.stream.write(WALVersion)
   wal.stream.flush()
+  fsyncPath(wal.path)
   wal.entryCount = 0
+  wal.unsyncedEntries = 0
+  wal.bytesSinceSync = 0
+  wal.lastSync = getMonoTime()
+  inc wal.fsyncCount
 
 proc maybeRotate*(wal: var WriteAheadLog) =
   ## Rotate if current WAL exceeds max segment size.
@@ -106,7 +144,16 @@ proc maybeRotate*(wal: var WriteAheadLog) =
   if currentSize >= wal.maxSegmentSize:
     wal.rotate()
 
-proc newWriteAheadLog*(dir: string, syncOnWrite: bool = true): WriteAheadLog =
+proc newWriteAheadLog*(
+    dir: string,
+    syncMode: WalSyncMode = wsmGroup,
+    groupEvery: int = DefaultWalGroupEvery,
+    groupIntervalMs: int = 0,
+    syncOnWrite: bool = false,
+): WriteAheadLog =
+  ## Create a WAL.
+  ## - syncMode controls durability (see WalSyncMode).
+  ## - syncOnWrite=true is legacy and forces wsmEvery.
   createDir(dir)
   let path = dir / "wal.log"
   let exists = fileExists(path)
@@ -125,18 +172,62 @@ proc newWriteAheadLog*(dir: string, syncOnWrite: bool = true): WriteAheadLog =
     for e in readEntries(path):
       inc count
 
+  let mode = if syncOnWrite: wsmEvery else: syncMode
+  let ge = if groupEvery <= 0: DefaultWalGroupEvery else: groupEvery
   let seqNum = nextWalSequence(dir)
   WriteAheadLog(
     dir: dir,
     path: path,
     stream: stream,
     entryCount: count,
-    syncOnWrite: syncOnWrite,
+    syncMode: mode,
+    groupEvery: ge,
+    groupIntervalMs: groupIntervalMs,
+    unsyncedEntries: 0,
+    lastSync: getMonoTime(),
     maxSegmentSize: DefaultMaxWalSegmentSize,
     currentSequence: seqNum,
+    fsyncCount: 0,
+    bytesSinceSync: 0,
   )
 
+proc setSyncMode*(wal: var WriteAheadLog, mode: WalSyncMode) =
+  wal.syncMode = mode
+
+proc setGroupEvery*(wal: var WriteAheadLog, n: int) =
+  wal.groupEvery = if n <= 0: DefaultWalGroupEvery else: n
+
+proc setGroupIntervalMs*(wal: var WriteAheadLog, ms: int) =
+  wal.groupIntervalMs = max(0, ms)
+
+proc markSynced(wal: var WriteAheadLog) =
+  wal.unsyncedEntries = 0
+  wal.bytesSinceSync = 0
+  wal.lastSync = getMonoTime()
+  inc wal.fsyncCount
+
+proc maybeGroupSync(wal: var WriteAheadLog, entryBytes: int) =
+  ## Apply durability policy after a buffered write.
+  case wal.syncMode
+  of wsmNone:
+    discard
+  of wsmEvery:
+    fsyncPath(wal.path)
+    wal.markSynced()
+  of wsmGroup:
+    inc wal.unsyncedEntries
+    wal.bytesSinceSync += entryBytes
+    var due = wal.unsyncedEntries >= wal.groupEvery
+    if not due and wal.groupIntervalMs > 0:
+      let elapsedMs = (getMonoTime() - wal.lastSync).inMilliseconds
+      if elapsedMs >= wal.groupIntervalMs:
+        due = true
+    if due:
+      fsyncPath(wal.path)
+      wal.markSynced()
+
 proc writeEntry*(wal: var WriteAheadLog, entry: WalEntry) =
+  let entryBytes = 1 + 8 + 4 + entry.key.len + 4 + entry.value.len
   wal.stream.write(uint8(entry.kind))
   wal.stream.write(entry.timestamp)
   wal.stream.write(uint32(entry.key.len))
@@ -145,8 +236,9 @@ proc writeEntry*(wal: var WriteAheadLog, entry: WalEntry) =
   wal.stream.write(uint32(entry.value.len))
   if entry.value.len > 0:
     wal.stream.writeData(unsafeAddr entry.value[0], entry.value.len)
-  if wal.syncOnWrite:
-    wal.stream.flush()
+  # Always push to kernel page cache; durability policy decides fsync
+  wal.stream.flush()
+  wal.maybeGroupSync(entryBytes)
   inc wal.entryCount
   # Check rotation every 1000 entries to avoid stat on every write
   if wal.entryCount mod 1000 == 0:
@@ -177,28 +269,87 @@ proc writeCommit*(wal: var WriteAheadLog, timestamp: uint64) =
   ))
 
 proc sync*(wal: var WriteAheadLog) =
+  ## Force durability of all buffered WAL data.
   wal.stream.flush()
-  # Re-open with O_RDWR so fsync operates on a write-capable fd.
-  # Not ideal (two fds for same file) but avoids accessing private
-  # FileStream internals that vary across Nim versions.
-  let fd = posix.open(cstring(wal.path), O_RDWR)
-  if fd != -1:
-    discard posix.fsync(fd)
-    discard posix.close(fd)
+  fsyncPath(wal.path)
+  wal.markSynced()
+
+proc truncate*(wal: var WriteAheadLog) =
+  ## Reset WAL to empty (header only). Safe only when all prior entries
+  ## are durable in SSTables and nothing remains only-in-memtable.
+  if wal.stream != nil:
+    wal.stream.flush()
+    wal.stream.close()
+  wal.stream = newFileStream(wal.path, fmWrite)
+  if wal.stream == nil:
+    raise newException(IOError, "Cannot truncate WAL: " & wal.path)
+  wal.stream.write(WALMagic)
+  wal.stream.write(WALVersion)
+  wal.stream.flush()
+  fsyncPath(wal.path)
+  wal.entryCount = 0
+  wal.markSynced()
+
+proc rewriteLive*(wal: var WriteAheadLog,
+                  keys: openArray[string],
+                  values: openArray[seq[byte]],
+                  timestamps: openArray[uint64],
+                  deleted: openArray[bool]) =
+  ## Atomically replace WAL contents with a live memtable snapshot.
+  ## Used after a partial flush so unflushed keys remain recoverable.
+  doAssert keys.len == values.len and keys.len == timestamps.len and keys.len == deleted.len
+  if keys.len == 0:
+    wal.truncate()
+    return
+
+  let tmpPath = wal.path & ".rewrite"
+  let s = newFileStream(tmpPath, fmWrite)
+  if s == nil:
+    raise newException(IOError, "Cannot create WAL rewrite file: " & tmpPath)
+  s.write(WALMagic)
+  s.write(WALVersion)
+  var count: uint64 = 0
+  for i in 0 ..< keys.len:
+    let kind = if deleted[i]: wekDelete else: wekPut
+    s.write(uint8(kind))
+    s.write(timestamps[i])
+    s.write(uint32(keys[i].len))
+    if keys[i].len > 0:
+      s.write(keys[i])
+    s.write(uint32(values[i].len))
+    if values[i].len > 0:
+      s.writeData(unsafeAddr values[i][0], values[i].len)
+    inc count
+  s.flush()
+  s.close()
+  fsyncPath(tmpPath)
+
+  if wal.stream != nil:
+    wal.stream.close()
+  if fileExists(wal.path):
+    removeFile(wal.path)
+  moveFile(tmpPath, wal.path)
+  wal.stream = newFileStream(wal.path, fmAppend)
+  if wal.stream == nil:
+    raise newException(IOError, "Cannot reopen WAL after rewrite: " & wal.path)
+  wal.entryCount = count
+  wal.markSynced()
 
 proc setMaxSegmentSize*(wal: var WriteAheadLog, size: int64) =
   wal.maxSegmentSize = size
 
 proc close*(wal: var WriteAheadLog) =
   wal.stream.flush()
-  let fd = posix.open(cstring(wal.path), O_RDWR)
-  if fd != -1:
-    discard posix.fsync(fd)
-    discard posix.close(fd)
+  fsyncPath(wal.path)
+  wal.markSynced()
   wal.stream.close()
 
 proc entryCount*(wal: WriteAheadLog): uint64 = wal.entryCount
 proc path*(wal: WriteAheadLog): string = wal.path
+proc unsyncedEntries*(wal: WriteAheadLog): int = wal.unsyncedEntries
+
+## Legacy alias — true maps to wsmEvery
+proc syncOnWrite*(wal: WriteAheadLog): bool = wal.syncMode == wsmEvery
 
 proc readEntries*(walPath: string, untilTimestamp: uint64 = 0): seq[WalEntry] =
   result = @[]

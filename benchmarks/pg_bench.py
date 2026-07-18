@@ -174,8 +174,10 @@ def format_ops(ops_per_sec):
 def print_comparison(pg_results, bara_data):
     bara = {r["name"]: r for r in bara_data["results"]}
     print("\n╔══════════════════════════════════════════════════════════════════════╗")
-    print("║           BaraDB vs PostgreSQL — Real Benchmark Results              ║")
+    print("║     PostgreSQL (client-server) vs BaraDB (EMBEDDED) — MIXED TIERS    ║")
     print("╚══════════════════════════════════════════════════════════════════════╝\n")
+    print("WARNING: This mixes client-server PG with in-process BaraDB LSM.")
+    print("         Prefer: python3 benchmarks/fair_bench.py\n")
 
     rows = [
         ("KV Write (100K)", pg_results.get("KV Write"), bara.get("LSM-Write")),
@@ -187,7 +189,7 @@ def print_comparison(pg_results, bara_data):
         ("FTS Search (1K queries)", pg_results.get("FTS Search"), bara.get("FTS-Search")),
     ]
 
-    print(f"{'Test':<26} {'PostgreSQL':>18} {'BaraDB':>18} {'Winner':>10}")
+    print(f"{'Test':<26} {'PostgreSQL C/S':>18} {'BaraDB embed':>18} {'Note':>14}")
     print("─" * 76)
 
     for name, pg, ba in rows:
@@ -195,22 +197,14 @@ def print_comparison(pg_results, bara_data):
             continue
         pg_ops = pg["opsPerSec"]
         ba_ops = ba["opsPerSec"]
-        winner = "BaraDB" if ba_ops > pg_ops else "PostgreSQL"
-        ratio = max(ba_ops, pg_ops) / min(ba_ops, pg_ops)
+        ratio = ba_ops / pg_ops if pg_ops else 0
         print(
-            f"{name:<26} {format_ops(pg_ops)+'/s':>18} {format_ops(ba_ops)+'/s':>18} {winner+' ('+f'{ratio:.1f}x'+')':>10}"
+            f"{name:<26} {format_ops(pg_ops)+'/s':>18} {format_ops(ba_ops)+'/s':>18} "
+            f"{'mixed '+f'{ratio:.1f}x':>14}"
         )
 
     print("\n" + "─" * 76)
-    # Summary
-    pg_total = sum(r["seconds"] for _, r, _ in rows if r is not None)
-    ba_total = sum(b["seconds"] for _, _, b in rows if b is not None)
-    print(f"\nTotal time PostgreSQL: {pg_total:.3f}s")
-    print(f"Total time BaraDB:     {ba_total:.3f}s")
-    if ba_total < pg_total:
-        print(f"BaraDB is {pg_total/ba_total:.1f}x faster overall")
-    else:
-        print(f"PostgreSQL is {ba_total/pg_total:.1f}x faster overall")
+    print("For fair tiers (SQLite↔LSM, HTTP↔PG): python3 benchmarks/fair_bench.py")
 
 
 def main():
@@ -247,13 +241,22 @@ def main():
     pg_results["FTS Search"] = bench_fts_search()
     print(f"      -> {format_ops(pg_results['FTS Search']['opsPerSec'])}/s ({pg_results['FTS Search']['seconds']:.3f}s)")
 
-    bara_data = load_baradb_results()
-    print_comparison(pg_results, bara_data)
+    # Annotate tier for fair tooling
+    for name, r in pg_results.items():
+        r["tier"] = "client_server"
+        r["system"] = "postgresql"
 
-    # Save raw results
     with open("pg_benchmark_results.json", "w") as f:
         json.dump(pg_results, f, indent=2)
     print("\nPostgreSQL results saved to pg_benchmark_results.json")
+
+    if os.path.exists("benchmark_results.json"):
+        bara_data = load_baradb_results()
+        print_comparison(pg_results, bara_data)
+    else:
+        print("\n(No benchmark_results.json — skip mixed-tier table; run nimble bench first)")
+
+    print("\nFair multi-tier suite: python3 benchmarks/fair_bench.py")
 
 
 if __name__ == "__main__":

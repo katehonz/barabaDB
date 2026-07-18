@@ -15,6 +15,7 @@ import ../query/parser
 import ../query/executor
 import ../core/types
 import ../storage/lsm
+import ../storage/gate
 import ../core/mvcc
 import ../protocol/wire
 import ../core/websocket
@@ -196,17 +197,7 @@ proc queryHandler(server: HttpServer): RequestHandler =
         ctx.json(%*{"error": "Empty query"}, 400)
         return
 
-      var reqCtx = getRequestDatabaseContext(server, request)
-      reqCtx.currentUser = userId
-      reqCtx.currentRole = role
-      let tokens = tokenize(queryStr)
-      let astNode = parse(tokens)
-
-      if astNode.stmts.len == 0:
-        ctx.json(%*{"rows": [], "affectedRows": 0, "columns": []})
-        return
-
-      # Extract optional params from JSON body
+      # Extract optional params from JSON body (no storage access yet)
       var params: seq[WireValue] = @[]
       if "params" in body and body["params"].kind == JArray:
         for p in body["params"]:
@@ -218,31 +209,50 @@ proc queryHandler(server: HttpServer): RequestHandler =
           of JString: params.add(WireValue(kind: fkString, strVal: p.getStr()))
           else: params.add(WireValue(kind: fkString, strVal: $p))
 
-      let res = executor.executeQuery(reqCtx, astNode, params)
+      # StorageGate: serialize against TCP + other Hunos workers (ORC safety)
+      var success: bool
+      var jsonRows = newJArray()
+      var jsonCols = newJArray()
+      var affected = 0
+      var msg = ""
+      var errMsg = ""
+      withStorageGate:
+        var reqCtx = getRequestDatabaseContext(server, request)
+        reqCtx.currentUser = userId
+        reqCtx.currentRole = role
+        let tokens = tokenize(queryStr)
+        let astNode = parse(tokens)
+        if astNode.stmts.len == 0:
+          success = true
+        else:
+          let res = executor.executeQuery(reqCtx, astNode, params)
+          success = res.success
+          if res.success:
+            affected = res.affectedRows
+            msg = res.message
+            for row in res.rows:
+              var jsonRow = newJObject()
+              for col in res.columns:
+                if col in row and row[col].kind != vkNull:
+                  jsonRow[col] = %valueToString(row[col])
+                else:
+                  jsonRow[col] = newJNull()
+              jsonRows.add(jsonRow)
+            for c in res.columns:
+              jsonCols.add(%c)
+          else:
+            errMsg = res.message
 
-      if res.success:
-        var jsonRows = newJArray()
-        for row in res.rows:
-          var jsonRow = newJObject()
-          for col in res.columns:
-            let key = col
-            if key in row and row[key].kind != vkNull:
-              jsonRow[key] = %valueToString(row[key])
-            else:
-              jsonRow[key] = newJNull()
-          jsonRows.add(jsonRow)
-        var jsonCols = newJArray()
-        for c in res.columns:
-          jsonCols.add(%c)
+      if success:
         ctx.json(%*{
           "rows": jsonRows,
-          "affectedRows": res.affectedRows,
+          "affectedRows": affected,
           "columns": jsonCols,
-          "message": if res.message.len > 0: %res.message else: newJNull()
+          "message": if msg.len > 0: %msg else: newJNull()
         })
       else:
         server.metrics.queryErrors += 1
-        ctx.json(%*{"error": res.message}, 400)
+        ctx.json(%*{"error": errMsg}, 400)
 
 proc healthHandler(): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
@@ -376,15 +386,16 @@ proc tablesHandler(server: HttpServer): RequestHandler =
       let ctx = newContext(request)
       if not server.checkAuth(request, ctx):
         return
-      let reqCtx = getRequestDatabaseContext(server, request)
       var tables = newJArray()
-      for name, tbl in reqCtx.tables:
-        var cols = newJArray()
-        for col in tbl.columns:
-          cols.add(%*{"name": col.name, "type": col.colType,
-            "pk": col.isPk, "notNull": col.isNotNull, "unique": col.isUnique})
-        tables.add(%*{"name": name, "columns": cols,
-          "pkColumns": tbl.pkColumns, "fkCount": tbl.foreignKeys.len})
+      withStorageGate:
+        let reqCtx = getRequestDatabaseContext(server, request)
+        for name, tbl in reqCtx.tables:
+          var cols = newJArray()
+          for col in tbl.columns:
+            cols.add(%*{"name": col.name, "type": col.colType,
+              "pk": col.isPk, "notNull": col.isNotNull, "unique": col.isUnique})
+          tables.add(%*{"name": name, "columns": cols,
+            "pkColumns": tbl.pkColumns, "fkCount": tbl.foreignKeys.len})
       ctx.json(%*{"tables": tables})
 
 proc databasesHandler(server: HttpServer): RequestHandler =
@@ -393,24 +404,25 @@ proc databasesHandler(server: HttpServer): RequestHandler =
       let ctx = newContext(request)
       if not server.checkAuth(request, ctx):
         return
-      let dbs = server.registry.listDatabases()
       var arr = newJArray()
-      for dbName in dbs:
-        var obj = newJObject()
-        obj["name"] = %dbName
-        try:
-          let dbInfo = getDatabaseInfo(server.registry, dbName)
-          if dbInfo != nil and dbInfo.ctx != nil:
-            let dbCtx = cast[ExecutionContext](cast[pointer](dbInfo.ctx))
-            obj["tables"] = %dbCtx.tables.len
-            obj["connections"] = %getConnectionCount(server.registry, dbName)
-          else:
+      withStorageGate:
+        let dbs = server.registry.listDatabases()
+        for dbName in dbs:
+          var obj = newJObject()
+          obj["name"] = %dbName
+          try:
+            let dbInfo = getDatabaseInfo(server.registry, dbName)
+            if dbInfo != nil and dbInfo.ctx != nil:
+              let dbCtx = cast[ExecutionContext](cast[pointer](dbInfo.ctx))
+              obj["tables"] = %dbCtx.tables.len
+              obj["connections"] = %getConnectionCount(server.registry, dbName)
+            else:
+              obj["tables"] = %0
+              obj["connections"] = %0
+          except CatchableError:
             obj["tables"] = %0
             obj["connections"] = %0
-        except CatchableError:
-          obj["tables"] = %0
-          obj["connections"] = %0
-        arr.add(obj)
+          arr.add(obj)
       ctx.json(%*{"databases": arr})
 
 proc createDatabaseHandler(server: HttpServer): RequestHandler =
@@ -428,7 +440,8 @@ proc createDatabaseHandler(server: HttpServer): RequestHandler =
         ctx.json(%*{"error": "Empty database name"}, 400)
         return
       try:
-        discard getOrCreateDatabase(server.registry, dbName)
+        withStorageGate:
+          discard getOrCreateDatabase(server.registry, dbName)
         ctx.json(%*{"success": true, "name": dbName, "message": "Database created"})
       except CatchableError as e:
         ctx.json(%*{"error": e.msg}, 400)
@@ -444,7 +457,9 @@ proc dropDatabaseHandler(server: HttpServer): RequestHandler =
         ctx.json(%*{"error": "Missing database name"}, 400)
         return
       try:
-        let ok = dropDatabase(server.registry, dbName)
+        var ok = false
+        withStorageGate:
+          ok = dropDatabase(server.registry, dbName)
         if ok:
           ctx.json(%*{"success": true, "name": dbName, "message": "Database dropped"})
         else:
@@ -470,13 +485,15 @@ proc backupHandler(server: HttpServer): RequestHandler =
       let compression = if body != nil and "level" in body: body["level"].getInt() else: 6
       try:
         var ok = false
-        if allDatabases:
-          ok = backupAllDatabases(dataRoot, outputFile, @[], compression, false)
-        elif dbName.len > 0:
-          let dbDir = dataRoot / dbName
-          ok = backupDataDir(dbDir, outputFile, @[], compression, false)
-        else:
-          ok = backupAllDatabases(dataRoot, outputFile, @[], compression, false)
+        # Gate held so live writers/compactors don't mutate files mid-backup
+        withStorageGate:
+          if allDatabases:
+            ok = backupAllDatabases(dataRoot, outputFile, @[], compression, false)
+          elif dbName.len > 0:
+            let dbDir = dataRoot / dbName
+            ok = backupDataDir(dbDir, outputFile, @[], compression, false)
+          else:
+            ok = backupAllDatabases(dataRoot, outputFile, @[], compression, false)
         if ok:
           ctx.json(%*{"success": true, "output": outputFile, "message": "Backup created"})
         else:
@@ -541,18 +558,20 @@ proc restoreHandler(server: HttpServer): RequestHandler =
         let meta = readBackupMeta(inputFile)
         let isMultiDb = meta != nil and meta{"databases"} != nil
         var ok = false
-        if isMultiDb or allDatabases:
-          ok = restoreAllDatabases(inputFile, dataRoot, false, false)
-        elif dbName.len > 0:
-          let dbDir = dataRoot / dbName
-          ok = restoreDataDir(inputFile, dbDir, false, false)
-        else:
-          ok = restoreAllDatabases(inputFile, dataRoot, false, false)
+        withStorageGate:
+          if isMultiDb or allDatabases:
+            ok = restoreAllDatabases(inputFile, dataRoot, false, false)
+          elif dbName.len > 0:
+            let dbDir = dataRoot / dbName
+            ok = restoreDataDir(inputFile, dbDir, false, false)
+          else:
+            ok = restoreAllDatabases(inputFile, dataRoot, false, false)
+          if ok:
+            # Reload under same gate after files are restored
+            server.registry.loadExistingDatabases()
 
         logRestore(inputFile, dataRoot, ok)
         if ok:
-          # Reload databases after restore
-          server.registry.loadExistingDatabases()
           ctx.json(%*{"success": true, "message": "Restore completed"})
         else:
           ctx.json(%*{"error": "Restore failed"}, 500)
@@ -890,10 +909,14 @@ proc run*(server: HttpServer, port: int = 9470) =
   asyncCheck server.ws.run(port + 1)
   hunosServer.serve(Port(port))
 
-proc stop*(server: HttpServer) =
+proc stop*(server: HttpServer, closeStorage: bool = false) =
+  ## Stop HTTP listeners. By default does **not** close the shared registry —
+  ## when HTTP is spawned alongside TCP they share one registry owned by main.
   server.running = false
   server.ws.stop()
-  if server.registry != nil:
-    server.registry.closeAll()
-  else:
-    server.db.close()
+  if closeStorage:
+    withStorageGate:
+      if server.registry != nil:
+        server.registry.closeAll()
+      elif server.db != nil:
+        server.db.close()

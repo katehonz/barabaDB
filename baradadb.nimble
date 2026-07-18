@@ -19,17 +19,24 @@ task build_debug, "Build debug version":
   exec "nim c --debugger:native --linedir:on -o:build/baramcp src/baramcp.nim"
 
 task build_release, "Build release version":
+  # mm:arc comes from nim.cfg (ORC crashes under wire INSERT load)
   exec "nim c -d:release --opt:speed -o:build/baradadb src/baradadb.nim"
   exec "nim c -d:release --opt:speed -o:build/baramcp src/baramcp.nim"
 
 task test, "Run all tests":
   exec "nim c -r tests/test_all.nim"
 
-task bench, "Run benchmarks":
+task bench, "Run embedded micro-benchmarks (in-process)":
   exec "nim c -d:release -r benchmarks/bench_all.nim"
 
-task bench_pg, "Run PostgreSQL comparison benchmarks":
+task bench_pg, "Run PostgreSQL client-server micro-benchmarks":
   exec "python3 benchmarks/pg_bench.py"
 
-task bench_report, "Generate benchmark comparison report":
+task bench_fair, "Fair multi-tier benches (SQLite embedded + optional PG/HTTP)":
+  exec "python3 benchmarks/fair_bench.py"
+
+task bench_report, "Generate fair comparison report (needs fair_bench first)":
+  exec "python3 benchmarks/generate_report.py --fair"
+
+task bench_report_legacy, "Legacy mixed-tier report (PG C/S vs BaraDB embedded — unfair)":
   exec "python3 benchmarks/generate_report.py"

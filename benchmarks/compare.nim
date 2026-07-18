@@ -1,4 +1,11 @@
 ## Comparative Benchmarks — BaraDB vs PostgreSQL, Redis, MongoDB
+##
+## ⚠️  SYNTHETIC / PLACEHOLDER: several refTimeSec values are *invented*
+## multipliers, not measured. Do not publish these as real comparisons.
+## Use instead:
+##   nim c -d:release -r benchmarks/bench_all.nim
+##   python3 benchmarks/fair_bench.py
+##   python3 benchmarks/generate_report.py --fair
 import std/times
 import std/random
 import std/strutils

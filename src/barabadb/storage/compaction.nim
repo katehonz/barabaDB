@@ -8,6 +8,7 @@ import ../storage/lsm
 const
   MaxLevel* = 7
   LevelMultiplier* = 10  # each level is 10x the previous
+  ## L0 uses file-count trigger (overlapping ranges); lower levels use size.
 
 type
   SSTableMeta* = object
@@ -29,20 +30,44 @@ type
     levels*: seq[seq[SSTableMeta]]
     dataDir*: string
     maxSizePerLevel*: seq[int]
+    l0FileLimit*: int
 
-proc newCompactionStrategy*(dataDir: string): CompactionStrategy =
+proc newCompactionStrategy*(dataDir: string, l0FileLimit: int = L0CompactionTrigger): CompactionStrategy =
   result = CompactionStrategy(
     levels: newSeq[seq[SSTableMeta]](MaxLevel),
     dataDir: dataDir,
     maxSizePerLevel: newSeq[int](MaxLevel),
+    l0FileLimit: l0FileLimit,
   )
   for i in 0..<MaxLevel:
     result.levels[i] = @[]
     result.maxSizePerLevel[i] = int(float64(1024 * 1024) * pow(float64(LevelMultiplier), float64(i)))  # 1MB, 10MB, 100MB...
 
+proc clear*(cs: CompactionStrategy) =
+  ## Drop all registered tables (used before rebuild-from-LSM).
+  for i in 0..<MaxLevel:
+    cs.levels[i].setLen(0)
+
 proc addTable*(cs: CompactionStrategy, meta: SSTableMeta) =
-  if meta.level < MaxLevel:
-    cs.levels[meta.level].add(meta)
+  let lvl = clamp(meta.level, 0, MaxLevel - 1)
+  cs.levels[lvl].add(meta)
+
+proc rebuildFromLSM*(cs: CompactionStrategy, db: LSMTree) =
+  ## Rebuild level layout from the live LSMTree catalog — single source of truth.
+  ## Avoids drift when flushes add SSTables the strategy never saw.
+  cs.clear()
+  cs.dataDir = db.dir
+  for sst in db.sstables:
+    let size = try: int(getFileSize(sst.path)) except: sst.entryCount * 64
+    cs.addTable(SSTableMeta(
+      path: sst.path,
+      level: sst.level,
+      minKey: sst.minKey,
+      maxKey: sst.maxKey,
+      entryCount: sst.entryCount,
+      sizeBytes: size,
+      createdAt: sst.id,  # stable ordering by id / creation sequence
+    ))
 
 proc totalSize*(cs: CompactionStrategy, level: int): int =
   result = 0
@@ -52,6 +77,9 @@ proc totalSize*(cs: CompactionStrategy, level: int): int =
 proc needsCompaction*(cs: CompactionStrategy, level: int): bool =
   if level >= MaxLevel - 1:
     return false
+  if level == 0:
+    # L0 files can overlap — count-based trigger (RocksDB-style)
+    return cs.levels[0].len >= cs.l0FileLimit
   return cs.totalSize(level) > cs.maxSizePerLevel[level]
 
 proc pickTablesForCompaction*(cs: CompactionStrategy, level: int): seq[SSTableMeta] =

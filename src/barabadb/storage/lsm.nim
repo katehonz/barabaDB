@@ -13,6 +13,11 @@ import bloom
 import wal
 import mmap
 import crc32
+import rwlock
+
+# Re-export WAL durability knobs for callers of newLSMTree
+export wal
+export rwlock
 
 const
   SSTableMagic* = 0x53535442'u32  # "SSTB"
@@ -21,6 +26,8 @@ const
   DefaultBloomFpRate* = 0.01
   ManifestVersion* = 1
   ManifestFileName* = "MANIFEST"
+  ## Trigger L0 compaction when this many L0 SSTables exist.
+  L0CompactionTrigger* = 4
 
 type
   Entry* = object
@@ -29,9 +36,10 @@ type
     timestamp*: uint64
     deleted*: bool
 
+  ## Hash-table MemTable: O(1) put/get. Sorted only when flushing to SSTable.
   MemTable* = object
-    entries: seq[Entry]
-    size: int
+    map: Table[string, Entry]
+    size: int      ## approximate byte size of live entries
     maxSize: int
 
   SSTable* = object
@@ -56,55 +64,64 @@ type
     currentSeq: uint64
     nextSSTableId*: int
     manifestSequence*: int64
-    lock*: Lock
+    ## Reader-writer lock: concurrent gets; exclusive put/flush/compact.
+    ## `acquire(db.lock)` is exclusive (write) for backward compatibility.
+    lock*: RwLock
     walLock*: Lock
+    ## Set by flush when L0 file count hits L0CompactionTrigger (hint for compactors).
+    needsCompaction*: bool
+    ## When true, flushUnsafe skips WAL rewrite (recovery still holds the WAL file open).
+    recovering: bool
 
 proc newMemTable(maxSize: int = DefaultMemTableSize): MemTable =
-  MemTable(entries: @[], size: 0, maxSize: maxSize)
+  MemTable(map: initTable[string, Entry](), size: 0, maxSize: maxSize)
 
-proc len*(mt: MemTable): int = mt.entries.len
+proc len*(mt: MemTable): int = mt.map.len
+
+proc byteSize*(mt: MemTable): int = mt.size
 
 proc put*(mt: var MemTable, key: string, value: seq[byte], timestamp: uint64, deleted: bool = false): bool =
+  ## O(1) average-case insert/update. Returns false if the new key would exceed maxSize.
   let entrySize = key.len + value.len + 16
   if entrySize > mt.maxSize:
     return false
   let entry = Entry(key: key, value: value, timestamp: timestamp, deleted: deleted)
-  let pos = mt.entries.lowerBound(entry, proc(a, b: Entry): int = cmp(a.key, b.key))
-  if pos < mt.entries.len and mt.entries[pos].key == key:
-    let oldSize = mt.entries[pos].key.len + mt.entries[pos].value.len + 16
-    mt.entries[pos] = entry
+  if key in mt.map:
+    let old = mt.map[key]
+    # Only accept equal-or-newer timestamps (WAL recovery may replay older values)
+    if timestamp < old.timestamp:
+      return true
+    let oldSize = old.key.len + old.value.len + 16
+    mt.map[key] = entry
     mt.size += entrySize - oldSize
   else:
-    if mt.size + entrySize > mt.maxSize and mt.entries.len > 0:
+    if mt.size + entrySize > mt.maxSize and mt.map.len > 0:
       return false
-    mt.entries.insert(entry, pos)
+    mt.map[key] = entry
     mt.size += entrySize
   return true
 
 proc get*(mt: MemTable, key: string): (bool, Entry) =
-  if mt.entries.len == 0:
-    return (false, Entry())
-  var lo = 0
-  var hi = mt.entries.len - 1
-  while lo <= hi:
-    let mid = (lo + hi) div 2
-    let c = cmp(mt.entries[mid].key, key)
-    if c == 0:
-      return (true, mt.entries[mid])
-    elif c < 0:
-      lo = mid + 1
-    else:
-      hi = mid - 1
+  if key in mt.map:
+    return (true, mt.map[key])
   return (false, Entry())
+
+proc sortedEntries*(mt: MemTable): seq[Entry] =
+  ## Materialize entries sorted by key — used for SSTable flush and ordered scans.
+  result = newSeqOfCap[Entry](mt.map.len)
+  for _, entry in mt.map:
+    result.add(entry)
+  result.sort(proc(a, b: Entry): int = cmp(a.key, b.key))
 
 proc scan*(mt: MemTable, startKey, endKey: string): seq[Entry] =
   result = @[]
-  for entry in mt.entries:
-    if entry.key >= startKey and entry.key <= endKey:
+  for key, entry in mt.map:
+    if key >= startKey and key <= endKey:
       result.add(entry)
+  result.sort(proc(a, b: Entry): int = cmp(a.key, b.key))
 
 proc clear*(mt: var MemTable) =
-  mt.entries.setLen(0)
+  mt.map.clear()
   mt.size = 0
 
 # ----------------------------------------------------------------------
@@ -600,8 +617,15 @@ proc checkStorageConsistency*(db: LSMTree): seq[string] =
 # ----------------------------------------------------------------------
 
 proc flushUnsafe(db: LSMTree) {.gcsafe.}
+proc countL0*(db: LSMTree): int
 
-proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
+proc newLSMTree*(
+    dir: string,
+    memMaxSize: int = DefaultMemTableSize,
+    walSyncMode: WalSyncMode = wsmGroup,
+    walGroupEvery: int = DefaultWalGroupEvery,
+    walGroupIntervalMs: int = 0,
+): LSMTree =
   createDir(dir)
   createDir(dir / "sstables")
 
@@ -641,21 +665,29 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
       echo "[INFO] Loaded ", sstables.len, " SSTable(s) from directory scan"
 
   new(result)
-  initLock(result.lock)
+  initRwLock(result.lock)
   initLock(result.walLock)
   result.dir = dir
   result.memTable = newMemTable(memMaxSize)
   result.immutableMem = newMemTable(0)
   result.sstables = sstables
-  result.wal = newWriteAheadLog(dir / "wal")
+  result.wal = newWriteAheadLog(
+    dir / "wal",
+    syncMode = walSyncMode,
+    groupEvery = walGroupEvery,
+    groupIntervalMs = walGroupIntervalMs,
+  )
   result.memMaxSize = memMaxSize
   result.currentSeq = 0
   result.nextSSTableId = nextId
   result.manifestSequence = manifestSeq
+  result.recovering = false
+  result.needsCompaction = result.countL0() >= L0CompactionTrigger
 
   # WAL crash recovery — replay unflushed entries into memTable
   let walPath = dir / "wal" / "wal.log"
   if fileExists(walPath):
+    result.recovering = true
     var stream: FileStream = nil
     try:
       stream = newFileStream(walPath, fmRead)
@@ -697,11 +729,30 @@ proc newLSMTree*(dir: string, memMaxSize: int = DefaultMemTableSize): LSMTree =
     finally:
       if stream != nil:
         stream.close()
+      result.recovering = false
+      # After recovery, shrink WAL to live unflushed state only
+      acquire(result.walLock)
+      try:
+        var liveKeys: seq[string] = @[]
+        var liveVals: seq[seq[byte]] = @[]
+        var liveTs: seq[uint64] = @[]
+        var liveDel: seq[bool] = @[]
+        for e in result.immutableMem.sortedEntries():
+          liveKeys.add(e.key); liveVals.add(e.value); liveTs.add(e.timestamp); liveDel.add(e.deleted)
+        for e in result.memTable.sortedEntries():
+          liveKeys.add(e.key); liveVals.add(e.value); liveTs.add(e.timestamp); liveDel.add(e.deleted)
+        if liveKeys.len == 0:
+          result.wal.truncate()
+        else:
+          result.wal.rewriteLive(liveKeys, liveVals, liveTs, liveDel)
+      finally:
+        release(result.walLock)
 
 proc put*(db: LSMTree, key: string, value: seq[byte]) =
   let ts = uint64(getMonoTime().ticks())
-  acquire(db.lock)
-  defer: release(db.lock)
+  acquireWrite(db.lock)
+  defer: releaseWrite(db.lock)
+  # WAL then memtable under the same exclusive lock → crash recovery sees a total order
   acquire(db.walLock)
   db.wal.writePut(cast[seq[byte]](key), value, ts)
   release(db.walLock)
@@ -716,8 +767,8 @@ proc put*(db: LSMTree, key: string, value: seq[byte]) =
 
 proc delete*(db: LSMTree, key: string) =
   let ts = uint64(getMonoTime().ticks())
-  acquire(db.lock)
-  defer: release(db.lock)
+  acquireWrite(db.lock)
+  defer: releaseWrite(db.lock)
   acquire(db.walLock)
   db.wal.writeDelete(cast[seq[byte]](key), ts)
   release(db.walLock)
@@ -732,8 +783,8 @@ proc delete*(db: LSMTree, key: string) =
 proc putUnsafe*(db: LSMTree, key: string, value: seq[byte], deleted: bool = false) =
   ## Direct LSM insert without WAL logging — used by recovery.
   let ts = uint64(getMonoTime().ticks())
-  acquire(db.lock)
-  defer: release(db.lock)
+  acquireWrite(db.lock)
+  defer: releaseWrite(db.lock)
   if not db.memTable.put(key, value, ts, deleted):
     if db.immutableMem.len > 0:
       db.flushUnsafe()
@@ -745,18 +796,26 @@ proc putUnsafe*(db: LSMTree, key: string, value: seq[byte], deleted: bool = fals
 proc deleteUnsafe*(db: LSMTree, key: string) =
   putUnsafe(db, key, @[], deleted = true)
 
+proc copyBytes(s: seq[byte]): seq[byte] =
+  ## Deep copy so callers on other threads never share ORC-managed seq buffers.
+  result = newSeq[byte](s.len)
+  if s.len > 0:
+    copyMem(addr result[0], unsafeAddr s[0], s.len)
+
 proc getUnsafe(db: LSMTree, key: string): (bool, seq[byte]) =
+  ## Caller must hold at least a read lock.
+  ## Returned values are deep-copied for multi-thread ORC safety (HTTP + TCP share LSM).
   let (found, entry) = db.memTable.get(key)
   if found:
     if entry.deleted:
       return (false, @[])
-    return (true, entry.value)
+    return (true, copyBytes(entry.value))
 
   let (found2, entry2) = db.immutableMem.get(key)
   if found2:
     if entry2.deleted:
       return (false, @[])
-    return (true, entry2.value)
+    return (true, copyBytes(entry2.value))
 
   # Search SSTables from newest to oldest
   for i in countdown(db.sstables.high, db.sstables.low):
@@ -769,20 +828,39 @@ proc getUnsafe(db: LSMTree, key: string): (bool, seq[byte]) =
     if found3:
       if entry3.deleted:
         return (false, @[])
-      return (true, entry3.value)
+      return (true, copyBytes(entry3.value))
 
   return (false, @[])
 
 proc get*(db: LSMTree, key: string): (bool, seq[byte]) =
-  acquire(db.lock)
-  defer: release(db.lock)
+  ## Thread-safe lookup.
+  ## Default: exclusive lock — required for Nim ORC when TCP + HTTP threads share the DB.
+  ## Compile with `-d:baraConcurrentReads` for shared read locks (needs multi-thread-safe MM
+  ## such as a future atomicArc build; unsafe with default ORC across OS threads).
+  when defined(baraConcurrentReads):
+    acquireRead(db.lock)
+    defer: releaseRead(db.lock)
+  else:
+    acquireWrite(db.lock)
+    defer: releaseWrite(db.lock)
   return getUnsafe(db, key)
 
 proc contains*(db: LSMTree, key: string): bool =
-  acquire(db.lock)
-  defer: release(db.lock)
+  when defined(baraConcurrentReads):
+    acquireRead(db.lock)
+    defer: releaseRead(db.lock)
+  else:
+    acquireWrite(db.lock)
+    defer: releaseWrite(db.lock)
   let (found, _) = getUnsafe(db, key)
   return found
+
+proc countL0*(db: LSMTree): int =
+  ## Number of level-0 SSTables (newest, uncompacted).
+  result = 0
+  for sst in db.sstables:
+    if sst.level == 0:
+      inc result
 
 proc flushUnsafe(db: LSMTree) =
   if db.immutableMem.len == 0 and db.memTable.len == 0:
@@ -802,7 +880,8 @@ proc flushUnsafe(db: LSMTree) =
   let path = db.dir / "sstables" / ($db.nextSSTableId & ".sst")
   inc db.nextSSTableId
 
-  var sst = writeSSTable(toFlush.entries, path, level = 0)
+  # Sort once at flush time (O(n log n)) — put/get stay O(1)
+  var sst = writeSSTable(toFlush.sortedEntries(), path, level = 0)
   sst.id = db.nextSSTableId - 1
   db.sstables.add(sst)
   # SSTables are kept in insertion order (newest last) so getUnsafe can search newest-first
@@ -814,22 +893,43 @@ proc flushUnsafe(db: LSMTree) =
   except CatchableError as e:
     echo "[WARN] Failed to write MANIFEST: ", e.msg
 
-  acquire(db.walLock)
-  db.wal.writeCommit(uint64(getMonoTime().ticks()))
-  db.wal.maybeRotate()
-  db.wal.sync()
-  release(db.walLock)
+  # Rewrite WAL to contain only still-unflushed memtable entries.
+  # Skip during recovery — the WAL file is still open for reading.
+  if not db.recovering:
+    acquire(db.walLock)
+    var liveKeys: seq[string] = @[]
+    var liveVals: seq[seq[byte]] = @[]
+    var liveTs: seq[uint64] = @[]
+    var liveDel: seq[bool] = @[]
+    for e in db.immutableMem.sortedEntries():
+      liveKeys.add(e.key)
+      liveVals.add(e.value)
+      liveTs.add(e.timestamp)
+      liveDel.add(e.deleted)
+    for e in db.memTable.sortedEntries():
+      liveKeys.add(e.key)
+      liveVals.add(e.value)
+      liveTs.add(e.timestamp)
+      liveDel.add(e.deleted)
+    if liveKeys.len == 0:
+      db.wal.truncate()
+    else:
+      db.wal.rewriteLive(liveKeys, liveVals, liveTs, liveDel)
+    release(db.walLock)
+
+  if db.countL0() >= L0CompactionTrigger:
+    db.needsCompaction = true
 
 proc flush*(db: LSMTree) =
-  acquire(db.lock)
-  defer: release(db.lock)
+  acquireWrite(db.lock)
+  defer: releaseWrite(db.lock)
   flushUnsafe(db)
 
 proc checkpoint*(db: LSMTree) =
   ## Create a consistent checkpoint: freeze memtable, flush to SSTable,
   ## rotate WAL, and write MANIFEST. This provides a clean boundary
   ## for online backup without stopping the server.
-  acquire(db.lock)
+  acquireWrite(db.lock)
 
   # Flush any pending immutable memtable first
   if db.immutableMem.len > 0:
@@ -850,10 +950,10 @@ proc checkpoint*(db: LSMTree) =
   db.wal.sync()
   release(db.walLock)
 
-  release(db.lock)
+  releaseWrite(db.lock)
 
 proc close*(db: LSMTree) =
-  acquire(db.lock)
+  acquireWrite(db.lock)
   try:
     # Flush both memtables to avoid data loss
     while db.immutableMem.len > 0:
@@ -863,61 +963,109 @@ proc close*(db: LSMTree) =
       sst.close()
     db.wal.close()
   finally:
-    release(db.lock)
+    releaseWrite(db.lock)
+
+template withDataLock(db: LSMTree, body: untyped) =
+  ## Shared or exclusive depending on baraConcurrentReads (see get*).
+  when defined(baraConcurrentReads):
+    acquireRead(db.lock)
+    try:
+      body
+    finally:
+      releaseRead(db.lock)
+  else:
+    acquireWrite(db.lock)
+    try:
+      body
+    finally:
+      releaseWrite(db.lock)
 
 proc memTableSize*(db: LSMTree): int =
-  acquire(db.lock)
-  defer: release(db.lock)
-  return db.memTable.len
+  withDataLock(db):
+    return db.memTable.len
 
 proc sstableCount*(db: LSMTree): int =
-  acquire(db.lock)
-  defer: release(db.lock)
-  return db.sstables.len
+  withDataLock(db):
+    return db.sstables.len
 
 proc dir*(db: LSMTree): string =
-  acquire(db.lock)
-  defer: release(db.lock)
-  return db.dir
+  withDataLock(db):
+    return db.dir
 
 proc scanMemTable*(db: LSMTree): seq[Entry] =
-  acquire(db.lock)
-  defer: release(db.lock)
-  ## Return all entries from memory (memTable + immutableMem)
-  result = @[]
-  for e in db.memTable.entries:
-    result.add(e)
-  for e in db.immutableMem.entries:
-    result.add(e)
+  ## Return all entries from memory (memTable + immutableMem), sorted by key.
+  ## Immutable wins over active memtable only when timestamps are newer (same key rare).
+  withDataLock(db):
+    var merged = initTable[string, Entry]()
+    for e in db.immutableMem.sortedEntries():
+      merged[e.key] = e
+    for e in db.memTable.sortedEntries():
+      if e.key notin merged or e.timestamp >= merged[e.key].timestamp:
+        merged[e.key] = e
+    result = newSeqOfCap[Entry](merged.len)
+    for _, e in merged:
+      result.add(e)
+    result.sort(proc(a, b: Entry): int = cmp(a.key, b.key))
+
+proc scanRange*(db: LSMTree, startKey, endKey: string): seq[(string, seq[byte])] =
+  ## Inclusive key range scan over memtables + SSTables (newest wins).
+  withDataLock(db):
+    var best = initTable[string, Entry]()
+
+    for e in db.memTable.scan(startKey, endKey):
+      best[e.key] = e
+    for e in db.immutableMem.scan(startKey, endKey):
+      if e.key notin best or e.timestamp > best[e.key].timestamp:
+        best[e.key] = e
+
+    for i in countdown(db.sstables.high, db.sstables.low):
+      let sst = db.sstables[i]
+      if sst.maxKey < startKey or sst.minKey > endKey:
+        continue
+      for key, offset in sst.index:
+        if key < startKey or key > endKey:
+          continue
+        if key in best:
+          continue
+        let (found, entry) = readSSTableEntry(sst, key)
+        if found:
+          best[key] = entry
+
+    var keys = newSeqOfCap[string](best.len)
+    for k in best.keys:
+      keys.add(k)
+    keys.sort(cmp)
+    for k in keys:
+      let e = best[k]
+      if not e.deleted:
+        result.add((e.key, e.value))
 
 proc scanAll*(db: LSMTree): seq[(string, seq[byte])] =
   ## Scan all active (non-deleted) entries from memory and SSTables.
   ## Used for shard data migration.
-  acquire(db.lock)
-  defer: release(db.lock)
+  withDataLock(db):
+    var seen = initTable[string, bool]()
 
-  var seen = initTable[string, bool]()
+    # Scan memtable first (most recent)
+    for e in db.memTable.sortedEntries():
+      if e.key notin seen:
+        seen[e.key] = true
+        if not e.deleted:
+          result.add((e.key, e.value))
 
-  # Scan memtable first (most recent)
-  for e in db.memTable.entries:
-    if e.key notin seen:
-      seen[e.key] = true
-      if not e.deleted:
-        result.add((e.key, e.value))
+    # Scan immutable memtable
+    for e in db.immutableMem.sortedEntries():
+      if e.key notin seen:
+        seen[e.key] = true
+        if not e.deleted:
+          result.add((e.key, e.value))
 
-  # Scan immutable memtable
-  for e in db.immutableMem.entries:
-    if e.key notin seen:
-      seen[e.key] = true
-      if not e.deleted:
-        result.add((e.key, e.value))
-
-  # Scan SSTables from newest to oldest
-  for i in countdown(db.sstables.high, db.sstables.low):
-    let sst = db.sstables[i]
-    for key, offset in sst.index:
-      if key notin seen:
-        seen[key] = true
-        let (found, entry) = readSSTableEntry(sst, key)
-        if found and not entry.deleted:
-          result.add((entry.key, entry.value))
+    # Scan SSTables from newest to oldest
+    for i in countdown(db.sstables.high, db.sstables.low):
+      let sst = db.sstables[i]
+      for key, offset in sst.index:
+        if key notin seen:
+          seen[key] = true
+          let (found, entry) = readSSTableEntry(sst, key)
+          if found and not entry.deleted:
+            result.add((entry.key, entry.value))

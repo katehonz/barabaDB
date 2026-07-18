@@ -1,4 +1,7 @@
 ## BaraQL Executor — AST lowering, IR compilation, and execution
+##
+## Shared types/helpers live under `exec/` (re-exported below for API stability).
+## See `exec/README.md` for module map and further extraction plan.
 import std/os
 import std/strutils
 import std/tables
@@ -53,140 +56,18 @@ import ../ai/embed as embedmod
 import ../ai/llm as llmmod
 import ../graph/cypher as cyphermod
 
-type
-  IndexEntry* = ref object
-    lsmKey*: string
-    rowValue*: string
-
-  ChangeKind* = enum
-    ckInsert, ckUpdate, ckDelete
-
-  ChangeEvent* = object
-    table*: string
-    kind*: ChangeKind
-    key*: string
-    data*: string
-
-  UserDef* = object
-    name*: string
-    passwordHash*: string
-    isSuperuser*: bool
-    roles*: seq[string]
-
-  PrivilegeDef* = object
-    tableName*: string
-    command*: string  # SELECT, INSERT, UPDATE, DELETE, ALL
-
-  PolicyDef* = object
-    name*: string
-    tableName*: string
-    command*: string   # ALL, SELECT, INSERT, UPDATE, DELETE
-    usingExpr*: Node   # parsed USING expression
-    withCheckExpr*: Node  # parsed WITH CHECK expression
-
-  SharedLock* = ref object
-    lock*: Lock
-
-  ExecutionContext* = ref object
-    db*: LSMTree
-    tables*: Table[string, TableDef]
-    btrees*: Table[string, BTreeIndex[string, IndexEntry]]
-    views*: Table[string, Node]  # view name -> SELECT AST
-    cteTables*: Table[string, seq[Row]]  # CTE name -> rows
-    ftsIndexes*: Table[string, fts.InvertedIndex]  # table.col -> FTS index
-    vectorIndexes*: Table[string, vengine.HNSWIndex]  # table.col -> HNSW index
-    graphs*: Table[string, gengine.Graph]  # graph name -> Graph object
-    embedder*: embedmod.Embedder  # optional embedding service client
-    llmClient*: llmmod.LLMClient  # optional LLM client for NL->SQL
-    txnManager*: TxnManager
-    pendingTxn*: Transaction
-    onChange*: proc(ev: ChangeEvent) {.closure.}
-    users*: Table[string, UserDef]
-    policies*: Table[string, seq[PolicyDef]]  # table name -> policies
-    currentUser*: string
-    currentRole*: string
-    sessionVars*: Table[string, string]
-    autoIncCounters*: Table[string, int64]
-    sequences*: Table[string, int64]
-    sharedLock*: SharedLock  # shared across cloned contexts — protects tables, views, btrees, ftsIndexes, users, policies, autoIncCounters, sequences
-    outerRow*: Table[string, string]  # outer query row for correlated subqueries
-    subqueryPlan*: IRPlan  # current subquery plan being evaluated (for correlation in execScan)
-    currentDatabase*: string  # name of the currently selected database
-    registry*: DatabaseRegistry  # reference to the database registry (nil for single-DB mode)
-
-  MigrationRecord* = object
-    name*: string
-    checksum*: string
-    appliedAt*: int64
-    appliedBy*: string
-    durationMs*: int
-    rolledBack*: bool
-
-  ForeignKeyDef* = object
-    refTable*: string
-    refColumn*: string
-    onDelete*: string  # CASCADE, SET NULL, RESTRICT
-    onUpdate*: string  # CASCADE, SET NULL, RESTRICT
-
-  CheckDef* = object
-    name*: string
-    expr*: string  # stored expression string
-    checkNode*: Node  # AST for runtime evaluation
-
-  TriggerDef* = object
-    name*: string
-    timing*: string   # BEFORE, AFTER
-    event*: string    # INSERT, UPDATE, DELETE
-    action*: Node     # SQL statement AST
-
-  TableDef* = object
-    name*: string
-    columns*: seq[ColumnDef]
-    pkColumns*: seq[string]
-    foreignKeys*: seq[ForeignKeyDef]
-    checks*: seq[CheckDef]
-    triggers*: seq[TriggerDef]
-
-  ColumnDef* = object
-    name*: string
-    colType*: string
-    isPk*: bool
-    isNotNull*: bool
-    isUnique*: bool
-    defaultVal*: string
-    fkTable*: string
-    fkColumn*: string
-    fkOnDelete*: string
-    fkOnUpdate*: string
-    autoIncrement*: bool
-
-  Row* = Table[string, Value]
-
-  ExecResult* = object
-    success*: bool
-    columns*: seq[string]
-    rows*: seq[Row]
-    affectedRows*: int
-    message*: string
-    keyValuePairs*: seq[(string, seq[byte])]
-
-proc `==`*(a, b: IndexEntry): bool =
-  a.lsmKey == b.lsmKey and a.rowValue == b.rowValue
-
-proc okResult*(rows: seq[Row] = @[], cols: seq[string] = @[], affected: int = 0, msg: string = "",
-               kvPairs: seq[(string, seq[byte])] = @[]): ExecResult =
-  ExecResult(success: true, columns: cols, rows: rows, affectedRows: affected, message: msg,
-             keyValuePairs: kvPairs)
-
-proc errResult*(msg: string): ExecResult =
-  ExecResult(success: false, columns: @[], rows: @[], affectedRows: 0, message: msg)
+import exec/types
+import exec/values
+import exec/schema
+export types
+export values
+export schema
 
 # ----------------------------------------------------------------------
 # Context management
 # ----------------------------------------------------------------------
 
 proc evalNodeToString(node: Node): string
-proc restoreSchema(ctx: ExecutionContext)
 
 proc newExecutionContext*(db: LSMTree, registry: DatabaseRegistry = nil): ExecutionContext =
   result = ExecutionContext(db: db, tables: initTable[string, TableDef](),
@@ -212,32 +93,6 @@ proc newExecutionContext*(db: LSMTree, registry: DatabaseRegistry = nil): Execut
 # ----------------------------------------------------------------------
 # AST to SQL serializer (for VIEW DDL persistence)
 # ----------------------------------------------------------------------
-
-proc sqlEscapeIdent*(ident: string): string =
-  ## Escape SQL identifiers by doubling double-quotes.
-  result = ident.replace("\"", "\"\"")
-
-proc sqlEscapeString*(s: string): string =
-  ## Escape SQL string literals by doubling single-quotes.
-  result = s.replace("'", "''")
-
-proc buildInsertSql*(table: string, columns: seq[string], rows: seq[seq[string]]): string =
-  ## Build a multi-row INSERT statement for bulk import.
-  result = "INSERT INTO \"" & sqlEscapeIdent(table) & "\" ("
-  for i, col in columns:
-    if i > 0: result &= ", "
-    result &= "\"" & sqlEscapeIdent(col) & "\""
-  result &= ") VALUES "
-  for ri, row in rows:
-    if ri > 0: result &= ", "
-    result &= "("
-    for ci, val in row:
-      if ci > 0: result &= ", "
-      if val.len == 0 or val == "\\N":
-        result &= "NULL"
-      else:
-        result &= "'" & sqlEscapeString(val) & "'"
-    result &= ")"
 
 proc exprToSql(node: Node): string =
   if node == nil:
@@ -343,76 +198,6 @@ proc selectToSql(node: Node): string =
   if node.selOffset != nil and node.selOffset.offsetExpr.kind == nkIntLit:
     result.add(" OFFSET " & $node.selOffset.offsetExpr.intVal)
 
-# ----------------------------------------------------------------------
-# Schema restore
-# ----------------------------------------------------------------------
-
-proc restoreSchema(ctx: ExecutionContext) =
-  for entry in ctx.db.scanMemTable():
-    if entry.deleted: continue
-    if not entry.key.startsWith("_schema:"): continue
-    let ddl = cast[string](entry.value)
-    if ddl.len == 0: continue
-    var astNode: Node
-    try:
-      let tokens = qlex.tokenize(ddl)
-      astNode = qpar.parse(tokens)
-    except:
-      # Skip corrupted schema entries during startup
-      continue
-    if astNode.stmts.len > 0:
-      let stmt = astNode.stmts[0]
-      case stmt.kind
-      of nkCreateTable:
-        var tbl = TableDef(name: stmt.crtName, columns: @[], pkColumns: @[],
-                           foreignKeys: @[], checks: @[], triggers: @[])
-        for col in stmt.crtColumns:
-          if col.kind == nkColumnDef:
-            var colDef = ColumnDef(name: col.cdName, colType: col.cdType)
-            colDef.autoIncrement = col.cdAutoIncrement
-            for cst in col.cdConstraints:
-              if cst.kind == nkConstraintDef:
-                case cst.cstType
-                of "pkey":
-                  colDef.isPk = true
-                  tbl.pkColumns.add(col.cdName)
-                  ctx.btrees[stmt.crtName & "." & col.cdName] = newBTreeIndex[string, IndexEntry]()
-                of "notnull": colDef.isNotNull = true
-                of "unique":
-                  colDef.isUnique = true
-                  ctx.btrees[stmt.crtName & "." & col.cdName] = newBTreeIndex[string, IndexEntry]()
-                of "default":
-                  if cst.cstDefault != nil:
-                    colDef.defaultVal = evalNodeToString(cst.cstDefault)
-                of "fkey":
-                  colDef.fkTable = cst.cstRefTable
-                  colDef.fkColumn = if cst.cstRefColumns.len > 0: cst.cstRefColumns[0] else: ""
-                  colDef.fkOnDelete = cst.cstOnDelete
-                  colDef.fkOnUpdate = cst.cstOnUpdate
-                else: discard
-            tbl.columns.add(colDef)
-        ctx.tables[stmt.crtName] = tbl
-      of nkCreateView:
-        ctx.views[stmt.cvName] = stmt.cvQuery
-      of nkCreateTrigger:
-        if stmt.trigTable in ctx.tables:
-          ctx.tables[stmt.trigTable].triggers.add(TriggerDef(
-            name: stmt.trigName,
-            timing: stmt.trigTiming,
-            event: stmt.trigEvent,
-            action: stmt.trigAction,
-          ))
-      of nkCreateUser:
-        ctx.users[stmt.cuName] = UserDef(name: stmt.cuName,
-            passwordHash: stmt.cuPassword, isSuperuser: stmt.cuSuperuser, roles: @[])
-      of nkCreatePolicy:
-        var pols = ctx.policies.getOrDefault(stmt.cpTable)
-        pols.add(PolicyDef(name: stmt.cpName, tableName: stmt.cpTable,
-                           command: stmt.cpCommand, usingExpr: stmt.cpUsing,
-                           withCheckExpr: stmt.cpWithCheck))
-        ctx.policies[stmt.cpTable] = pols
-      else: discard
-
 proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
   var svCopy = initTable[string, string]()
   for k, v in ctx.sessionVars:
@@ -512,97 +297,6 @@ proc getMigrationBody(ctx: ExecutionContext, name: string): (bool, string, strin
     else:
       return (true, ddl, "")
   return (false, "", "")
-
-# ----------------------------------------------------------------------
-# Helpers
-# ----------------------------------------------------------------------
-
-proc getTableDef(ctx: ExecutionContext, tableName: string): TableDef =
-  if tableName in ctx.tables: return ctx.tables[tableName]
-  return TableDef(name: tableName, columns: @[], pkColumns: @[], foreignKeys: @[], checks: @[])
-
-proc getValue(values: seq[string], fields: seq[string], colName: string): string =
-  for i, f in fields:
-    if f.toLower() == colName.toLower() and i < values.len:
-      return values[i]
-  return "\\N"
-
-proc isNull*(value: string): bool =
-  value == "\\N" or value.toLower() == "null"
-
-proc valueToString*(v: Value): string =
-  case v.kind
-  of vkNull: return "\\N"
-  of vkString: return v.strVal
-  of vkInt64: return $v.int64Val
-  of vkFloat64: return $v.float64Val
-  of vkBool: return $v.boolVal
-  else: return ""
-
-proc `%`*(v: Value): JsonNode =
-  case v.kind
-  of vkNull: return newJNull()
-  of vkString: return %v.strVal
-  of vkInt64: return %v.int64Val
-  of vkFloat64: return %v.float64Val
-  of vkBool: return %v.boolVal
-  else: return newJNull()
-
-proc toString*(v: Value): string = valueToString(v)
-
-proc `[]=`*(t: var Row, key: string, val: string) =
-  t[key] = Value(kind: vkString, strVal: val)
-
-proc escapeRowVal(v: string): string =
-  v.replace("\\", "\\\\").replace(",", "\\,").replace("=", "\\=")
-
-proc unescapeRowVal(v: string): string =
-  result = ""
-  var i = 0
-  while i < v.len:
-    if v[i] == '\\' and i + 1 < v.len:
-      case v[i+1]
-      of '\\', ',', '=':
-        result &= v[i+1]
-        i += 2
-        continue
-      else: discard
-    result &= v[i]
-    inc i
-
-proc parseRowData(valStr: string): Table[string, string] =
-  ## Parse "col1=val1,col2=val2" into a table
-  result = initTable[string, string]()
-  var i = 0
-  var part = ""
-  while i < valStr.len:
-    if valStr[i] == '\\' and i + 1 < valStr.len:
-      part &= valStr[i]
-      part &= valStr[i+1]
-      i += 2
-      continue
-    if valStr[i] == ',':
-      let eqPos = part.find('=')
-      if eqPos >= 0:
-        let k = part[0..<eqPos].strip()
-        let v = unescapeRowVal(part[eqPos+1..^1].strip())
-        result[k] = v
-      part = ""
-    else:
-      part &= valStr[i]
-    inc i
-  if part.len > 0:
-    let eqPos = part.find('=')
-    if eqPos >= 0:
-      let k = part[0..<eqPos].strip()
-      let v = unescapeRowVal(part[eqPos+1..^1].strip())
-      result[k] = v
-
-proc parseRowDataToValueRow(valStr: string): Row =
-  result = initTable[string, Value]()
-  for k, v in parseRowData(valStr):
-    result[k] = v
-
 proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row]
 
 proc extractJoinEquality*(expr: IRExpr): (string, string) =
@@ -4988,30 +4682,35 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                 tbl.columns[i].fkOnDelete = cstNode.cstOnDelete
                 tbl.columns[i].fkOnUpdate = cstNode.cstOnUpdate
     ctx.tables[stmt.crtName] = tbl
-
-    # Persist schema
-    var colDefs: seq[string] = @[]
-    for col in tbl.columns:
-      var parts = @[col.name, col.colType]
-      if col.isPk: parts.add("PRIMARY KEY")
-      if col.autoIncrement: parts.add("AUTO_INCREMENT")
-      if col.isNotNull: parts.add("NOT NULL")
-      if col.isUnique: parts.add("UNIQUE")
-      if col.defaultVal.len > 0: parts.add("DEFAULT '" & col.defaultVal & "'")
-      if col.fkTable.len > 0:
-        parts.add("REFERENCES " & col.fkTable & "(" & col.fkColumn & ")")
-      colDefs.add(parts.join(" "))
-    let schemaKey = "_schema:migrations:" & $ctx.tables.len
-    ctx.db.put(schemaKey, cast[seq[byte]]("CREATE TABLE " & stmt.crtName & " (" & colDefs.join(", ") & ")"))
-
+    persistTableSchema(ctx, tbl)
     return okResult()
 
   of nkDropTable:
-    ctx.tables.del(stmt.drtName)
+    let dropName = stmt.drtName
+    ctx.tables.del(dropName)
     var toDelete: seq[string] = @[]
     for idxName in ctx.btrees.keys.toSeq():
-      if idxName.startsWith(stmt.drtName & "."): toDelete.add(idxName)
+      if idxName.startsWith(dropName & "."): toDelete.add(idxName)
     for idxName in toDelete: ctx.btrees.del(idxName)
+    # Remove durable schema entry
+    dropTableSchema(ctx, dropName)
+    # Remove row data for this table
+    var dataKeys: seq[string] = @[]
+    let prefix = dropName & "."
+    for (key, _) in ctx.db.scanAll():
+      if key.startsWith(prefix):
+        dataKeys.add(key)
+    for key in dataKeys:
+      ctx.db.delete(key)
+    # Drop orphan legacy schema keys that mentioned this table
+    var legacyKeys: seq[string] = @[]
+    for (key, value) in ctx.db.scanAll():
+      if key.startsWith(SchemaLegacyCreatePrefix):
+        let ddl = cast[string](value)
+        if ddl.contains("CREATE TABLE " & dropName) or ddl.contains("CREATE TABLE \"" & dropName):
+          legacyKeys.add(key)
+    for key in legacyKeys:
+      ctx.db.delete(key)
     return okResult()
 
   of nkCreateGraph:
@@ -5113,6 +4812,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
           var colDef = ColumnDef(name: op.cdName, colType: op.cdType)
           tbl.columns.add(colDef)
       ctx.tables[stmt.altName] = tbl
+      persistTableSchema(ctx, tbl)
       return okResult(msg="ALTER TABLE " & stmt.altName & " executed")
     return errResult("Table '" & stmt.altName & "' does not exist")
 
