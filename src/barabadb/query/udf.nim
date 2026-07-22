@@ -211,7 +211,7 @@ proc registerStdlib*(reg: UDFRegistry) =
       if args.len > 0 and args[0].kind == vkString:
         try:
           return Value(kind: vkInt64, int64Val: parseInt(args[0].strVal))
-        except:
+        except CatchableError:
           discard
       return Value(kind: vkNull))
 

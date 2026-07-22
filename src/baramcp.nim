@@ -18,7 +18,7 @@ when isMainModule:
   try:
     discard server.init(dataDir)
     server.run()
-  except:
+  except CatchableError:
     server.logToStderr("Fatal error: " & getCurrentExceptionMsg())
   finally:
     server.close()

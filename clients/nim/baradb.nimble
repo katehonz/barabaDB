@@ -3,7 +3,7 @@
 version       = "1.2.0"
 author        = "BaraDB Team"
 description   = "Official Nim client for BaraDB — async binary protocol client"
-license       = "Apache-2.0"
+license       = "BSD-3-Clause"
 srcDir        = "src"
 
 # Dependencies — only Nim stdlib, no server code

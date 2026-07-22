@@ -4,7 +4,7 @@
 
 **A multimodal database engine written in Nim — 100% native, zero dependencies.**
 
-[![Version](https://img.shields.io/badge/version-1.1.7-blue.svg)](baradadb.nimble)
+[![Version](https://img.shields.io/badge/version-1.1.8-blue.svg)](baradadb.nimble)
 [![Documentation](https://img.shields.io/badge/docs-2_languages-blue.svg)](docs/index.md)
 [![Stars](https://img.shields.io/github/stars/katehonz/barabaDB?style=social)](https://github.com/katehonz/barabaDB)
 
@@ -1568,7 +1568,7 @@ reflects 100% completion across all major phases.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for full release history. The latest release (**v1.2.0**) introduces the Unified Search Engine with heap-optimized HNSW, segment-based inverted indexing, boolean queries, phrase/proximity search, n-gram fuzzy matching, faceted search, and Porter2 stemmers for 5 languages.
+See [CHANGELOG.md](CHANGELOG.md) for full release history. Package version is **v1.1.8**. The **v1.2.0** line (Unreleased) adds core storage hardening (hash MemTable, WAL group commit, schema persistence, ARC/wire stability) and the Unified Search Engine (heap-optimized HNSW, segment inverted index, boolean/phrase/n-gram/facets, multi-language stemmers).
 
 ## License
 

@@ -58,7 +58,7 @@ proc rebuildFromLSM*(cs: CompactionStrategy, db: LSMTree) =
   cs.clear()
   cs.dataDir = db.dir
   for sst in db.sstables:
-    let size = try: int(getFileSize(sst.path)) except: sst.entryCount * 64
+    let size = try: int(getFileSize(sst.path)) except CatchableError: sst.entryCount * 64
     cs.addTable(SSTableMeta(
       path: sst.path,
       level: sst.level,
@@ -143,7 +143,7 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
   var sst = writeSSTable(final, outputPath, level + 1)
 
   # Use actual file size instead of rough guess
-  let actualSize = try: getFileSize(outputPath) except: final.len * 64
+  let actualSize = try: getFileSize(outputPath) except CatchableError: final.len * 64
 
   let outputMeta = SSTableMeta(
     path: outputPath,
@@ -159,7 +159,7 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
   let (ok, msg) = verifySSTable(outputPath)
   if not ok:
     echo "[ERROR] Compaction output verification failed: ", msg
-    try: removeFile(outputPath) except: discard
+    try: removeFile(outputPath) except CatchableError: discard
     return CompactionResult()
 
   # Remove old SSTable files

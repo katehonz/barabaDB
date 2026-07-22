@@ -189,7 +189,7 @@ proc notifyClient(client: WsClient, msg: string) {.async.} =
   try:
     let frame = encodeFrame(0x1, msg)
     await client.socket.send(frame)
-  except:
+  except CatchableError:
     discard
 
 proc broadcastToTable*(server: WsServer, table: string, msg: string) {.async.} =
@@ -247,7 +247,7 @@ proc handleWsClient(server: WsServer, client: AsyncSocket, id: int) {.async.} =
 
         buf = buf[consumed..^1]
 
-  except:
+  except CatchableError:
     discard
   finally:
     echo "WebSocket client ", id, " disconnected"
@@ -305,7 +305,7 @@ proc handleConnection(server: WsServer, client: AsyncSocket) {.async.} =
           await client.send("HTTP/1.1 401 Unauthorized\r\n\r\n")
           client.close()
           return
-    except:
+    except CatchableError:
       await client.send("HTTP/1.1 401 Unauthorized\r\n\r\n")
       client.close()
       return

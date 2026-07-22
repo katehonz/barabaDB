@@ -103,7 +103,7 @@ proc verifyToken*(server: HttpServer, tokenStr: string): (bool, string, string) 
     let userId = token.claims["sub"].node.str
     let role = if "role" in token.claims: token.claims["role"].node.str else: "user"
     return (true, userId, role)
-  except:
+  except CatchableError:
     return (false, "", "")
 
 # ----------------------------------------------------------------------

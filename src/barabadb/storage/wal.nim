@@ -77,7 +77,7 @@ proc parseWalSequence*(filename: string): int64 =
       result = parseBiggestInt(numStr)
     else:
       result = 0
-  except:
+  except CatchableError:
     result = 0
 
 proc listWalArchive*(dir: string): seq[WalSegment] =
@@ -90,7 +90,7 @@ proc listWalArchive*(dir: string): seq[WalSegment] =
     if kind == pcFile and path.endsWith(".log"):
       let seqNum = parseWalSequence(extractFilename(path))
       if seqNum > 0:
-        let size = try: getFileSize(path) except: 0
+        let size = try: getFileSize(path) except CatchableError: 0
         result.add(WalSegment(sequence: seqNum, path: path, size: size))
   result.sort(proc(a, b: WalSegment): int = cmp(a.sequence, b.sequence))
 
@@ -140,7 +140,7 @@ proc maybeRotate*(wal: var WriteAheadLog) =
   ## Rotate if current WAL exceeds max segment size.
   if wal.maxSegmentSize <= 0:
     return
-  let currentSize = try: getFileSize(wal.path) except: 0
+  let currentSize = try: getFileSize(wal.path) except CatchableError: 0
   if currentSize >= wal.maxSegmentSize:
     wal.rotate()
 

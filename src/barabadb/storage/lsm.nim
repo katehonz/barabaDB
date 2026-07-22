@@ -473,7 +473,7 @@ proc listLegacySSTables*(dir: string): seq[(string, uint32)] =
         let sst = loadSSTable(path)
         if sst.fileVersion < SSTableVersion:
           result.add((path, sst.fileVersion))
-      except:
+      except CatchableError:
         discard
 
 proc migrateSSTable*(path: string): bool =
@@ -595,7 +595,7 @@ proc checkStorageConsistency*(db: LSMTree): seq[string] =
       let j = parseJson(readFile(manifestPath))
       for node in j{"sstables"}:
         manifestPaths.add(node{"path"}.getStr())
-    except:
+    except CatchableError:
       result.add("MANIFEST is corrupt or unreadable")
       return
 

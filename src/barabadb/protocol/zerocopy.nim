@@ -167,14 +167,14 @@ proc encodeRecord*(buf: var ZeroBuf, schema: ZcSchema,
       try:
         var v = int32(parseInt(value))
         bigEndian32(addr buf.data[field.offset], unsafeAddr v)
-      except:
+      except CatchableError:
         var v: int32 = 0
         bigEndian32(addr buf.data[field.offset], unsafeAddr v)
     of ztInt64:
       try:
         var v = int64(parseInt(value))
         bigEndian64(addr buf.data[field.offset], unsafeAddr v)
-      except:
+      except CatchableError:
         var v: int64 = 0
         bigEndian64(addr buf.data[field.offset], unsafeAddr v)
     of ztString:

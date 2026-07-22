@@ -2,7 +2,7 @@
 version       = "1.1.8"
 author        = "BaraDB Team"
 description   = "BaraDB — Multimodal database written in Nim"
-license       = "Apache-2.0"
+license       = "BSD-3-Clause"
 srcDir        = "src"
 bin           = @["baradadb", "baramcp"]
 binDir        = "build"

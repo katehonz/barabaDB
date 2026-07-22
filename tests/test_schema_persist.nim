@@ -6,7 +6,6 @@ import std/tables
 import barabadb/storage/lsm
 import barabadb/query/executor
 import barabadb/query/parser
-import barabadb/query/ast
 
 proc execSql(ctx: ExecutionContext, sql: string): ExecResult =
   let node = parse(sql)

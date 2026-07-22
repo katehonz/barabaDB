@@ -146,7 +146,7 @@ proc formatTimestamp*(ts: int64): string =
   try:
     let dt = fromUnix(ts)
     result = format(dt, "yyyy-MM-dd HH:mm:ss")
-  except:
+  except CatchableError:
     result = $ts
 
 proc parseBackupFilename*(filename: string): int64 =
@@ -163,7 +163,7 @@ proc parseBackupFilename*(filename: string): int64 =
         result = 0
     else:
       result = 0
-  except:
+  except CatchableError:
     result = 0
 
 proc getArchiveSize*(input: string): int64 =
@@ -175,7 +175,7 @@ proc getArchiveSize*(input: string): int64 =
     if exitCode == 0:
       try:
         result = parseBiggestInt(strip(outStr))
-      except:
+      except CatchableError:
         result = getFileSize(input)  # fallback
     else:
       result = getFileSize(input)
@@ -189,7 +189,7 @@ proc getFreeSpace*(path: string): int64 =
   if exitCode == 0:
     try:
       result = parseBiggestInt(strip(outStr))
-    except:
+    except CatchableError:
       result = -1
   else:
     result = -1
@@ -701,14 +701,14 @@ when isMainModule:
       of "input", "i": target = val
       of "keep", "k":
         try: keepCount = parseInt(val)
-        except: quit("ERROR: --keep must be a number", 1)
+        except CatchableError: quit("ERROR: --keep must be a number", 1)
       of "exclude", "e": excludes.add(val)
       of "level", "l":
         try:
           compression = parseInt(val)
           if compression < 0 or compression > 9:
             quit("ERROR: --level must be between 0 and 9", 1)
-        except: quit("ERROR: --level must be a number", 1)
+        except CatchableError: quit("ERROR: --level must be a number", 1)
       of "dry-run": dryRun = true
       of "force", "f": force = true
       of "online": online = true

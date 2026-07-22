@@ -65,54 +65,52 @@ proc newServerWithRegistry*(config: BaraConfig, registry: DatabaseRegistry): Ser
     let tlsConfig = newTLSConfig(config.certFile, config.keyFile)
     tls = newTLSContext(tlsConfig)
 
-  # Initialize sharding
-  let shardRouter = newShardRouter()
+  # Initialize sharding / gossip. Server fields own the refs; locals used inside
+  # callback closures are {.cursor.} so ARC does not form uncollectable cycles
+  # (local + closure env + object callback fields).
   let localId = if config.raftNodeId.len > 0: config.raftNodeId else: "node-" & $config.port
-  let cm = newClusterMembership(shardRouter, localId)
-
-  # Wire shard migration callbacks to LSM (use default database)
-  shardRouter.iterateKeys = proc(shardId: int): seq[(string, seq[byte])] {.gcsafe.} =
-    var entries: seq[(string, seq[byte])] = @[]
-    for (key, value) in db.scanAll():
-      if shardRouter.getShard(key) == shardId:
-        entries.add((key, value))
-    return entries
-
-  shardRouter.storeKeys = proc(shardId: int, entries: seq[(string, seq[byte])]) {.gcsafe.} =
-    for (key, value) in entries:
-      db.put(key, value)
-
-  shardRouter.deleteKeys = proc(keys: seq[string]) {.gcsafe.} =
-    for key in keys:
-      db.delete(key)
-
-  # Initialize gossip
   let gossipPort = config.raftPort + 100
-  let gp = newGossipProtocol(localId, config.address, config.port, gossipPort = gossipPort)
-
-  # Wire gossip → cluster membership
-  gp.onJoin = proc(node: GossipNode) {.gcsafe.} =
-    cm.onNodeJoin(node.id, node.host, node.port)
-
-  gp.onLeave = proc(nodeId: string) {.gcsafe.} =
-    cm.onNodeLeave(nodeId)
-
-  gp.onSuspect = proc(nodeId: string) {.gcsafe.} =
-    cm.onNodeSuspect(nodeId)
-
-  # Initialize rate limiter
   let rl = newRateLimiter(rlaTokenBucket, config.rateLimitGlobal, config.rateLimitPerClient)
 
   result = Server(config: config, running: false, db: db, ctx: ctx,
          registry: registry,
          txnManager: ctx.txnManager, distTxnManager: newDistTxnManager(),
          replicationManager: newReplicationManager(),
-         shardRouter: shardRouter,
-         clusterMembership: cm,
-         gossipProtocol: gp,
+         shardRouter: newShardRouter(),
+         clusterMembership: nil,
+         gossipProtocol: newGossipProtocol(localId, config.address, config.port, gossipPort = gossipPort),
          tls: tls,
          rateLimiter: rl)
+  result.clusterMembership = newClusterMembership(result.shardRouter, localId)
   initLock(result.activeConnectionsLock)
+
+  # Wire shard migration callbacks to LSM (default database)
+  block:
+    let shardRouter {.cursor.} = result.shardRouter
+    let dbRef {.cursor.} = db
+    shardRouter.iterateKeys = proc(shardId: int): seq[(string, seq[byte])] {.gcsafe.} =
+      var entries: seq[(string, seq[byte])] = @[]
+      for (key, value) in dbRef.scanAll():
+        if shardRouter.getShard(key) == shardId:
+          entries.add((key, value))
+      return entries
+    shardRouter.storeKeys = proc(shardId: int, entries: seq[(string, seq[byte])]) {.gcsafe.} =
+      for (key, value) in entries:
+        dbRef.put(key, value)
+    shardRouter.deleteKeys = proc(keys: seq[string]) {.gcsafe.} =
+      for key in keys:
+        dbRef.delete(key)
+
+  # Wire gossip → cluster membership
+  block:
+    let gp {.cursor.} = result.gossipProtocol
+    let cm {.cursor.} = result.clusterMembership
+    gp.onJoin = proc(node: GossipNode) {.gcsafe.} =
+      cm.onNodeJoin(node.id, node.host, node.port)
+    gp.onLeave = proc(nodeId: string) {.gcsafe.} =
+      cm.onNodeLeave(nodeId)
+    gp.onSuspect = proc(nodeId: string) {.gcsafe.} =
+      cm.onNodeSuspect(nodeId)
 
 proc newServerWithDb*(config: BaraConfig, db: LSMTree): Server =
   let registry = newDatabaseRegistry(config)
@@ -389,7 +387,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           rest.add(more)
         let parts = rest.strip().split(" ")
         if parts.len >= 2:
-          let txnId = try: uint64(parseBiggestUint(parts[0])) except: 0'u64
+          let txnId = try: uint64(parseBiggestUint(parts[0])) except CatchableError: 0'u64
           let action = parts[1].toUpper()
           if server.distTxnManager != nil:
             let txn = server.distTxnManager.getTxn(txnId)
@@ -428,8 +426,8 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           rest.add(more)
         let parts = rest.strip().split(" ")
         if parts.len >= 2:
-          let lsn = try: parseUInt(parts[0]) except: 0'u64
-          let dataLen = try: parseInt(parts[1]) except: 0
+          let lsn = try: parseUInt(parts[0]) except CatchableError: 0'u64
+          let dataLen = try: parseInt(parts[1]) except CatchableError: 0
           if dataLen > 0:
             var data = ""
             while data.len < dataLen:
@@ -460,7 +458,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         let headerLine = "MIGRATE " & rest.strip()
         let parts = rest.strip().split(" ")
         if parts.len >= 2:
-          let entryCount = try: parseInt(parts[1]) except: 0
+          let entryCount = try: parseInt(parts[1]) except CatchableError: 0
           var data = ""
           if entryCount > 0:
             # Read all entries (each entry is key\0value\n)
@@ -551,7 +549,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         # Shard-aware routing: check if this node should handle the write
         var shardCheck = true
         if server.clusterMembership.nodes.len > 0:
-          let stmts = try: parse(tokenize(queryStr)) except: nil
+          let stmts = try: parse(tokenize(queryStr)) except CatchableError: nil
           if stmts != nil:
             for stmt in stmts.stmts:
               if stmt.kind in {nkInsert, nkUpdate, nkDelete}:

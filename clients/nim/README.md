@@ -217,4 +217,4 @@ See `examples/ormin_basic.nim` for a full sample.
 
 ## License
 
-Apache-2.0
+BSD-3-Clause

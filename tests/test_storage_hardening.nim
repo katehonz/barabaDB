@@ -1,7 +1,6 @@
 ## Focused storage hardening tests (avoids full suite compile issues)
 import std/unittest
 import std/os
-import std/strutils
 import std/locks
 import barabadb/storage/lsm
 import barabadb/storage/rwlock

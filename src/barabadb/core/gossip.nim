@@ -277,7 +277,7 @@ proc sendGossipUdp(gp: GossipProtocol, target: GossipNode, msg: GossipMessage) =
     let data = serialize(msg)
     sock.sendTo(target.host, Port(target.port), cast[string](data))
     sock.close()
-  except:
+  except CatchableError:
     discard
 
 proc broadcastGossip(gp: GossipProtocol) =
@@ -298,7 +298,7 @@ proc handleIncomingGossip(gp: GossipProtocol, data: string, senderAddr: string) 
         let parts = host.split(":")
         host = parts[0]
         if parts[1].len > 0:
-          port = try: parseInt(parts[1]) except: gp.gossipPort
+          port = try: parseInt(parts[1]) except CatchableError: gp.gossipPort
       let newNode = GossipNode(
         id: msg.senderId, host: host, port: port,
         state: nsAlive, incarnation: msg.senderIncarnation,
@@ -306,7 +306,7 @@ proc handleIncomingGossip(gp: GossipProtocol, data: string, senderAddr: string) 
       )
       gp.addMember(newNode)
     gp.applyGossipMessage(msg)
-  except:
+  except CatchableError:
     discard
 
 proc startHealthCheck*(gp: GossipProtocol, intervalMs: int = 1000) {.async.} =
@@ -342,14 +342,14 @@ proc startGossipListener*(gp: GossipProtocol) {.async.} =
         # Recreate socket after too many errors
         try:
           gp.sock.close()
-        except:
+        except CatchableError:
           discard
         try:
           gp.sock = newAsyncSocket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
           gp.sock.setSockOpt(OptReuseAddr, true)
           gp.sock.bindAddr(Port(gp.gossipPort))
           consecutiveErrors = 0
-        except:
+        except CatchableError:
           break
       # Exponential backoff with cap
       let delayMs = min(baseRetryDelayMs * (1 shl min(consecutiveErrors, 6)), 5000)

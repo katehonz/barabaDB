@@ -202,7 +202,7 @@ proc applyCommitted(node: RaftNode) =
         let parts = entry.command.split(":")
         if parts.len >= 3:
           let action = parts[1]
-          let txnId = try: parseUInt(parts[2]) except: 0'u64
+          let txnId = try: parseUInt(parts[2]) except CatchableError: 0'u64
           if action == "PREPARE" and node.onDistTxnPrepare != nil:
             discard node.onDistTxnPrepare(txnId, @[])
           elif action == "COMMIT" and node.onDistTxnCommit != nil:
@@ -564,7 +564,7 @@ proc connectToPeer(net: RaftNetwork, peerId: string) {.async.} =
     let sock = newAsyncSocket()
     await sock.connect(host, Port(port))
     net.peerSockets[peerId] = sock
-  except:
+  except CatchableError:
     discard
 
 proc send*(net: RaftNetwork, peerId: string, msg: RaftMessage) {.async.} =
@@ -577,7 +577,7 @@ proc send*(net: RaftNetwork, peerId: string, msg: RaftMessage) {.async.} =
     bigEndian32(addr header[0], unsafeAddr payloadLen)
     try:
       await net.peerSockets[peerId].send(cast[string](header) & cast[string](data))
-    except:
+    except CatchableError:
       net.peerSockets.del(peerId)
 
 proc broadcast*(net: RaftNetwork, msgs: seq[RaftMessage]) {.async.} =
@@ -615,9 +615,9 @@ proc receiveLoop(net: RaftNetwork, client: AsyncSocket) {.async.} =
       let msg = deserializeRaftMessage(payload)
       try:
         await net.processMessage(msg)
-      except:
+      except CatchableError:
         discard
-  except:
+  except CatchableError:
     discard
   finally:
     client.close()
@@ -641,7 +641,7 @@ proc run*(net: RaftNetwork) {.async.} =
     try:
       let client = await net.socket.accept()
       asyncCheck net.receiveLoop(client)
-    except:
+    except CatchableError:
       break
 
 proc stop*(net: RaftNetwork) =

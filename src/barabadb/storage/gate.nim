@@ -18,13 +18,15 @@ var
 
 proc initStorageGate*() =
   ## Idempotent when called from a single thread at startup.
+  ## Must run before multi-threaded accept (HTTP workers / TCP).
   if not gInited:
     initLock(gGate)
     gInited = true
 
 proc acquireStorageGate*() {.inline.} =
   ## Prefer calling initStorageGate() once at process start (main).
-  ## Lazy-init is allowed for unit tests (single-threaded).
+  ## Lazy-init is only safe for single-threaded unit tests — concurrent
+  ## first-time init races on gInited / initLock.
   if not gInited:
     initStorageGate()
   acquire(gGate)

@@ -128,5 +128,5 @@ proc exportOtlp*(tracer: Tracer, endpoint: string = "http://localhost:4318/v1/tr
     client.close()
     tracer.spans = @[]
     return true
-  except:
+  except CatchableError:
     return false

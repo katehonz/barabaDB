@@ -92,6 +92,26 @@ proc newClient*(config: ClientConfig = defaultConfig()): BaraClient =
     sendLock: initAsyncLock(),
   )
 
+# Aliases for older call sites / server test suite
+proc defaultClientConfig*(): ClientConfig {.inline.} = defaultConfig()
+proc newBaraClient*(config: ClientConfig = defaultConfig()): BaraClient {.inline.} =
+  newClient(config)
+
+proc parseConnectionString*(connStr: string): ClientConfig =
+  ## Parse space-separated key=value pairs (libpq-style subset).
+  result = defaultConfig()
+  for part in connStr.split(" "):
+    let kv = part.split("=", 1)
+    if kv.len == 2:
+      case kv[0].toLowerAscii()
+      of "host": result.host = kv[1]
+      of "port": result.port = parseInt(kv[1])
+      of "database", "dbname": result.database = kv[1]
+      of "user", "username": result.username = kv[1]
+      of "password", "pass": result.password = kv[1]
+      of "connect_timeout", "timeout": result.timeoutMs = parseInt(kv[1])
+      else: discard
+
 proc nextId*(client: BaraClient): uint32 =
   inc client.requestId
   client.requestId

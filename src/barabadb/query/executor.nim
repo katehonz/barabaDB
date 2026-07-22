@@ -232,7 +232,7 @@ proc acquireMigrationLock(ctx: ExecutionContext): bool =
   let (locked, lockVal) = ctx.db.get(lockKey)
   if locked:
     # Check for stale lock (older than 1 hour)
-    let lockTime = try: parseInt(cast[string](lockVal)) except: 0
+    let lockTime = try: parseInt(cast[string](lockVal)) except CatchableError: 0
     if lockTime > 0 and (epochTime().int64 - lockTime) > 3600:
       # Stale lock — force release
       ctx.db.delete(lockKey)
@@ -362,7 +362,7 @@ proc parseVectorString*(value: string): seq[float32] =
     if p.len > 0:
       try:
         result.add(parseFloat(p).float32)
-      except:
+      except CatchableError:
         discard
 
 # ----------------------------------------------------------------------
@@ -621,10 +621,10 @@ proc evalExpr*(expr: IRExpr, row: Row, ctx: ExecutionContext = nil): Value =
       case expr.valueKind
       of vkInt64:
         try: return Value(kind: vkInt64, int64Val: parseInt(s))
-        except: return Value(kind: vkNull)
+        except CatchableError: return Value(kind: vkNull)
       of vkFloat64:
         try: return Value(kind: vkFloat64, float64Val: parseFloat(s))
-        except: return Value(kind: vkNull)
+        except CatchableError: return Value(kind: vkNull)
       of vkBool:
         return Value(kind: vkBool, boolVal: s == "true")
       of vkNull:
@@ -634,10 +634,10 @@ proc evalExpr*(expr: IRExpr, row: Row, ctx: ExecutionContext = nil): Value =
         if s.len == 0: return Value(kind: vkString, strVal: s)
         try:
           return Value(kind: vkInt64, int64Val: parseInt(s))
-        except:
+        except CatchableError:
           try:
             return Value(kind: vkFloat64, float64Val: parseFloat(s))
-          except:
+          except CatchableError:
             return Value(kind: vkString, strVal: s)
     return Value(kind: vkNull)
   of irekBinary:
@@ -803,7 +803,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
           of JNull: return "null"
           else: return $val
       return ""
-    except:
+    except CatchableError:
       return ""
   of irekBinary:
     let left = evalExprOld(expr.binLeft, row, ctx)
@@ -814,30 +814,30 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
       # Try numeric comparison
       try:
         if parseFloat(left) == parseFloat(right): return "true"
-      except: discard
+      except CatchableError: discard
       return "false"
     of irNeq:
       if left != right: return "true"
       # Try numeric comparison
       try:
         return if parseFloat(left) != parseFloat(right): "true" else: "false"
-      except: return "false"
+      except CatchableError: return "false"
     of irLt:
       try:
         return if parseFloat(left) < parseFloat(right): "true" else: "false"
-      except: return if left < right: "true" else: "false"
+      except CatchableError: return if left < right: "true" else: "false"
     of irLte:
       try:
         return if parseFloat(left) <= parseFloat(right): "true" else: "false"
-      except: return if left <= right: "true" else: "false"
+      except CatchableError: return if left <= right: "true" else: "false"
     of irGt:
       try:
         return if parseFloat(left) > parseFloat(right): "true" else: "false"
-      except: return if left > right: "true" else: "false"
+      except CatchableError: return if left > right: "true" else: "false"
     of irGte:
       try:
         return if parseFloat(left) >= parseFloat(right): "true" else: "false"
-      except: return if left >= right: "true" else: "false"
+      except CatchableError: return if left >= right: "true" else: "false"
     of irAnd:
       if left == "true" and right == "true": return "true"
       return "false"
@@ -867,7 +867,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
       try:
         let rePattern = re(pattern)
         if left.match(rePattern): return "true"
-      except: discard
+      except CatchableError: discard
       return "false"
     of irILike:
       proc escapeRe(s: string): string =
@@ -882,7 +882,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
       try:
         let rePattern = re(pattern)
         if left.toLower().match(rePattern): return "true"
-      except: discard
+      except CatchableError: discard
       return "false"
     of irIn:
       if expr.binRight.kind == irekSubquery:
@@ -902,7 +902,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
         let lv = parseFloat(left)
         let rv = parseFloat(right)
         return if lv == rv: "true" else: "false"
-      except: discard
+      except CatchableError: discard
       return if left == right: "true" else: "false"
     of irNotIn:
       if expr.binRight.kind == irekSubquery:
@@ -922,7 +922,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
         let lv = parseFloat(left)
         let rv = parseFloat(right)
         return if lv != rv: "true" else: "false"
-      except: discard
+      except CatchableError: discard
       return if left != right: "true" else: "false"
     of irFtsMatch:
       # Check for FTS index via ctx
@@ -986,7 +986,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
           return "true"
         else:
           return if $(leftNode) == $(rightNode): "true" else: "false"
-      except:
+      except CatchableError:
         return "false"
     of irJsonContainedBy:
       # Check if left JSON is contained by right JSON (reverse of contains)
@@ -1010,7 +1010,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
           return "true"
         else:
           return if $(leftNode) == $(rightNode): "true" else: "false"
-      except:
+      except CatchableError:
         return "false"
     of irJsonHasAny:
       # Check if JSON object has any of the keys in right array
@@ -1022,7 +1022,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
             if key.kind == JString and leftNode.hasKey(key.getStr()):
               return "true"
         return "false"
-      except:
+      except CatchableError:
         return "false"
     of irJsonHasAll:
       # Check if JSON object has all of the keys in right array
@@ -1035,7 +1035,7 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
               return "false"
           return "true"
         return "false"
-      except:
+      except CatchableError:
         return "false"
     else: return "false"
   of irekUnary:
@@ -1097,10 +1097,10 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
           try:
             let idx = parseInt(key)
             return if idx >= 0 and idx < node.len: "true" else: "false"
-          except:
+          except CatchableError:
             return "false"
         return "false"
-      except:
+      except CatchableError:
         return "false"
     of "current_setting":
       if expr.irFuncArgs.len < 1:
@@ -1460,13 +1460,13 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
           try:
             let dt = parse(val, "yyyy-MM-dd HH:mm:ss")
             return $(dt.toTime().toUnix())
-          except:
+          except CatchableError:
             return "0"
         elif fmt == "%Y-%m-%dT%H:%M:%SZ":
           try:
             let dt = parse(val, "yyyy-MM-dd HH:mm:ss")
             return format(dt, "yyyy-MM-dd'T'HH:mm:ss'Z'")
-          except:
+          except CatchableError:
             return ""
       return ""
     else:
@@ -1773,7 +1773,7 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
                 props[f] = rowVals[i]
           try:
             gengine.addNodeWithId(graph, nid, label, props)
-          except:
+          except CatchableError:
             discard
       elif table == graphName & "_edges":
         var srcStr = ""
@@ -1786,13 +1786,13 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
             elif f == "dest_id": dstStr = rowVals[i]
             elif f == "edge_label": label = rowVals[i]
             elif f == "weight":
-              try: weight = parseFloat(rowVals[i]) except: discard
+              try: weight = parseFloat(rowVals[i]) except CatchableError: discard
         if srcStr.len > 0 and dstStr.len > 0:
           let srcId = gengine.NodeId(parseUInt(srcStr))
           let dstId = gengine.NodeId(parseUInt(dstStr))
           try:
             gengine.addEdgeWithId(graph, srcId, dstId, label, weight)
-          except:
+          except CatchableError:
             discard
 
     inc count
@@ -2018,10 +2018,10 @@ proc validateType*(colType: string, value: string): (bool, string) =
   let t = colType.toUpper()
   if t == "INTEGER" or t == "INT" or t == "BIGINT" or t == "SMALLINT" or t == "SERIAL":
     try: discard parseInt(value)
-    except: return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
+    except CatchableError: return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
   elif t == "FLOAT" or t == "REAL" or t == "DOUBLE" or t == "DOUBLE PRECISION" or t == "NUMERIC":
     try: discard parseFloat(value)
-    except: return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
+    except CatchableError: return (false, "Type mismatch: expected " & t & " but got '" & value & "'")
   elif t == "BOOLEAN" or t == "BOOL":
     let lv = value.toLower()
     if lv notin ["true", "false", "1", "0", "t", "f", "yes", "no"]:
@@ -2032,7 +2032,7 @@ proc validateType*(colType: string, value: string): (bool, string) =
   elif t == "JSON" or t == "JSONB":
     try:
       discard parseJson(value)
-    except:
+    except CatchableError:
       return (false, "Type mismatch: expected JSON but got '" & value & "'")
   elif t.startsWith("VECTOR"):
     let vec = parseVectorString(value)
@@ -2044,7 +2044,7 @@ proc validateType*(colType: string, value: string): (bool, string) =
     if dimStart >= 0 and dimEnd > dimStart:
       try:
         expectedDim = parseInt(t[dimStart+1..<dimEnd])
-      except:
+      except CatchableError:
         expectedDim = 0
     if expectedDim > 0 and vec.len != expectedDim:
       return (false, "Vector dimension mismatch: expected " & $expectedDim & " but got " & $vec.len)
@@ -2572,7 +2572,7 @@ proc compareRowsByOrder(a, b: Row, orderExprs: seq[IRExpr], orderDirs: seq[bool]
       let fb = parseFloat(valueToString(vb))
       if fa < fb: cmpRes = -1
       elif fa > fb: cmpRes = 1
-    except:
+    except CatchableError:
       cmpRes = cmp(valueToString(va), valueToString(vb))
     if cmpRes != 0:
       return if orderDirs.len > i and orderDirs[i]: -cmpRes else: cmpRes
@@ -2592,12 +2592,12 @@ proc resolveFrameBounds(pos, partLen: int, frameStart, frameEnd: string): (int, 
   elif frameStart.endsWith(" PRECEDING"):
     let nStr = frameStart[0..^11]
     var n = 0
-    try: n = parseInt(nStr) except: n = 0
+    try: n = parseInt(nStr) except CatchableError: n = 0
     startPos = max(0, pos - n)
   elif frameStart.endsWith(" FOLLOWING"):
     let nStr = frameStart[0..^11]
     var n = 0
-    try: n = parseInt(nStr) except: n = 0
+    try: n = parseInt(nStr) except CatchableError: n = 0
     startPos = min(partLen - 1, pos + n)
 
   # Parse end boundary
@@ -2608,12 +2608,12 @@ proc resolveFrameBounds(pos, partLen: int, frameStart, frameEnd: string): (int, 
   elif frameEnd.endsWith(" PRECEDING"):
     let nStr = frameEnd[0..^11]
     var n = 0
-    try: n = parseInt(nStr) except: n = 0
+    try: n = parseInt(nStr) except CatchableError: n = 0
     endPos = max(0, pos - n)
   elif frameEnd.endsWith(" FOLLOWING"):
     let nStr = frameEnd[0..^11]
     var n = 0
-    try: n = parseInt(nStr) except: n = 0
+    try: n = parseInt(nStr) except CatchableError: n = 0
     endPos = min(partLen - 1, pos + n)
 
   if startPos > endPos:
@@ -2668,7 +2668,7 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
     of "ntile":
       var n = 1
       if expr.wfArgs.len > 0:
-        try: n = parseInt(valueToString(evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]], ctx))) except: n = 1
+        try: n = parseInt(valueToString(evalExpr(expr.wfArgs[0], rows[sortedIdxs[0]], ctx))) except CatchableError: n = 1
       if n < 1: n = 1
       let groupSize = sortedIdxs.len div n
       let remainder = sortedIdxs.len mod n
@@ -2687,7 +2687,7 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
       var offset = 1
       var defaultVal = ""
       if expr.wfArgs.len > 1:
-        try: offset = parseInt(valueToString(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx))) except: offset = 1
+        try: offset = parseInt(valueToString(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx))) except CatchableError: offset = 1
       if expr.wfArgs.len > 2:
         defaultVal = valueToString(evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]], ctx))
       for pos, rowIdx in sortedIdxs:
@@ -2700,7 +2700,7 @@ proc computeWindowValues*(rows: seq[Row], expr: IRExpr, ctx: ExecutionContext = 
       var offset = 1
       var defaultVal = ""
       if expr.wfArgs.len > 1:
-        try: offset = parseInt(valueToString(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx))) except: offset = 1
+        try: offset = parseInt(valueToString(evalExpr(expr.wfArgs[1], rows[sortedIdxs[0]], ctx))) except CatchableError: offset = 1
       if expr.wfArgs.len > 2:
         defaultVal = valueToString(evalExpr(expr.wfArgs[2], rows[sortedIdxs[0]], ctx))
       for pos, rowIdx in sortedIdxs:
@@ -2843,14 +2843,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               var sum = 0.0
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                try: sum += parseFloat(valueToString(v)) except: discard
+                try: sum += parseFloat(valueToString(v)) except CatchableError: discard
               newRow[alias] = $sum
             of irAvg:
               var sum = 0.0
               var count = 0
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                try: sum += parseFloat(valueToString(v)); count += 1 except: discard
+                try: sum += parseFloat(valueToString(v)); count += 1 except CatchableError: discard
               newRow[alias] = if count > 0: $(sum / float(count)) else: "0"
             of irMin:
               var minVal = ""
@@ -2930,7 +2930,7 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
           let fb = parseFloat(valueToString(vb))
           if fa < fb: cmpRes = -1
           elif fa > fb: cmpRes = 1
-        except:
+        except CatchableError:
           cmpRes = cmp(valueToString(va), valueToString(vb))
         if not ascending: cmpRes = -cmpRes
         if cmpRes != 0: return cmpRes
@@ -3022,14 +3022,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             var sum = 0.0
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              try: sum += parseFloat(valueToString(v)) except: discard
+              try: sum += parseFloat(valueToString(v)) except CatchableError: discard
             aggRow[aggKey] = $sum
           of irAvg:
             var sum = 0.0
             var count = 0
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              try: sum += parseFloat(valueToString(v)); count += 1 except: discard
+              try: sum += parseFloat(valueToString(v)); count += 1 except CatchableError: discard
             aggRow[aggKey] = if count > 0: $(sum / float(count)) else: "0"
           of irMin:
             var minVal = ""
@@ -3544,14 +3544,14 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
             var sum = 0.0
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              try: sum += parseFloat(valueToString(v)) except: discard
+              try: sum += parseFloat(valueToString(v)) except CatchableError: discard
             aggResult = $sum
           of irAvg:
             var sum = 0.0
             var count = 0
             for row in matchingRows:
               let v = evalExpr(plan.pivotAgg.aggArgs[0], row, ctx)
-              try: sum += parseFloat(valueToString(v)); count += 1 except: discard
+              try: sum += parseFloat(valueToString(v)); count += 1 except CatchableError: discard
             aggResult = if count > 0: $(sum / float(count)) else: "0"
           of irMin:
             var minVal = ""
@@ -3609,8 +3609,8 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
     let algo = plan.graphAlgo.toLowerAscii()
     let returnCols = plan.graphReturnCols
     let firstNodeId = if g.nodes.len > 0: g.nodes.keys.toSeq[0] else: gengine.NodeId(0)
-    let explicitStart = try: parseUInt(plan.graphStartNode) except: 0'u64
-    let explicitEnd = try: parseUInt(plan.graphEndNode) except: 0'u64
+    let explicitStart = try: parseUInt(plan.graphStartNode) except CatchableError: 0'u64
+    let explicitEnd = try: parseUInt(plan.graphEndNode) except CatchableError: 0'u64
 
     case algo
     of "bfs":
@@ -4034,7 +4034,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
               if fa < fb: return -1
               if fa > fb: return 1
               return 0
-            except:
+            except CatchableError:
               return cmp(valueToString(va), valueToString(vb))
           filteredRows.sort(sortCmp, if asc: Ascending else: Descending)
         if stmt.selLimit != nil:
@@ -4369,7 +4369,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                     ctx.autoIncCounters[counterKey] = intVal + 1
                 finally:
                   release(ctx.sharedLock.lock)
-              except: discard
+              except CatchableError: discard
 
     applyDefaultValues(tbl, mutableFields, mutableValues)
 

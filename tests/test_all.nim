@@ -31,7 +31,11 @@ import barabadb/query/udf
 import barabadb/vector/simd
 import barabadb/core/crossmodal
 import barabadb/core/gossip
-import barabadb/client/client
+# Canonical Nim client (not the deprecated src/barabadb/client).
+# Selective import avoids WireValue clash with barabadb/protocol/wire.
+from baradb/client import parseConnectionString, defaultClientConfig, newBaraClient,
+  newQueryBuilder, newSyncClient, BaraClient, QueryBuilder, ClientConfig, SyncClient,
+  select, `from`, where, join, leftJoin, groupBy, having, orderBy, limit, offset, build, exec
 import barabadb/client/fileops
 import barabadb/fts/multilang as mlang
 import barabadb/protocol/zerocopy

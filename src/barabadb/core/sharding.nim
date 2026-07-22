@@ -337,8 +337,8 @@ proc handleMigrationMessage*(headerLine: string, data: string,
   if parts.len < 3:
     return "ERR invalid migrate header\n"
 
-  let shardId = try: parseInt(parts[1]) except: -1
-  let entryCount = try: parseInt(parts[2]) except: 0
+  let shardId = try: parseInt(parts[1]) except CatchableError: -1
+  let entryCount = try: parseInt(parts[2]) except CatchableError: 0
 
   if shardId < 0 or entryCount < 0:
     return "ERR invalid shard id or entry count\n"

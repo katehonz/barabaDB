@@ -266,12 +266,12 @@ proc healthCheck*(rm: ReplicationManager) =
           sock.readLine(response)
           if response.strip() != "PONG":
             connected = false
-        except:
+        except CatchableError:
           connected = false
-    except:
+    except CatchableError:
       connected = false
     finally:
-      try: sock.close() except: discard
+      try: sock.close() except CatchableError: discard
 
     if not connected:
       acquire(rm.lock)

@@ -61,7 +61,7 @@ proc applyCompactionResult(db: LSMTree, result: compaction.CompactionResult) =
       var sst = loadSSTable(meta.path)
       let name = splitFile(meta.path).name
       # Prefer numeric id from filename; otherwise allocate
-      let parsed = try: parseInt(name) except: -1
+      let parsed = try: parseInt(name) except CatchableError: -1
       if parsed >= 0:
         sst.id = parsed
       else:
@@ -363,7 +363,7 @@ proc main() =
       let parts = seed.strip().split(":")
       if parts.len >= 2:
         let host = parts[0]
-        let port = try: parseInt(parts[1]) except: 0
+        let port = try: parseInt(parts[1]) except CatchableError: 0
         if port > 0:
           let seedNode = newGossipNode(host & ":" & $port, host, port)
           tcpServer.gossipProtocol.join(seedNode)

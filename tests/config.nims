@@ -1,1 +1,2 @@
 --path:"../src"
+--path:"../clients/nim/src"
