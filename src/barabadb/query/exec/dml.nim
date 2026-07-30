@@ -488,3 +488,11 @@ proc applyReplicatedDelete*(ctx: ExecutionContext, fullKey: string) =
   if found and table.len > 0:
     removeIndexesForRow(ctx, table, fullKey, cast[string](existing))
   ctx.db.delete(fullKey)
+
+proc isBenignRaftReplayError*(msg: string): bool =
+  ## Leader re-applies committed DDL/DML after local execution; followers may
+  ## also see IF EXISTS / race re-applies. Treat common idempotent failures as OK.
+  let m = msg.toLower()
+  "already exists" in m or "does not exist" in m or
+    "duplicate" in m or "unique" in m or
+    "unknown table" in m or "no such table" in m

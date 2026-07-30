@@ -207,6 +207,14 @@ proc valueToWire(val: string, colType: string): WireValue =
     return WireValue(kind: fkJson, jsonVal: val)
   return WireValue(kind: fkString, strVal: val)
 
+proc waitRaftCommit(node: RaftNode, lastIdx: uint64, timeoutMs: int): Future[(bool, string)] {.async.} =
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  while node.commitIndex < lastIdx and getMonoTime() < deadline:
+    await sleepAsync(10)
+  if node.commitIndex < lastIdx:
+    return (false, "raft commit timeout")
+  return (true, "")
+
 proc appendWriteToRaft*(node: RaftNode, kvPairs: seq[(string, seq[byte])],
                         timeoutMs: int): Future[(bool, string)] {.async.} =
   ## C3b leader write path: append each written KV pair to the Raft log and
@@ -226,12 +234,17 @@ proc appendWriteToRaft*(node: RaftNode, kvPairs: seq[(string, seq[byte])],
     if entry.index == 0:
       return (false, "lost leadership during raft append")
     lastIdx = entry.index
-  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
-  while node.commitIndex < lastIdx and getMonoTime() < deadline:
-    await sleepAsync(10)
-  if node.commitIndex < lastIdx:
-    return (false, "raft commit timeout")
-  return (true, "")
+  return await waitRaftCommit(node, lastIdx, timeoutMs)
+
+proc appendDdlToRaft*(node: RaftNode, sql: string,
+                      timeoutMs: int): Future[(bool, string)] {.async.} =
+  ## C3c schema path: append one "ddl" log entry with the original SQL text.
+  ## Followers re-execute it via applyCommand (executor, no raft recursion).
+  ## MUST be called outside the storage gate (same as appendWriteToRaft).
+  let entry = node.appendLog("ddl", cast[seq[byte]](sql))
+  if entry.index == 0:
+    return (false, "lost leadership during raft append")
+  return await waitRaftCommit(node, entry.index, timeoutMs)
 
 proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[],
                    replication: ReplicationManager = nil,
@@ -244,6 +257,7 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
   var qr = QueryResult()
   var msg = ""
   var kvPairs: seq[(string, seq[byte])] = @[]
+  var needsRaftDdl = false
   withStorageGate:
     try:
       let tokens = tokenize(query)
@@ -252,24 +266,23 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
       if astNode.stmts.len == 0:
         return (true, QueryResult(), "")
 
-      # C3b: writes go through the Raft log — only the leader may accept them.
-      # Inspect every statement so "SELECT 1; INSERT ..." cannot bypass the gate.
-      # Raft state machine is wired only to the default database (v1).
-      if raftNode != nil:
-        var hasWrite = false
-        for stmt in astNode.stmts:
-          if isWrite(stmt):
-            hasWrite = true
-            break
-        if hasWrite:
-          let dbName = if ctx.currentDatabase.len > 0: ctx.currentDatabase else: "default"
-          if dbName != "default":
-            return (false, QueryResult(),
-              "raft writes only supported on the 'default' database; current is '" &
-              dbName & "'")
-          if raftNode.state != rsLeader:
-            let who = if raftNode.leaderId.len > 0: raftNode.leaderId else: "none elected"
-            return (false, QueryResult(), "not leader; leader is '" & who & "'")
+      # C3b/C3c: DML + schema DDL go through the Raft log — only the leader
+      # of the default database may accept them. Inspect every statement so
+      # "SELECT 1; INSERT/CREATE ..." cannot bypass the gate.
+      var hasWrite = false
+      needsRaftDdl = false
+      for stmt in astNode.stmts:
+        if isWrite(stmt): hasWrite = true
+        if isRaftDdl(stmt): needsRaftDdl = true
+      if raftNode != nil and (hasWrite or needsRaftDdl):
+        let dbName = if ctx.currentDatabase.len > 0: ctx.currentDatabase else: "default"
+        if dbName != "default":
+          return (false, QueryResult(),
+            "raft writes only supported on the 'default' database; current is '" &
+            dbName & "'")
+        if raftNode.state != rsLeader:
+          let who = if raftNode.leaderId.len > 0: raftNode.leaderId else: "none elected"
+          return (false, QueryResult(), "not leader; leader is '" & who & "'")
 
       let res = executor.executeQuery(ctx, astNode, params)
       if res.success:
@@ -322,12 +335,19 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
         return (false, QueryResult(), res.message)
     except Exception as e:
       return (false, QueryResult(), e.msg)
-  # C3b: leader appends writes to the Raft log and waits for majority commit
-  # (outside the storage gate — see appendWriteToRaft).
-  if ok and raftNode != nil and kvPairs.len > 0:
-    let (raftOk, raftErr) = await appendWriteToRaft(raftNode, kvPairs, raftWriteTimeoutMs)
-    if not raftOk:
-      return (false, QueryResult(), raftErr)
+  # Raft log append + majority wait (outside the storage gate).
+  # DDL batches ship the original SQL once (re-executed on apply). Pure DML
+  # ships KV pairs. Mixed DDL+DML in one query uses the DDL path only so the
+  # whole batch is re-run in order on followers.
+  if ok and raftNode != nil:
+    if needsRaftDdl:
+      let (raftOk, raftErr) = await appendDdlToRaft(raftNode, query, raftWriteTimeoutMs)
+      if not raftOk:
+        return (false, QueryResult(), raftErr)
+    elif kvPairs.len > 0:
+      let (raftOk, raftErr) = await appendWriteToRaft(raftNode, kvPairs, raftWriteTimeoutMs)
+      if not raftOk:
+        return (false, QueryResult(), raftErr)
   return (ok, qr, msg)
 
 # ----------------------------------------------------------------------

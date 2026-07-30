@@ -317,8 +317,23 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                     row[colName] = w.binRight.strVal
                     rows.add(row)
                   return okResult(rows, coveredCols)
-                # Fetch actual row data from LSM
-                let rows = execPointRead(ctx, stmt.selFrom.fromTable, colName & "=" & w.binRight.strVal)
+                # Fetch full rows via the LSM keys stored in the index — never
+                # reconstruct the primary key from the filter column (secondary
+                # indexes are not the PK).
+                var rows: seq[Row] = @[]
+                for entry in entries:
+                  if entry.lsmKey.len == 0: continue
+                  let (found, val) = ctx.db.get(entry.lsmKey)
+                  if found:
+                    var row = parseRowDataToValueRow(cast[string](val))
+                    let prefix = stmt.selFrom.fromTable & "."
+                    if entry.lsmKey.startsWith(prefix):
+                      let rest = entry.lsmKey[prefix.len..^1]
+                      row["$key"] = rest
+                      let eqPos = rest.find('=')
+                      if eqPos >= 0:
+                        row[rest[0..<eqPos]] = rest[eqPos+1..^1]
+                    rows.add(row)
                 let tbl = ctx.getTableDef(stmt.selFrom.fromTable)
                 var cols: seq[string] = @[]
                 for c in tbl.columns: cols.add(c.name)
@@ -1748,6 +1763,22 @@ proc restoreEngines*(ctx: ExecutionContext) =
       ctx.graphs[name] = g
     except CatchableError as e:
       warn("restoreEngines: graph rebuild failed for '" & name & "': " & e.msg)
+
+proc applyReplicatedDdl*(ctx: ExecutionContext, sql: string) {.gcsafe.} =
+  ## Raft "ddl" log entry: re-execute the original SQL on this node's context.
+  ## Called from applyCommand (no server/raft layer — must not re-append).
+  ## Leader double-apply failures (already exists / does not exist) are ignored
+  ## so the state machine keeps advancing. {.cast(gcsafe).} is required because
+  ## executeQuery touches the registry factory (same pattern as other engine
+  ## callbacks under the storage gate on the single-threaded apply path).
+  {.cast(gcsafe).}:
+    try:
+      let tokens = qlex.tokenize(sql)
+      let astNode = qpar.parse(tokens)
+      if astNode.stmts.len == 0: return
+      discard executeQuery(ctx, astNode)
+    except CatchableError:
+      discard
 
 # ----------------------------------------------------------------------
 # Hook wiring — breaks the module cycle between executor and the exec/*

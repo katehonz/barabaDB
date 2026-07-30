@@ -17,7 +17,7 @@ Leader election и log репликация през TCP. Включване:
 | `BARADB_RAFT_PEERS` | Списък `id@host:port` (вкл. себе си) |
 | `BARADB_RAFT_WRITE_TIMEOUT_MS` | Макс. изчакване за majority commit при SQL записи (по подразбиране 5000) |
 
-Когато Raft е активен, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` и транзакционен `COMMIT`) се приема само от лидера на **`default`** базата: KV двойките се добавят в Raft лога и клиентът чака majority commit. Followers отказват записи с `not leader; leader is '…'`. Записи към друга database name се отказват (`raft writes only supported on the 'default' database`). Приложените записи обновяват LSM + secondary B-tree/FTS/HNSW индекси и in-memory графи на всеки възел. DDL (напр. `CREATE TABLE`) още не се репликира — схемата трябва да се създаде на всеки възел.
+Когато Raft е активен, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` и транзакционен `COMMIT`) и schema DDL (`CREATE`/`DROP`/`ALTER` table, index, view, graph, …) се приемат само от лидера на **`default`** базата. DML отива като put/delete; DDL — като `ddl` запис с оригиналния SQL, преизпълнен на всеки възел при apply. Followers отказват и двете с `not leader; leader is '…'`. Записи към друга database name се отказват. `CREATE`/`DROP DATABASE` не се репликират през raft (multi-DB е извън v1). Приложен DML обновява и secondary B-tree/FTS/HNSW индекси и in-memory графи.
 
 ```nim
 import barabadb/core/raft

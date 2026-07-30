@@ -2706,6 +2706,24 @@ suite "Raft SQL Write Path":
     check res.keyValuePairs.len == 1
     check res.keyValuePairs[0][1].len == 0
 
+  test "appendDdlToRaft fails when node is not leader":
+    var n = newRaftNode("n1", @["n2"], raftPort = 29113)
+    let (ok, err) = waitFor appendDdlToRaft(n,
+      "CREATE TABLE t (id INT)", timeoutMs = 200)
+    check not ok
+    check "lost leadership" in err
+
+  test "applyReplicatedDdl creates table on empty context":
+    var testDir = getTempDir() / "baradb_raft_ddl_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
+    createDir(testDir)
+    var db = newLSMTree(testDir)
+    var ctx = qexec.newExecutionContext(db)
+    applyReplicatedDdl(ctx, "CREATE TABLE ddl_t (id INT PRIMARY KEY, name STRING)")
+    check "ddl_t" in ctx.tables
+    # Idempotent re-apply (leader double-apply)
+    applyReplicatedDdl(ctx, "CREATE TABLE ddl_t (id INT PRIMARY KEY, name STRING)")
+    check "ddl_t" in ctx.tables
+
   test "appendWriteToRaft fails when node is not leader":
     var n = newRaftNode("n1", @["n2"], raftPort = 29111)
     # Still a follower — appendLog returns index 0.

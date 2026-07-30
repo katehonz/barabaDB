@@ -211,21 +211,62 @@ proc runWritesScenario() =
       return
     echo "leader elected: ", nodes[leaderIdx].id, " (term ", leaderTerm, ")"
 
-    # Schema: CREATE TABLE / INDEX are not raft writes (no kvPairs), and
-    # _schema keys are not replicated — create them locally on every node.
-    for i in 0 ..< nodes.len:
-      let db = openClient(nodes[i].clientPort)
+    let followerIdx = (if leaderIdx == 0: 1 else: 0)
+
+    # Schema: CREATE TABLE / INDEX go through the raft "ddl" log (C3c).
+    # Create only on the leader; followers must learn schema via apply.
+    block:
+      let db = openClient(nodes[leaderIdx].clientPort)
       try:
         db.exec(sql"CREATE TABLE rw_test (id INT PRIMARY KEY, name STRING)")
         db.exec(sql"CREATE INDEX idx_rw_name ON rw_test (name)")
       except CatchableError as e:
-        echo "CREATE TABLE/INDEX failed on ", nodes[i].id, ": ", e.msg
+        echo "leader CREATE TABLE/INDEX failed: ", e.msg
         dumpAll(nodes)
         fail()
         return
       db.close()
+    echo "leader schema committed via raft ddl"
 
-    let followerIdx = (if leaderIdx == 0: 1 else: 0)
+    # Follower rejection of DDL (not just DML).
+    block:
+      let db = openClient(nodes[followerIdx].clientPort)
+      var rejected = false
+      try:
+        db.exec(sql"CREATE TABLE should_fail (id INT)")
+      except CatchableError as e:
+        rejected = "not leader" in e.msg
+        if not rejected:
+          echo "follower CREATE failed without 'not leader': ", e.msg
+      db.close()
+      if not rejected:
+        echo "follower CREATE was not rejected with 'not leader'"
+        dumpAll(nodes)
+        fail()
+        return
+    echo "follower CREATE rejected with 'not leader'"
+
+    # Wait until the follower has applied CREATE TABLE (SELECT no longer
+    # errors with unknown table). Deadline 5s.
+    block:
+      let db = openClient(nodes[followerIdx].clientPort)
+      defer: db.close()
+      let start = getTime()
+      var ready = false
+      while getTime() - start < initDuration(seconds = 5):
+        try:
+          discard db.getAllRows(sql"SELECT * FROM rw_test")
+          ready = true
+          break
+        except CatchableError:
+          sleep(100)
+      if not ready:
+        echo "follower ", nodes[followerIdx].id,
+             " never applied CREATE TABLE within 5s"
+        dumpAll(nodes)
+        fail()
+        return
+    echo "schema replicated to follower ", nodes[followerIdx].id
 
     # Leader write: INSERT goes through the raft log and waits for majority
     # commit before responding (Task 2) — expect success.

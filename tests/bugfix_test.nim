@@ -408,3 +408,11 @@ suite "Raft write classification":
     for s in ast.stmts:
       if isWrite(s): anyWrite = true
     check anyWrite
+
+  test "isRaftDdl covers schema but not CREATE DATABASE":
+    check isRaftDdl(parse("CREATE TABLE t (id INT)").stmts[0])
+    check isRaftDdl(parse("CREATE INDEX i ON t (id)").stmts[0])
+    check isRaftDdl(parse("DROP TABLE t").stmts[0])
+    check not isRaftDdl(parse("CREATE DATABASE other").stmts[0])
+    check not isRaftDdl(parse("INSERT INTO t (id) VALUES (1)").stmts[0])
+    check not isRaftDdl(parse("SELECT 1").stmts[0])

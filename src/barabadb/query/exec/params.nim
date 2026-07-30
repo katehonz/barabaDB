@@ -179,6 +179,17 @@ proc isDDL*(stmt: Node): bool =
   else:
     result = false
 
+proc isRaftDdl*(stmt: Node): bool =
+  ## Schema changes that go through the Raft log when clustering is on.
+  ## CREATE/DROP DATABASE are excluded — multi-DB is out of scope for v1 raft
+  ## (state machine is wired only to the default database).
+  if not isDDL(stmt): return false
+  case stmt.kind
+  of nkCreateDatabase, nkDropDatabase:
+    result = false
+  else:
+    result = true
+
 proc isWrite*(stmt: Node): bool =
   ## True for statements that mutate stored data. `nkCommitTxn` is included
   ## because COMMIT emits the transaction's buffered kvPairs.
