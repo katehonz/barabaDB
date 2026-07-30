@@ -203,6 +203,32 @@ proc getDatabaseInfo*(reg: DatabaseRegistry, name: string): DatabaseInfo =
     return reg.databases[name]
   return nil
 
+proc reopenDatabase*(reg: DatabaseRegistry, name: string): bool =
+  ## Reopen a database from its on-disk directory, swapping the new LSMTree
+  ## and ctx into the EXISTING DatabaseInfo slot so captured references (e.g.
+  ## the raft applyCommand closure) see the new state.
+  ## Minimal API added for raft InstallSnapshot restore: the caller must have
+  ## closed info.db first (snapshot restore closes it before swapping the data
+  ## directory); this proc does not close.
+  ## Returns false if the database is unknown or the reopen fails.
+  acquire(reg.lock)
+  let info = if name in reg.databases: reg.databases[name] else: nil
+  release(reg.lock)
+  if info == nil:
+    return false
+  try:
+    let dbDir = reg.dataRoot / name
+    let db = openLsmForRegistry(reg, dbDir)
+    let ctx = reg.ctxFactory(db, reg)
+    info.db = db
+    info.ctx = ctx
+    return true
+  except CatchableError as e:
+    # echo instead of logging: callers include gcsafe raft callbacks, and
+    # core/logging's info/warn are not gcsafe.
+    echo "[registry] Error reopening database '", name, "': ", e.msg
+    return false
+
 proc closeAll*(reg: DatabaseRegistry) =
   acquire(reg.lock)
   defer: release(reg.lock)

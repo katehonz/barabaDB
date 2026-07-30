@@ -77,6 +77,15 @@ type
     peerAddrs*: Table[string, tuple[host: string, port: int]]
     raftPort*: int
     dataDir*: string
+    ## InstallSnapshot follower receive. snapChunkBytes caps a single chunk
+    ## (from BARADB_RAFT_SNAP_CHUNK_KB, default 262144); snapIncomingId /
+    ## snapIncomingFile track the archive currently being assembled under
+    ## dataDir/snap_incoming/.
+    snapChunkBytes*: int
+    restoreSnapshot*: proc(archivePath: string, baseIndex: uint64,
+                           baseTerm: uint64): bool {.gcsafe.}
+    snapIncomingId*: uint64
+    snapIncomingFile*: string
 
   RaftMessageKind* = enum
     rmkRequestVote
@@ -208,6 +217,9 @@ proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0,
     peerAddrs: initTable[string, tuple[host: string, port: int]](),
     raftPort: raftPort,
     dataDir: dataDir,
+    snapChunkBytes: 262144,
+    snapIncomingId: 0,
+    snapIncomingFile: "",
   )
   result.loadState()
 
@@ -425,6 +437,87 @@ proc handleAppendEntries*(node: RaftNode, msg: RaftMessage): RaftMessage =
 
   reply.success = true
   reply.matchIdx = node.lastLogIndex
+  return reply
+
+proc handleInstallSnapshot*(node: RaftNode, msg: RaftMessage): RaftMessage =
+  ## Follower side of InstallSnapshot: assemble the chunk stream into a temp
+  ## archive under `dataDir/snap_incoming/`, then hand the completed archive
+  ## to the restoreSnapshot callback. Chunks arrive in order from a single
+  ## leader over one socket, so we append sequentially and only sanity-check
+  ## that snapOffset equals the number of bytes assembled so far.
+  ##
+  ## NOTE: this runs on the async event loop and restoreSnapshot performs
+  ## blocking disk I/O (archive extract + DB reopen). Implementations must be
+  ## fast, or defer the heavy work; the baradadb.nim wiring decides.
+  var reply = RaftMessage(
+    kind: rmkInstallSnapshotReply,
+    term: node.currentTerm,
+    senderId: node.id,
+    success: false,
+    matchIdx: node.lastSnapshotIndex,
+  )
+  if msg.term < node.currentTerm:
+    return reply
+  if msg.term > node.currentTerm:
+    node.becomeFollower(msg.term)
+  node.leaderId = msg.senderId
+
+  # Chunk size cap (deferred from the wire-protocol task).
+  if msg.snapData.len > node.snapChunkBytes or node.dataDir.len == 0:
+    return reply
+
+  let snapDir = node.dataDir / "snap_incoming"
+  if msg.snapId != node.snapIncomingId:
+    # New snapshot generation: discard any partial assembly and restart.
+    if msg.snapOffset != 0:
+      return reply
+    createDir(snapDir)
+    node.snapIncomingId = msg.snapId
+    node.snapIncomingFile = snapDir / "snap_" & $msg.snapId & ".tar.gz"
+    let f = open(node.snapIncomingFile, fmWrite)  # truncate any leftover
+    f.close()
+
+  if node.snapIncomingFile.len == 0:
+    return reply
+
+  let assembled = getFileSize(node.snapIncomingFile)
+  if msg.snapOffset != uint64(assembled):
+    # Gap or overlap: reset so the leader restarts the transfer.
+    removeFile(node.snapIncomingFile)
+    node.snapIncomingId = 0
+    node.snapIncomingFile = ""
+    return reply
+
+  if msg.snapData.len > 0:
+    let f = open(node.snapIncomingFile, fmAppend)
+    try:
+      discard f.writeBuffer(addr msg.snapData[0], msg.snapData.len)
+    finally:
+      f.close()
+
+  if not msg.snapDone:
+    reply.success = true
+    return reply
+
+  # Transfer complete: restore the data dir and adopt the snapshot base.
+  if node.restoreSnapshot == nil or
+      not node.restoreSnapshot(node.snapIncomingFile,
+                               msg.prevLogIndex, msg.prevLogTerm):
+    removeFile(node.snapIncomingFile)
+    node.snapIncomingId = 0
+    node.snapIncomingFile = ""
+    return reply
+
+  node.lastSnapshotIndex = msg.prevLogIndex
+  node.lastSnapshotTerm = msg.prevLogTerm
+  node.commitIndex = node.lastSnapshotIndex
+  node.lastApplied = node.lastSnapshotIndex
+  node.log = @[]
+  node.snapIncomingId = 0
+  node.snapIncomingFile = ""
+  node.saveState()
+  reply.success = true
+  reply.matchIdx = node.lastSnapshotIndex
   return reply
 
 proc requestVote*(node: RaftNode): seq[RaftMessage] =
@@ -839,9 +932,15 @@ proc processMessage*(net: RaftNetwork, msg: RaftMessage) {.async.} =
     await net.send(msg.senderId, reply)
   of rmkAppendEntriesReply:
     net.node.handleAppendReply(msg.senderId, msg)
-  of rmkInstallSnapshot, rmkInstallSnapshotReply:
-    # Wire protocol only (v1.3); snapshot transfer behavior lands in a
-    # follow-up task. Ignore until then.
+  of rmkInstallSnapshot:
+    # Same election-timer rule as AppendEntries: only a plausible current
+    # leader resets it.
+    if msg.term >= net.node.currentTerm:
+      net.timer.resetTimeout()
+    let reply = net.node.handleInstallSnapshot(msg)
+    await net.send(msg.senderId, reply)
+  of rmkInstallSnapshotReply:
+    # Leader side of snapshot transfer lands in a follow-up task.
     discard
 
 proc recvExact*(client: AsyncSocket, size: int): Future[string] {.async.} =

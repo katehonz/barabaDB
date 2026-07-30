@@ -14,6 +14,7 @@ import barabadb/core/types
 import barabadb/core/mvcc
 import barabadb/core/deadlock
 import barabadb/core/config
+import barabadb/core/backup
 import barabadb/core/server
 import barabadb/core/columnar
 import barabadb/core/raft
@@ -2702,6 +2703,141 @@ suite "Raft InstallSnapshot Protocol":
     check decoded.snapOffset == 0
     check decoded.snapData.len == 0
     check not decoded.snapDone
+
+suite "Raft InstallSnapshot Receive":
+  test "follower assembles chunks, restores snapshot, resets state":
+    proc scenario() =
+      let tmp = getTempDir() / "baradb_snaprx_ok_" & $getCurrentProcessId()
+      removeDir(tmp)
+      createDir(tmp)
+      defer: removeDir(tmp)
+
+      # Real tar.gz fixture with a marker file
+      let srcDb = tmp / "srcdb"
+      createDir(srcDb)
+      writeFile(srcDb / "marker.txt", "snapshot-payload")
+      let archivePath = tmp / "snap.tar.gz"
+      check backupDataDir(srcDb, archivePath)
+      let archiveBytes = readFile(archivePath)
+      check archiveBytes.len > 0
+
+      let raftDir = tmp / "raft"
+      var node = newRaftNode("follower-1", @[], dataDir = raftDir)
+      node.currentTerm = 5
+      node.log.add(LogEntry(term: 3, index: 10, command: "put", data: @[byte 1]))
+      node.commitIndex = 10
+
+      var gotPath = ""
+      var gotBaseIndex = 0'u64
+      var gotBaseTerm = 0'u64
+      node.restoreSnapshot = proc(p: string, bi: uint64, bt: uint64): bool {.gcsafe.} =
+        gotPath = p
+        gotBaseIndex = bi
+        gotBaseTerm = bt
+        # Assembled archive must match the original byte-for-byte
+        result = readFile(p) == archiveBytes
+
+      let half = archiveBytes.len div 2
+      let reply1 = node.handleInstallSnapshot(RaftMessage(
+        kind: rmkInstallSnapshot, term: 5, senderId: "leader-1",
+        prevLogIndex: 40, prevLogTerm: 4,
+        snapId: 7, snapOffset: 0,
+        snapData: cast[seq[byte]](archiveBytes[0 ..< half]), snapDone: false))
+      check reply1.kind == rmkInstallSnapshotReply
+      check reply1.success
+
+      let reply2 = node.handleInstallSnapshot(RaftMessage(
+        kind: rmkInstallSnapshot, term: 5, senderId: "leader-1",
+        prevLogIndex: 40, prevLogTerm: 4,
+        snapId: 7, snapOffset: uint64(half),
+        snapData: cast[seq[byte]](archiveBytes[half .. ^1]), snapDone: true))
+      check reply2.success
+      check reply2.matchIdx == 40
+
+      check gotPath.len > 0
+      check "snap_incoming" in gotPath
+      check gotBaseIndex == 40
+      check gotBaseTerm == 4
+      check node.lastSnapshotIndex == 40
+      check node.lastSnapshotTerm == 4
+      check node.commitIndex == 40
+      check node.lastApplied == 40
+      check node.log.len == 0
+
+      # State was persisted: a fresh node on the same dir sees the snapshot base
+      let reloaded = newRaftNode("follower-1", @[], dataDir = raftDir)
+      check reloaded.lastSnapshotIndex == 40
+      check reloaded.lastSnapshotTerm == 4
+      check reloaded.log.len == 0
+    scenario()
+
+  test "failed restore leaves state untouched and removes temp file":
+    proc scenario() =
+      let tmp = getTempDir() / "baradb_snaprx_fail_" & $getCurrentProcessId()
+      removeDir(tmp)
+      createDir(tmp)
+      defer: removeDir(tmp)
+
+      let raftDir = tmp / "raft"
+      var node = newRaftNode("follower-1", @[], dataDir = raftDir)
+      node.currentTerm = 5
+      node.log.add(LogEntry(term: 2, index: 3, command: "put", data: @[byte 9]))
+      node.restoreSnapshot = proc(p: string, bi: uint64, bt: uint64): bool {.gcsafe.} =
+        false
+
+      let reply = node.handleInstallSnapshot(RaftMessage(
+        kind: rmkInstallSnapshot, term: 5, senderId: "leader-1",
+        prevLogIndex: 8, prevLogTerm: 2,
+        snapId: 1, snapOffset: 0,
+        snapData: @[byte 1, 2, 3], snapDone: true))
+      check not reply.success
+      check node.lastSnapshotIndex == 0
+      check node.lastSnapshotTerm == 0
+      check node.commitIndex == 0
+      check node.log.len == 1
+      check not fileExists(raftDir / "snap_incoming" / "snap_1.tar.gz")
+    scenario()
+
+  test "oversized chunk is rejected":
+    let tmp = getTempDir() / "baradb_snaprx_cap_" & $getCurrentProcessId()
+    removeDir(tmp)
+    createDir(tmp)
+    defer: removeDir(tmp)
+
+    var node = newRaftNode("follower-1", @[], dataDir = tmp / "raft")
+    node.currentTerm = 1
+    node.snapChunkBytes = 4
+    let reply = node.handleInstallSnapshot(RaftMessage(
+      kind: rmkInstallSnapshot, term: 1, senderId: "leader-1",
+      prevLogIndex: 1, prevLogTerm: 1,
+      snapId: 1, snapOffset: 0,
+      snapData: @[byte 1, 2, 3, 4, 5], snapDone: false))
+    check not reply.success
+    check node.snapIncomingId == 0
+
+  test "out-of-order offset is rejected and assembly restarts on new snapId":
+    let tmp = getTempDir() / "baradb_snaprx_off_" & $getCurrentProcessId()
+    removeDir(tmp)
+    createDir(tmp)
+    defer: removeDir(tmp)
+
+    let raftDir = tmp / "raft"
+    var node = newRaftNode("follower-1", @[], dataDir = raftDir)
+    node.currentTerm = 1
+    let ok1 = node.handleInstallSnapshot(RaftMessage(
+      kind: rmkInstallSnapshot, term: 1, senderId: "leader-1",
+      prevLogIndex: 2, prevLogTerm: 1,
+      snapId: 3, snapOffset: 0,
+      snapData: @[byte 65, 66], snapDone: false))
+    check ok1.success
+    # Gap: offset 5 while only 2 bytes assembled
+    let bad = node.handleInstallSnapshot(RaftMessage(
+      kind: rmkInstallSnapshot, term: 1, senderId: "leader-1",
+      prevLogIndex: 2, prevLogTerm: 1,
+      snapId: 3, snapOffset: 5,
+      snapData: @[byte 67], snapDone: false))
+    check not bad.success
+    check node.snapIncomingId == 0
 
 suite "Raft TLS Transport":
   test "2-node election over TLS":

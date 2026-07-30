@@ -23,6 +23,7 @@ import barabadb/core/gossip
 import barabadb/core/replication
 import barabadb/core/disttxn
 import barabadb/core/registry
+import barabadb/core/backup
 import barabadb/tools/repair
 import barabadb/tools/migrate
 
@@ -365,6 +366,8 @@ proc main() =
     raftNode.peerAddrs = config.raftPeerAddrs
     if config.raftLogMaxEntries > 0:
       raftNode.logMaxEntries = config.raftLogMaxEntries
+    if config.raftSnapChunkKb > 0:
+      raftNode.snapChunkBytes = config.raftSnapChunkKb * 1024
     tcpServer.raftNode = raftNode  # C3b: executeQuery rejects writes on followers
     httpServer.raftNode = raftNode  # /metrics + /health raft gauges
     # Wire state machine: committed entries update LSM + secondary indexes
@@ -381,6 +384,34 @@ proc main() =
           applyReplicatedDelete(ctx, cast[string](data))
         elif cmd == "ddl":
           applyReplicatedDdl(ctx, cast[string](data))
+
+    # Follower InstallSnapshot restore: swap the default DB's data directory
+    # with the received archive, then reopen it into the same DatabaseInfo
+    # slot (the applyCommand closure above keeps working through the swap).
+    # Runs on the raft async event loop and performs blocking disk I/O
+    # (tar extract + LSM close/reopen); snapshot installs are rare, so we
+    # accept the stall rather than adding a worker round-trip.
+    let defaultDbDir = config.dataDir / "databases" / "default"
+    raftNode.restoreSnapshot = proc(archivePath: string, baseIndex: uint64,
+                                    baseTerm: uint64): bool {.gcsafe.} =
+      # NOTE: core/logging's info/warn are not gcsafe (global logger), so
+      # this callback stays silent; restoreDataDir echoes progress itself.
+      echo "[raft] Installing snapshot (base index ", baseIndex,
+           ", base term ", baseTerm, ")"
+      # gcsafe cast: this runs on the raft event-loop thread (same thread as
+      # the rest of the server); the registry ctxFactory type is not marked
+      # gcsafe, which would otherwise reject the call.
+      {.cast(gcsafe).}:
+        try:
+          defaultDbInfo.db.close()
+          # restoreDataDir moves the old dir aside and extracts the archive; on
+          # extraction failure it rolls back automatically. Reopen whatever is
+          # on disk either way so the node is not left with a closed DB.
+          let restored = restoreDataDir(archivePath, defaultDbDir)
+          result = registry.reopenDatabase("default") and restored
+        except CatchableError as e:
+          echo "[raft] Snapshot restore failed: ", e.msg
+          result = false
 
     # Wire RAFT ↔ DistTxn
     wireRaftDistTxn(raftNode, tcpServer)
