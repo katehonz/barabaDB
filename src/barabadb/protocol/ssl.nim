@@ -29,10 +29,14 @@ proc newTLSConfig*(certFile: string, keyFile: string, caFile: string = "",
 proc newTLSContext*(config: TLSConfig): TLSContext =
   result = TLSContext(config: config)
   if fileExists(config.certFile) and fileExists(config.keyFile):
+    # caFile is only honored by newContext when verifyPeer is true
+    # (verifyMode != CVerifyNone); a missing CA file then raises IOError,
+    # which is the desired fail-closed behavior.
     result.sslCtx = newContext(
       certFile = config.certFile,
       keyFile = config.keyFile,
       verifyMode = if config.verifyPeer: CVerifyPeer else: CVerifyNone,
+      caFile = config.caFile,
     )
   else:
     raise newException(IOError, "TLS certificate or key file not found: " &
@@ -40,7 +44,11 @@ proc newTLSContext*(config: TLSConfig): TLSContext =
 
 proc wrapClient*(tls: TLSContext, socket: AsyncSocket) {.inline.} =
   if tls.sslCtx != nil:
-    tls.sslCtx.wrapSocket(socket)
+    # wrapConnectedSocket (asyncnet overload) sets connect state; the
+    # handshake itself is driven lazily by the first send/recv. Plain
+    # wrapSocket leaves the SSL handle in SSL_ST_BEFORE and the first
+    # SSL_write fails with "uninitialized".
+    tls.sslCtx.wrapConnectedSocket(socket, handshakeAsClient)
 
 proc wrapServer*(tls: TLSContext, socket: AsyncSocket) {.inline.} =
   if tls.sslCtx != nil:

@@ -12,6 +12,7 @@ import std/endians
 import std/os
 import logging
 import ../protocol/wire
+import ../protocol/ssl
 
 type
   RaftState* = enum
@@ -734,13 +735,16 @@ type
     running*: bool
     peerSockets*: Table[string, AsyncSocket]
     timer*: ElectionTimer
+    ## Optional TLS context; nil = plaintext (default, pre-TLS behavior).
+    tls*: TLSContext
 
-proc newRaftNetwork*(node: RaftNode): RaftNetwork =
+proc newRaftNetwork*(node: RaftNode, tls: TLSContext = nil): RaftNetwork =
   RaftNetwork(
     node: node,
     running: false,
     peerSockets: initTable[string, AsyncSocket](),
     timer: newElectionTimer(node, node.electionTimeout),
+    tls: tls,
   )
 
 const RaftConnectTimeoutMs = 200
@@ -759,6 +763,12 @@ proc connectToPeer(net: RaftNetwork, peerId: string) {.async.} =
     if not ok:
       sock.close()
       return
+    if net.tls != nil:
+      try:
+        net.tls.wrapClient(sock)
+      except CatchableError:
+        try: sock.close() except CatchableError: discard
+        return
     net.peerSockets[peerId] = sock
   except CatchableError:
     if sock != nil:
@@ -866,6 +876,13 @@ proc run*(net: RaftNetwork) {.async.} =
   while net.running:
     try:
       let client = await net.socket.accept()
+      if net.tls != nil:
+        try:
+          net.tls.wrapServer(client)
+        except CatchableError:
+          # Handshake failed (e.g. plaintext dial) — drop, no protocol effect.
+          client.close()
+          continue
       asyncCheck net.receiveLoop(client)
     except CatchableError:
       break

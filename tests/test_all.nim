@@ -2607,6 +2607,96 @@ suite "Raft Network Transport":
       check replyMsg.kind == rmkRequestVoteReply
       check replyMsg.success
 
+suite "Raft TLS Transport":
+  test "2-node election over TLS":
+    let certDir = getTempDir() / "baradb_test_raft_tls"
+    let (certPath, keyPath) = generateSelfSignedCert(certDir, "raft-tls.local")
+    if certPath.len == 0:
+      skip()  # openssl unavailable
+    else:
+      let tls = newTLSContext(newTLSConfig(certPath, keyPath))
+      var n1 = newRaftNode("n1", @["n2"], raftPort = 29301)
+      var n2 = newRaftNode("n2", @["n1"], raftPort = 29302)
+      n1.electionTimeout = 150
+      n2.electionTimeout = 350
+      n1.peerAddrs["n2"] = ("127.0.0.1", 29302)
+      n2.peerAddrs["n1"] = ("127.0.0.1", 29301)
+
+      let net1 = newRaftNetwork(n1, tls)
+      let net2 = newRaftNetwork(n2, tls)
+
+      asyncCheck net1.run()
+      asyncCheck net2.run()
+      waitFor sleepAsync(50)
+
+      # No manual ticks — timerLoop drives the election over TLS.
+      var leaderCount = 0
+      var waited = 0
+      while waited < 3000:
+        leaderCount = 0
+        if n1.isLeader: inc leaderCount
+        if n2.isLeader: inc leaderCount
+        if leaderCount == 1: break
+        waitFor sleepAsync(100)
+        waited += 100
+
+      net1.stop()
+      net2.stop()
+      waitFor sleepAsync(50)
+
+      check leaderCount == 1
+
+  test "plaintext dial to a TLS raft port has no protocol effect":
+    let certDir = getTempDir() / "baradb_test_raft_tls"
+    let (certPath, keyPath) = generateSelfSignedCert(certDir, "raft-tls.local")
+    if certPath.len == 0:
+      skip()  # openssl unavailable
+    else:
+      let tls = newTLSContext(newTLSConfig(certPath, keyPath))
+      var n = newRaftNode("srv", @["cli"], raftPort = 29311)
+      n.electionTimeout = 60000  # keep the server passive during the test
+      n.peerAddrs["cli"] = ("127.0.0.1", 29312)
+      let net = newRaftNetwork(n, tls)
+      asyncCheck net.run()
+      waitFor sleepAsync(50)
+
+      let termBefore = n.currentTerm
+
+      # A plaintext client sends a perfectly valid serialized raft frame; the
+      # bytes fail the TLS handshake, so nothing reaches the state machine.
+      let voteReq = RaftMessage(kind: rmkRequestVote, term: 42, senderId: "cli")
+      let data = serialize(voteReq)
+      var frame = newSeq[byte](4 + data.len)
+      frame[0] = byte(data.len shr 24)
+      frame[1] = byte(data.len shr 16)
+      frame[2] = byte(data.len shr 8)
+      frame[3] = byte(data.len)
+      for i in 0 ..< data.len:
+        frame[4 + i] = data[i]
+
+      let client = newAsyncSocket()
+      waitFor client.connect("127.0.0.1", Port(29311))
+      try:
+        waitFor client.send(cast[string](frame))
+      except CatchableError:
+        discard
+      waitFor sleepAsync(300)
+
+      # The server must have dropped the connection after the failed handshake.
+      var connectionDropped = false
+      try:
+        connectionDropped = (waitFor client.recv(1)).len == 0
+      except CatchableError:
+        connectionDropped = true
+      client.close()
+      net.stop()
+      waitFor sleepAsync(50)
+
+      check n.state == rsFollower
+      check n.currentTerm == termBefore
+      check n.votedFor == ""
+      check connectionDropped
+
 suite "Raft SQL Write Path":
   test "leader append+commit wait round-trips through applyCommand":
     proc scenario() =

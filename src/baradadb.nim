@@ -338,12 +338,21 @@ proc main() =
   var raftNet: RaftNetwork = nil
   if config.raftEnabled:
     info("Starting Raft node " & config.raftNodeId & " on port " & $config.raftPort)
+    var raftTls: TLSContext = nil
     if config.raftTlsEnabled:
       if config.raftTlsCertFile.len == 0 or config.raftTlsKeyFile.len == 0 or
          not fileExists(config.raftTlsCertFile) or not fileExists(config.raftTlsKeyFile):
         raise newException(ValueError,
           "BARADB_RAFT_TLS_ENABLED=true but cert/key missing " &
           "(BARADB_RAFT_TLS_CERT_FILE / BARADB_RAFT_TLS_KEY_FILE)")
+      if config.raftTlsVerifyPeer and config.raftTlsCaFile.len > 0 and
+         not fileExists(config.raftTlsCaFile):
+        raise newException(ValueError,
+          "BARADB_RAFT_TLS_VERIFY_PEER=true but CA file missing: " &
+          config.raftTlsCaFile & " (BARADB_RAFT_TLS_CA_FILE)")
+      raftTls = newTLSContext(newTLSConfig(
+        config.raftTlsCertFile, config.raftTlsKeyFile,
+        caFile = config.raftTlsCaFile, verifyPeer = config.raftTlsVerifyPeer))
     let raftDataDir = config.dataDir / "raft"
     createDir(raftDataDir)  # idempotent; loadState reads from it, saveState writes
     # Raft convention: `peers` excludes the node itself (majority math and
@@ -379,7 +388,7 @@ proc main() =
     # Wire replication ↔ DistTxn
     wireReplicationDistTxn(tcpServer.replicationManager, tcpServer.distTxnManager)
 
-    raftNet = newRaftNetwork(raftNode)
+    raftNet = newRaftNetwork(raftNode, raftTls)
     asyncCheck raftNet.run()
 
   # HTTP (hunos) after raft wiring so /metrics can see raftNode
