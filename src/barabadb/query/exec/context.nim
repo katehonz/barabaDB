@@ -4,6 +4,7 @@
 ## Also hosts the AST-to-SQL serializer used for VIEW DDL persistence.
 import std/strutils
 import std/tables
+import std/sets
 import std/locks
 import ../ast
 import ../../storage/lsm
@@ -28,6 +29,7 @@ var restoreEnginesHook*: proc(ctx: ExecutionContext)
 proc newExecutionContext*(db: LSMTree, registry: DatabaseRegistry = nil): ExecutionContext =
   result = ExecutionContext(db: db, tables: initTable[string, TableDef](),
                    btrees: initTable[string, BTreeIndex[string, IndexEntry]](),
+                   uniqueIndexes: initHashSet[string](),
                    views: initTable[string, Node](),
                    cteTables: initTable[string, seq[Row]](),
                    ftsIndexes: initTable[string, fts.InvertedIndex](),
@@ -161,6 +163,7 @@ proc cloneForConnection*(ctx: ExecutionContext): ExecutionContext =
     svCopy[k] = v
   result = ExecutionContext(db: ctx.db, tables: ctx.tables,
                    btrees: ctx.btrees, views: ctx.views,
+                   uniqueIndexes: ctx.uniqueIndexes,
                    cteTables: initTable[string, seq[Row]](),
                    ftsIndexes: ctx.ftsIndexes,
                    vectorIndexes: ctx.vectorIndexes,

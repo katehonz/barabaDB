@@ -441,6 +441,30 @@ suite "Schema persistence":
       db2.close()
     removeDir(dir)
 
+  test "UNIQUE B-tree index survives reopen and still enforces":
+    let dir = "/tmp/baradb_schema_persist_unique"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE accts (id INTEGER PRIMARY KEY, email TEXT)").success
+      check execSql(ctx, "CREATE UNIQUE INDEX accts_email ON accts (email)").success
+      check execSql(ctx, "INSERT INTO accts (id, email) VALUES (1, 'a@b.c')").success
+      check "accts.email" in ctx.btrees
+      db.close()
+    # Reopen fresh context (simulates process restart)
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      # UNIQUE flag must survive restart via the persisted DDL.
+      check "accts.email" in ctx2.btrees
+      let dup = execSql(ctx2, "INSERT INTO accts (id, email) VALUES (2, 'a@b.c')")
+      check not dup.success
+      let ok = execSql(ctx2, "INSERT INTO accts (id, email) VALUES (2, 'x@y.z')")
+      check ok.success
+      db2.close()
+    removeDir(dir)
+
   test "Stable schema key format":
     check tableSchemaKey("users") == "_schema:tables:users"
     check serializeTableDdl(TableDef(

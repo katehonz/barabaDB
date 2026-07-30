@@ -321,3 +321,39 @@ suite "Bug fixes — clause keywords usable as identifiers":
     let a4 = parse("EXPORT TO 'o.csv' FROM t FORMAT csv DELIMITER ';' HEADER false")
     check a4.stmts[0].expFormat == "csv"
     check a4.stmts[0].expIncludeHeader == false
+
+suite "Bug fixes — UNIQUE index enforcement":
+
+  test "CREATE UNIQUE INDEX rejects duplicate INSERT":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("CREATE TABLE accts (id INTEGER PRIMARY KEY, email TEXT)"))
+    discard executeQuery(ctx, parse("INSERT INTO accts (id, email) VALUES (1, 'a@b.c')"))
+    let c = executeQuery(ctx, parse("CREATE UNIQUE INDEX accts_email ON accts (email)"))
+    check c.success
+    let dup = executeQuery(ctx, parse("INSERT INTO accts (id, email) VALUES (2, 'a@b.c')"))
+    check not dup.success
+    let ok = executeQuery(ctx, parse("INSERT INTO accts (id, email) VALUES (2, 'x@y.z')"))
+    check ok.success
+
+  test "CREATE UNIQUE INDEX rejects duplicate UPDATE":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("CREATE TABLE accts (id INTEGER PRIMARY KEY, email TEXT)"))
+    discard executeQuery(ctx, parse("INSERT INTO accts (id, email) VALUES (1, 'a@b.c')"))
+    discard executeQuery(ctx, parse("INSERT INTO accts (id, email) VALUES (2, 'x@y.z')"))
+    let c = executeQuery(ctx, parse("CREATE UNIQUE INDEX accts_email ON accts (email)"))
+    check c.success
+    let dup = executeQuery(ctx, parse("UPDATE accts SET email = 'a@b.c' WHERE id = 2"))
+    check not dup.success
+    let same = executeQuery(ctx, parse("UPDATE accts SET email = 'a@b.c' WHERE id = 1"))
+    check same.success
+
+  test "CREATE UNIQUE INDEX over duplicate data fails":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("CREATE TABLE accts (id INTEGER PRIMARY KEY, email TEXT)"))
+    discard executeQuery(ctx, parse("INSERT INTO accts (id, email) VALUES (1, 'a@b.c')"))
+    discard executeQuery(ctx, parse("INSERT INTO accts (id, email) VALUES (2, 'a@b.c')"))
+    let c = executeQuery(ctx, parse("CREATE UNIQUE INDEX accts_email ON accts (email)"))
+    check not c.success

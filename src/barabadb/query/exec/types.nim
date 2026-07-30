@@ -1,5 +1,6 @@
 ## Executor types — shared by all exec/* modules and executor.nim
 import std/tables
+import std/sets
 import std/locks
 import ../ast
 import ../ir
@@ -92,6 +93,7 @@ type
     db*: LSMTree
     tables*: Table[string, TableDef]
     btrees*: Table[string, BTreeIndex[string, IndexEntry]]
+    uniqueIndexes*: HashSet[string]  # colKeys (table.col[.col...]) of UNIQUE standalone B-tree indexes
     views*: Table[string, Node]  # view name -> SELECT AST
     cteTables*: Table[string, seq[Row]]  # CTE name -> rows
     ftsIndexes*: Table[string, fts.InvertedIndex]  # table.col -> FTS index

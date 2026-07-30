@@ -3,6 +3,7 @@
 ## Extracted from `executor.nim` (Task 9 of the executor split).
 import std/strutils
 import std/tables
+import std/sets
 import std/sequtils
 import ../../storage/lsm
 import ../../storage/btree
@@ -20,6 +21,28 @@ import rls
 # ----------------------------------------------------------------------
 # Table storage
 # ----------------------------------------------------------------------
+
+proc violatesUniqueIndex*(ctx: ExecutionContext, table: string, fields: seq[string],
+                          rowVals: seq[string], excludeLsmKey: string = ""): string =
+  ## Returns the colKey of the first standalone UNIQUE index this row
+  ## violates, or "" when the row is clean. idxVal is built with the exact
+  ## convention of the CREATE INDEX population loop (getValue yields "\\N"
+  ## for a missing column, values joined with "|"). excludeLsmKey lets UPDATE
+  ## ignore the row's own existing entry.
+  if ctx.uniqueIndexes.len == 0: return ""
+  for colKey in ctx.uniqueIndexes:
+    if not colKey.startsWith(table & "."): continue
+    let idxCols = colKey[table.len + 1..^1].split(".")
+    var colVals: seq[string] = @[]
+    for c in idxCols:
+      colVals.add(getValue(rowVals, fields, c))
+    let idxVal = colVals.join("|")
+    if idxVal.len == 0 or isNull(idxVal): continue
+    if colKey notin ctx.btrees: continue
+    for entry in ctx.btrees[colKey].get(idxVal):
+      if entry.lsmKey != excludeLsmKey:
+        return colKey
+  return ""
 
 proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], values: seq[seq[string]],
                   kvPairs: var seq[(string, seq[byte])]): int =

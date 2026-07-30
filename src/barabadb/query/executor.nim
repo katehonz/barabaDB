@@ -5,6 +5,7 @@
 import std/os
 import std/strutils
 import std/tables
+import std/sets
 import std/hashes
 import std/sequtils
 import std/algorithm
@@ -543,6 +544,13 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     let (valid, errMsg) = validateConstraints(ctx, stmt.insTarget, mutableFields, mutableValues)
     if not valid: return errResult(errMsg)
 
+    # Standalone UNIQUE index enforcement (same failure channel as
+    # validateConstraints: errResult before any row is written)
+    for rowVals in mutableValues:
+      let uCol = violatesUniqueIndex(ctx, stmt.insTarget, mutableFields, rowVals)
+      if uCol.len > 0:
+        return errResult("UNIQUE constraint violated: duplicate value for unique index '" & uCol & "'")
+
     # Fire BEFORE INSERT triggers
     var row = initTable[string, Value]()
     if mutableValues.len > 0:
@@ -637,6 +645,11 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
             updValues.add("\\N")
         let (valid, errMsg) = validateConstraints(ctx, stmt.updTarget, updFields, @[updValues], skipPkCheck = true)
         if not valid: return errResult(errMsg)
+        # Standalone UNIQUE index enforcement — exclude this row's own entry
+        let uCol = violatesUniqueIndex(ctx, stmt.updTarget, updFields, updValues,
+                                       excludeLsmKey = stmt.updTarget & "." & old)
+        if uCol.len > 0:
+          return errResult("UNIQUE constraint violated: duplicate value for unique index '" & uCol & "'")
         # FK ON UPDATE enforcement (parent side)
         var refCols: seq[string] = @[]
         for _, childTbl in ctx.tables:
@@ -858,7 +871,9 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     var toDelete: seq[string] = @[]
     for idxName in ctx.btrees.keys.toSeq():
       if idxName.startsWith(dropName & "."): toDelete.add(idxName)
-    for idxName in toDelete: ctx.btrees.del(idxName)
+    for idxName in toDelete:
+      ctx.btrees.del(idxName)
+      ctx.uniqueIndexes.excl(idxName)
     # Drop FTS/HNSW engine indexes for this table (in-memory entries)
     var ftsToDelete: seq[string] = @[]
     for key in ctx.ftsIndexes.keys.toSeq():
@@ -1387,17 +1402,24 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       let idxVal = colVals.join("|")
       if idxVal.len > 0 and not isNull(idxVal):
         let lsmKey = if "$key" in row: stmt.ciTarget & "." & valueToString(row["$key"]) else: ""
+        if stmt.ciUnique and ctx.btrees[colKey].contains(idxVal):
+          # Duplicate data — abort without registering the index
+          ctx.btrees.del(colKey)
+          return errResult("UNIQUE constraint violated: duplicate value '" & idxVal &
+                           "' for unique index '" & colKey & "'")
         ctx.btrees[colKey].insert(idxVal, IndexEntry(lsmKey: lsmKey, rowValue: ""))
+    if stmt.ciUnique:
+      ctx.uniqueIndexes.incl(colKey)
     # Persist reconstructed DDL so restoreEngines can rebuild the index
     # from table data after a restart (replay re-writes the same key).
     # Unnamed indexes: persist the nameless form (see FTS branch above).
-    # The CREATE INDEX AST does not track UNIQUE, so it is not preserved.
+    let uniqueKw = if stmt.ciUnique: "UNIQUE " else: ""
     let btreeDdl = if stmt.ciName.len > 0:
-        "CREATE INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ")"
+        "CREATE " & uniqueKw & "INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ")"
       else:
-        "CREATE INDEX ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ")"
+        "CREATE " & uniqueKw & "INDEX ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ")"
     ctx.db.put(SchemaBtreeIndexPrefix & colKey, cast[seq[byte]](btreeDdl))
-    return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget)
+    return okResult(msg="CREATE " & uniqueKw & "INDEX " & idxName & " on " & stmt.ciTarget)
 
   of nkDropIndex:
     # Find and remove index by name from ctx.btrees
@@ -1411,14 +1433,16 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         found = true
         break
       # A custom index name only appears in the persisted DDL — match it
-      # against the stored "CREATE INDEX <name> ON" text as well.
+      # against the stored "CREATE [UNIQUE] INDEX <name> ON" text as well.
       let (hasDdl, ddl) = ctx.db.get(SchemaBtreeIndexPrefix & key)
-      if hasDdl and cast[string](ddl).startsWith("CREATE INDEX " & stmt.diName & " ON "):
+      if hasDdl and (cast[string](ddl).startsWith("CREATE INDEX " & stmt.diName & " ON ") or
+                     cast[string](ddl).startsWith("CREATE UNIQUE INDEX " & stmt.diName & " ON ")):
         targetKey = key
         found = true
         break
     if found:
       ctx.btrees.del(targetKey)
+      ctx.uniqueIndexes.excl(targetKey)
       ctx.db.delete(SchemaBtreeIndexPrefix & targetKey)
       return okResult(msg="DROP INDEX " & stmt.diName)
     # FTS/HNSW engine indexes: in-memory maps are keyed by table.col, and a

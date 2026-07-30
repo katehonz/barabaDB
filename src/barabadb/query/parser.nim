@@ -1327,7 +1327,8 @@ proc parseCreateIndex(p: var Parser): Node =
     elif idxMethod == "ivfpq":
       idxKind = ikIVFPQ
   result = Node(kind: nkCreateIndex, ciName: idxName, ciTarget: tableName,
-                ciColumns: colNames, ciKind: idxKind, line: tok.line, col: tok.col)
+                ciColumns: colNames, ciKind: idxKind, ciUnique: isUnique,
+                line: tok.line, col: tok.col)
 
 proc parseBeginTxn(p: var Parser): Node =
   let tok = p.expect(tkBegin)

@@ -387,6 +387,7 @@ type
       ciColumns*: seq[string]
       ciExpr*: Node
       ciKind*: IndexKind
+      ciUnique*: bool
     of nkDropIndex:
       diName*: string
     of nkFrom:
