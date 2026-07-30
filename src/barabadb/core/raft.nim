@@ -605,15 +605,26 @@ proc processMessage*(net: RaftNetwork, msg: RaftMessage) {.async.} =
   of rmkAppendEntriesReply:
     net.node.handleAppendReply(msg.senderId, msg)
 
+proc recvExact*(client: AsyncSocket, size: int): Future[string] {.async.} =
+  ## Reads exactly `size` bytes from `client`. A short return means the peer
+  ## disconnected mid-frame (EOF); callers must treat it as end of stream.
+  var buf = ""
+  while buf.len < size:
+    let chunk = await client.recv(size - buf.len)
+    if chunk.len == 0:
+      break
+    buf.add(chunk)
+  return buf
+
 proc receiveLoop(net: RaftNetwork, client: AsyncSocket) {.async.} =
   try:
     while net.running:
-      let lenData = await client.recv(4)
+      let lenData = await recvExact(client, 4)
       if lenData.len < 4:
         break
       var pos = 0
       let payloadLen = int(readUint32(cast[seq[byte]](lenData), pos))
-      let payloadStr = await client.recv(payloadLen)
+      let payloadStr = await recvExact(client, payloadLen)
       if payloadStr.len < payloadLen:
         break
       var payload = newSeq[byte](payloadLen)

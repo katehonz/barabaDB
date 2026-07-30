@@ -4,6 +4,7 @@ import std/tables
 import std/strutils
 import std/os
 import std/asyncdispatch
+import std/asyncnet
 import std/monotimes
 import std/base64
 import std/json
@@ -2458,6 +2459,153 @@ suite "Raft Network Transport":
                                senderId: "leader")
     waitFor netA.processMessage(staleMsg)
     check timer.checkTimeout()
+
+  test "recvExact reassembles fragmented frames":
+    const port = 29025
+    let voteReq = RaftMessage(kind: rmkRequestVote, term: 7, senderId: "peer-x",
+                              lastLogIndex: 3, lastLogTerm: 2)
+    let data = serialize(voteReq)
+    var frame = newSeq[byte](4 + data.len)
+    frame[0] = byte(data.len shr 24)
+    frame[1] = byte(data.len shr 16)
+    frame[2] = byte(data.len shr 8)
+    frame[3] = byte(data.len)
+    for i in 0 ..< data.len:
+      frame[4 + i] = data[i]
+
+    var hdrLen = -1
+    var trailingEofLen = -1
+    var midFrameEofLen = -1
+    var gotMsg: RaftMessage
+    proc reader() {.async.} =
+      let l = newAsyncSocket()
+      l.setSockOpt(OptReuseAddr, true)
+      l.bindAddr(Port(port))
+      l.listen()
+      # Connection 1: one full fragmented frame, then EOF.
+      let c1 = await l.accept()
+      let hdr = await recvExact(c1, 4)
+      hdrLen = hdr.len
+      let payloadLen = (int(uint8(hdr[0])) shl 24) or (int(uint8(hdr[1])) shl 16) or
+                       (int(uint8(hdr[2])) shl 8) or int(uint8(hdr[3]))
+      let payloadStr = await recvExact(c1, payloadLen)
+      let trailing = await recvExact(c1, 1)  # peer closed -> EOF
+      trailingEofLen = trailing.len
+      var payload = newSeq[byte](payloadLen)
+      for i in 0 ..< payloadLen:
+        payload[i] = byte(payloadStr[i])
+      gotMsg = deserializeRaftMessage(payload)
+      c1.close()
+      # Connection 2: EOF in the middle of the 4-byte header.
+      let c2 = await l.accept()
+      let shortHdr = await recvExact(c2, 4)
+      midFrameEofLen = shortHdr.len
+      c2.close()
+      l.close()
+    asyncCheck reader()
+    waitFor sleepAsync(50)
+
+    let s1 = newAsyncSocket()
+    waitFor s1.connect("127.0.0.1", Port(port))
+    waitFor s1.send(cast[string](frame[0 ..< 1]))
+    waitFor sleepAsync(20)
+    waitFor s1.send(cast[string](frame[1 ..< 4 + data.len div 2]))
+    waitFor sleepAsync(20)
+    waitFor s1.send(cast[string](frame[4 + data.len div 2 .. ^1]))
+    s1.close()
+
+    waitFor sleepAsync(50)
+    let s2 = newAsyncSocket()
+    waitFor s2.connect("127.0.0.1", Port(port))
+    waitFor s2.send(cast[string](frame[0 ..< 2]))
+    s2.close()
+
+    var waited = 0
+    while midFrameEofLen < 0 and waited < 2000:
+      waitFor sleepAsync(50)
+      waited += 50
+
+    check hdrLen == 4
+    check gotMsg.kind == rmkRequestVote
+    check gotMsg.term == 7
+    check gotMsg.senderId == "peer-x"
+    check gotMsg.lastLogIndex == 3
+    check gotMsg.lastLogTerm == 2
+    check trailingEofLen == 0
+    check midFrameEofLen == 2
+
+  test "framing reassembles chunked messages":
+    const srvPort = 29021
+    const cliPort = 29023
+    var srv = newRaftNode("srv", @["cli"], raftPort = srvPort)
+    srv.electionTimeout = 60000  # keep the server passive during the test
+    srv.peerAddrs["cli"] = ("127.0.0.1", cliPort)
+    let net = newRaftNetwork(srv)
+    asyncCheck net.run()
+    waitFor sleepAsync(50)
+
+    # Test-side listener stands in for the "cli" peer and captures the reply.
+    let replyListener = newAsyncSocket()
+    replyListener.setSockOpt(OptReuseAddr, true)
+    replyListener.bindAddr(Port(cliPort))
+    replyListener.listen()
+
+    var replyMsg: RaftMessage
+    var gotReply = false
+    proc acceptor() {.async.} =
+      let conn = await replyListener.accept()
+      var hdr = ""
+      while hdr.len < 4:
+        let c = await conn.recv(4 - hdr.len)
+        if c.len == 0: return
+        hdr.add(c)
+      let payloadLen = (int(uint8(hdr[0])) shl 24) or (int(uint8(hdr[1])) shl 16) or
+                       (int(uint8(hdr[2])) shl 8) or int(uint8(hdr[3]))
+      var body = ""
+      while body.len < payloadLen:
+        let c = await conn.recv(payloadLen - body.len)
+        if c.len == 0: return
+        body.add(c)
+      var payload = newSeq[byte](payloadLen)
+      for i in 0 ..< payloadLen:
+        payload[i] = byte(body[i])
+      replyMsg = deserializeRaftMessage(payload)
+      gotReply = true
+    asyncCheck acceptor()
+
+    let voteReq = RaftMessage(kind: rmkRequestVote, term: 1, senderId: "cli")
+    let data = serialize(voteReq)
+    var frame = newSeq[byte](4 + data.len)
+    frame[0] = byte(data.len shr 24)
+    frame[1] = byte(data.len shr 16)
+    frame[2] = byte(data.len shr 8)
+    frame[3] = byte(data.len)
+    for i in 0 ..< data.len:
+      frame[4 + i] = data[i]
+
+    let client = newAsyncSocket()
+    waitFor client.connect("127.0.0.1", Port(srvPort))
+    # Fragment the frame mid-header and mid-payload with real delays.
+    waitFor client.send(cast[string](frame[0 ..< 2]))
+    waitFor sleepAsync(30)
+    waitFor client.send(cast[string](frame[2 ..< 4 + data.len div 2]))
+    waitFor sleepAsync(30)
+    waitFor client.send(cast[string](frame[4 + data.len div 2 .. ^1]))
+
+    var waited = 0
+    while not gotReply and waited < 2000:
+      waitFor sleepAsync(50)
+      waited += 50
+
+    client.close()
+    net.stop()
+    replyListener.close()
+    waitFor sleepAsync(50)
+
+    check gotReply
+    if gotReply:
+      check replyMsg.kind == rmkRequestVoteReply
+      check replyMsg.success
 
 suite "CLI Autocomplete":
   test "Autocomplete commands":
