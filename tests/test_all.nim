@@ -2607,6 +2607,105 @@ suite "Raft Network Transport":
       check replyMsg.kind == rmkRequestVoteReply
       check replyMsg.success
 
+suite "Raft SQL Write Path":
+  test "leader append+commit wait round-trips through applyCommand":
+    proc scenario() =
+      var n1 = newRaftNode("n1", @["n2", "n3"], raftPort = 29031)
+      var n2 = newRaftNode("n2", @["n1", "n3"], raftPort = 29032)
+      var n3 = newRaftNode("n3", @["n1", "n2"], raftPort = 29033)
+
+      # Wide deterministic stagger: n1 wins the first election and 50ms
+      # heartbeats keep n2/n3 timers reset for the rest of the test
+      # (a tight 150/250/350 stagger lets n2's timer fire before the new
+      # leader's first heartbeat lands, causing a term-2/term-3 cascade).
+      n1.electionTimeout = 150
+      n2.electionTimeout = 1500
+      n3.electionTimeout = 3000
+
+      n1.peerAddrs["n2"] = ("127.0.0.1", 29032)
+      n1.peerAddrs["n3"] = ("127.0.0.1", 29033)
+      n2.peerAddrs["n1"] = ("127.0.0.1", 29031)
+      n2.peerAddrs["n3"] = ("127.0.0.1", 29033)
+      n3.peerAddrs["n1"] = ("127.0.0.1", 29031)
+      n3.peerAddrs["n2"] = ("127.0.0.1", 29032)
+
+      # Record every applyCommand invocation per node. NOTE: the recorder is
+      # built in a helper proc because Nim closures capture a for-loop `let`
+      # binding by reference — all iterations would share the final value.
+      var nodes = [n1, n2, n3]
+      var applied: array[3, seq[string]]
+      proc makeRecorder(i: int): proc(cmd: string, data: seq[byte]) {.gcsafe.} =
+        result = proc(cmd: string, data: seq[byte]) {.gcsafe.} =
+          applied[i].add(cmd & "|" & cast[string](data))
+      for i, n in nodes:
+        n.applyCommand = makeRecorder(i)
+
+      let net1 = newRaftNetwork(n1)
+      let net2 = newRaftNetwork(n2)
+      let net3 = newRaftNetwork(n3)
+
+      asyncCheck net1.run()
+      asyncCheck net2.run()
+      asyncCheck net3.run()
+      waitFor sleepAsync(50)
+
+      # Wait for the production timerLoop to elect exactly one leader
+      var leaderIdx = -1
+      var waited = 0
+      while waited < 3000:
+        leaderIdx = -1
+        var leaderCount = 0
+        for i, n in nodes:
+          if n.isLeader:
+            leaderIdx = i
+            inc leaderCount
+        if leaderCount == 1: break
+        waitFor sleepAsync(100)
+        waited += 100
+      check leaderIdx >= 0
+
+      if leaderIdx >= 0:
+        let leader = nodes[leaderIdx]
+        let followerIdx = (leaderIdx + 1) mod 3
+
+        # Server-side leader write path: append + wait for majority commit
+        let (ok, errMsg) = waitFor appendWriteToRaft(leader,
+          @[("users.1", cast[seq[byte]]("alice"))], timeoutMs = 3000)
+        check ok
+        if not ok: echo "appendWriteToRaft failed: ", errMsg
+
+        # Follower applies the committed entry shortly after (next heartbeat)
+        waited = 0
+        while applied[followerIdx].len == 0 and waited < 2000:
+          waitFor sleepAsync(50)
+          waited += 50
+        check applied[followerIdx].len >= 1
+        check "put|users.1\x00alice" in applied[followerIdx]
+
+      net1.stop()
+      net2.stop()
+      net3.stop()
+      waitFor sleepAsync(50)
+    scenario()
+
+  test "txn COMMIT delete kvPairs are empty-valued":
+    var testDir = getTempDir() / "baradb_raft_commit_del_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
+    createDir(testDir)
+    var db = newLSMTree(testDir)
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE TABLE t (id INTEGER, v TEXT)"))
+    # Inserted OUTSIDE the txn: execDelete reads ctx.db directly and does not
+    # see rows buffered in the pending txn's writeSet.
+    discard qexec.executeQuery(ctx, parse("INSERT INTO t (id, v) VALUES (1, 'x')"))
+    discard qexec.executeQuery(ctx, parse("BEGIN"))
+    discard qexec.executeQuery(ctx, parse("DELETE FROM t WHERE id = 1"))
+    let res = qexec.executeQuery(ctx, parse("COMMIT"))
+    check res.success
+    # The deleted row's kvPair must carry an empty value so followers delete,
+    # not resurrect, the key.
+    check res.keyValuePairs.len == 1
+    check res.keyValuePairs[0][1].len == 0
+
 suite "CLI Autocomplete":
   test "Autocomplete commands":
     let res = autocomplete("he")

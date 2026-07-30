@@ -6,6 +6,7 @@ import std/sequtils
 import std/tables
 import std/endians
 import std/monotimes
+import std/times
 import std/locks
 import std/nativesockets
 when defined(windows):
@@ -206,11 +207,43 @@ proc valueToWire(val: string, colType: string): WireValue =
     return WireValue(kind: fkJson, jsonVal: val)
   return WireValue(kind: fkString, strVal: val)
 
+proc appendWriteToRaft*(node: RaftNode, kvPairs: seq[(string, seq[byte])],
+                        timeoutMs: int): Future[(bool, string)] {.async.} =
+  ## C3b leader write path: append each written KV pair to the Raft log and
+  ## wait for majority commit. An empty value encodes a delete; the entry
+  ## format matches applyCommand ("put": key \x00 value, "delete": key).
+  ##
+  ## MUST be called from the async event-loop thread that owns `node` and
+  ## WITHOUT holding the storage gate: commitIndex advances via
+  ## handleAppendReply on the same loop, and applyCommand re-enters the
+  ## (non-reentrant) gate — waiting under the gate would deadlock the loop.
+  var lastIdx = 0'u64
+  for (key, value) in kvPairs:
+    let entry = if value.len > 0:
+        node.appendLog("put", cast[seq[byte]](key & "\x00" & cast[string](value)))
+      else:
+        node.appendLog("delete", cast[seq[byte]](key))
+    if entry.index == 0:
+      return (false, "lost leadership during raft append")
+    lastIdx = entry.index
+  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  while node.commitIndex < lastIdx and getMonoTime() < deadline:
+    await sleepAsync(10)
+  if node.commitIndex < lastIdx:
+    return (false, "raft commit timeout")
+  return (true, "")
+
 proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[],
                    replication: ReplicationManager = nil,
-                   raftNode: RaftNode = nil): (bool, QueryResult, string) =
+                   raftNode: RaftNode = nil,
+                   raftWriteTimeoutMs: int = 5000): Future[(bool, QueryResult, string)] {.async.} =
   ## All storage access is under the global StorageGate so HTTP worker threads
   ## and the TCP event loop never touch ORC-managed LSM/executor state concurrently.
+  ## The gate is released BEFORE the Raft commit wait — see appendWriteToRaft.
+  var ok = false
+  var qr = QueryResult()
+  var msg = ""
+  var kvPairs: seq[(string, seq[byte])] = @[]
   withStorageGate:
     try:
       let tokens = tokenize(query)
@@ -227,15 +260,16 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
 
       let res = executor.executeQuery(ctx, astNode, params)
       if res.success:
-        # Ship written key-value pairs to replicas
-        if replication != nil and res.keyValuePairs.len > 0:
+        # Ship written key-value pairs to replicas (legacy path; skipped when
+        # the raft path below handles the statement).
+        if raftNode == nil and replication != nil and res.keyValuePairs.len > 0:
           for (key, value) in res.keyValuePairs:
             var data = newSeq[byte](key.len + 1 + value.len)
             for i, c in key: data[i] = byte(c)
             data[key.len] = byte(0)
             for i, c in value: data[key.len + 1 + i] = c
             discard replication.writeLsn(data)
-        var qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
+        qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
         qr.columns = res.columns
 
         var colTypes: seq[string] = @[]
@@ -268,11 +302,20 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
             let cType = if i < colTypes.len: colTypes[i] else: ""
             wireRow.add(valueToWire(val, cType))
           qr.rows.add(wireRow)
-        return (true, qr, res.message)
+        ok = true
+        msg = res.message
+        kvPairs = res.keyValuePairs
       else:
         return (false, QueryResult(), res.message)
     except Exception as e:
       return (false, QueryResult(), e.msg)
+  # C3b: leader appends writes to the Raft log and waits for majority commit
+  # (outside the storage gate — see appendWriteToRaft).
+  if ok and raftNode != nil and kvPairs.len > 0:
+    let (raftOk, raftErr) = await appendWriteToRaft(raftNode, kvPairs, raftWriteTimeoutMs)
+    if not raftOk:
+      return (false, QueryResult(), raftErr)
+  return (ok, qr, msg)
 
 # ----------------------------------------------------------------------
 # Response Serialization
@@ -574,7 +617,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
         if shardCheck:
           let startTicks = getMonoTime().ticks()
-          let (success, result, errorMsg) = executeQuery(connCtx.db, connCtx, queryStr, replication=server.replicationManager, raftNode=server.raftNode)
+          let (success, result, errorMsg) = await executeQuery(connCtx.db, connCtx, queryStr, replication=server.replicationManager, raftNode=server.raftNode, raftWriteTimeoutMs=server.config.raftWriteTimeoutMs)
           let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
           if durationMs >= slowThreshold:
@@ -594,7 +637,7 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         info("[" & $clientId & "] QueryParams: " & queryStr & " (" & $params.len & " params)")
 
         let startTicks = getMonoTime().ticks()
-        let (success, result, errorMsg) = executeQuery(connCtx.db, connCtx, queryStr, params, replication=server.replicationManager, raftNode=server.raftNode)
+        let (success, result, errorMsg) = await executeQuery(connCtx.db, connCtx, queryStr, params, replication=server.replicationManager, raftNode=server.raftNode, raftWriteTimeoutMs=server.config.raftWriteTimeoutMs)
         let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
         if durationMs >= slowThreshold:
