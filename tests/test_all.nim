@@ -2706,6 +2706,44 @@ suite "Raft SQL Write Path":
     check res.keyValuePairs.len == 1
     check res.keyValuePairs[0][1].len == 0
 
+  test "appendWriteToRaft fails when node is not leader":
+    var n = newRaftNode("n1", @["n2"], raftPort = 29111)
+    # Still a follower — appendLog returns index 0.
+    let (ok, err) = waitFor appendWriteToRaft(n,
+      @[("k", cast[seq[byte]]("v"))], timeoutMs = 200)
+    check not ok
+    check "lost leadership" in err
+
+  test "appendWriteToRaft times out without majority replies":
+    # Leader with peers but no network — commitIndex never advances.
+    var n = newRaftNode("n1", @["n2", "n3"], raftPort = 29112)
+    n.becomeLeader()
+    let (ok, err) = waitFor appendWriteToRaft(n,
+      @[("k", cast[seq[byte]]("v"))], timeoutMs = 300)
+    check not ok
+    check "raft commit timeout" in err
+
+  test "applyReplicatedPut updates secondary B-tree indexes":
+    var testDir = getTempDir() / "baradb_raft_apply_idx_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
+    createDir(testDir)
+    var db = newLSMTree(testDir)
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse(
+      "CREATE TABLE t (id INT PRIMARY KEY, name STRING)"))
+    discard qexec.executeQuery(ctx, parse(
+      "CREATE INDEX idx_name ON t (name)"))
+    # Simulate follower apply of a leader-replicated INSERT (no execInsert).
+    applyReplicatedPut(ctx, "t.id=1", cast[seq[byte]]("name=alice"))
+    check "t.name" in ctx.btrees
+    let entries = ctx.btrees["t.name"].get("alice")
+    check entries.len >= 1
+    check entries[0].lsmKey == "t.id=1"
+    # Delete must drop the index entry too.
+    applyReplicatedDelete(ctx, "t.id=1")
+    check ctx.btrees["t.name"].get("alice").len == 0
+    let (found, _) = db.get("t.id=1")
+    check not found
+
 suite "CLI Autocomplete":
   test "Autocomplete commands":
     let res = autocomplete("he")

@@ -253,8 +253,14 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
         return (true, QueryResult(), "")
 
       # C3b: writes go through the Raft log — only the leader may accept them.
-      if raftNode != nil and isWrite(astNode.stmts[0]):
-        if raftNode.state != rsLeader:
+      # Inspect every statement so "SELECT 1; INSERT ..." cannot bypass the gate.
+      if raftNode != nil:
+        var hasWrite = false
+        for stmt in astNode.stmts:
+          if isWrite(stmt):
+            hasWrite = true
+            break
+        if hasWrite and raftNode.state != rsLeader:
           let who = if raftNode.leaderId.len > 0: raftNode.leaderId else: "none elected"
           return (false, QueryResult(), "not leader; leader is '" & who & "'")
 

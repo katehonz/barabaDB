@@ -344,16 +344,18 @@ proc main() =
                                dataDir = raftDataDir)
     raftNode.peerAddrs = config.raftPeerAddrs
     tcpServer.raftNode = raftNode  # C3b: executeQuery rejects writes on followers
-    # Wire state machine to apply committed entries to the default database
+    # Wire state machine: committed entries update LSM + secondary indexes
+    # (B-tree/FTS/HNSW) on every node via applyReplicatedPut/Delete.
     let defaultDbInfo = getDatabaseInfo(registry, "default")
     raftNode.applyCommand = proc(cmd: string, data: seq[byte]) {.gcsafe.} =
       withStorageGate:
+        let ctx = cast[ExecutionContext](cast[pointer](defaultDbInfo.ctx))
         if cmd == "put":
           let parts = cast[string](data).split("\x00")
           if parts.len >= 2:
-            defaultDbInfo.db.put(parts[0], cast[seq[byte]](parts[1]))
+            applyReplicatedPut(ctx, parts[0], cast[seq[byte]](parts[1]))
         elif cmd == "delete":
-          defaultDbInfo.db.delete(cast[string](data))
+          applyReplicatedDelete(ctx, cast[string](data))
 
     # Wire RAFT ↔ DistTxn
     wireRaftDistTxn(raftNode, tcpServer)

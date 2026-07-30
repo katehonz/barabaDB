@@ -340,3 +340,100 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
           meta["key"] = fullKey
           vengine.insert(vecIdx, docId, vec, meta)
   return 1
+
+# ----------------------------------------------------------------------
+# Raft / replication apply — keep secondary engines in sync with LSM
+# ----------------------------------------------------------------------
+
+proc docIdFromLsmKey(fullKey: string): uint64 =
+  result = 0
+  for ch in fullKey:
+    result = result * 31 + uint64(ord(ch))
+
+proc injectPkFromKey(row: var Row, keyRest: string) =
+  ## Decode `id=1` or `a=1:b=2` key tails into row columns (same as scan).
+  for part in keyRest.split(':'):
+    let eqPos = part.find('=')
+    if eqPos > 0:
+      row[part[0..<eqPos]] = part[eqPos+1..^1]
+
+proc removeIndexesForRow(ctx: ExecutionContext, table: string, fullKey: string,
+                         valStr: string) =
+  var oldRow = parseRowDataToValueRow(valStr)
+  let keyRest = if '.' in fullKey: fullKey[fullKey.find('.')+1..^1] else: ""
+  injectPkFromKey(oldRow, keyRest)
+  for colName in ctx.btrees.keys.toSeq():
+    if not colName.startsWith(table & "."): continue
+    let colsPart = colName[table.len + 1..^1]
+    let idxCols = colsPart.split(".")
+    var oldVals: seq[string] = @[]
+    for c in idxCols:
+      if c in oldRow: oldVals.add(valueToString(oldRow[c]))
+      else: oldVals.add("\\N")
+    let oldIdxVal = oldVals.join("|")
+    if oldIdxVal.len > 0 and not isNull(oldIdxVal):
+      ctx.btrees[colName].remove(oldIdxVal,
+        IndexEntry(lsmKey: fullKey, rowValue: valStr))
+  let docId = docIdFromLsmKey(fullKey)
+  for ftsKey, ftsIdx in ctx.ftsIndexes:
+    if ftsKey.startsWith(table & "."):
+      ftsIdx.removeDocument(docId)
+
+proc insertIndexesForRow(ctx: ExecutionContext, table: string, fullKey: string,
+                         valStr: string) =
+  var newRow = parseRowDataToValueRow(valStr)
+  let keyRest = if '.' in fullKey: fullKey[fullKey.find('.')+1..^1] else: ""
+  injectPkFromKey(newRow, keyRest)
+  for colName in ctx.btrees.keys.toSeq():
+    if not colName.startsWith(table & "."): continue
+    let colsPart = colName[table.len + 1..^1]
+    let idxCols = colsPart.split(".")
+    var colVals: seq[string] = @[]
+    for c in idxCols:
+      if c in newRow: colVals.add(valueToString(newRow[c]))
+      else: colVals.add("\\N")
+    let idxVal = colVals.join("|")
+    if idxVal.len > 0 and not isNull(idxVal):
+      ctx.btrees[colName].insert(idxVal,
+        IndexEntry(lsmKey: fullKey, rowValue: valStr))
+  let docId = docIdFromLsmKey(fullKey)
+  for ftsKey, ftsIdx in ctx.ftsIndexes:
+    if not ftsKey.startsWith(table & "."): continue
+    let colName = ftsKey[table.len + 1..^1]
+    if colName in newRow:
+      let text = valueToString(newRow[colName])
+      if text.len > 0:
+        ftsIdx.addDocument(docId, text)
+  for vecKey, vecIdx in ctx.vectorIndexes:
+    if not vecKey.startsWith(table & "."): continue
+    let colName = vecKey[table.len + 1..^1]
+    if colName notin newRow: continue
+    let vecStr = valueToString(newRow[colName])
+    let vec = parseVectorString(vecStr)
+    if vec.len > 0:
+      var meta = initTable[string, string]()
+      meta["key"] = fullKey
+      for col, val in newRow:
+        meta[col] = valueToString(val)
+      vengine.insert(vecIdx, docId, vec, meta)
+
+proc applyReplicatedPut*(ctx: ExecutionContext, fullKey: string, value: seq[byte]) =
+  ## Apply a raft/replication put: LSM write + secondary B-tree/FTS/HNSW.
+  ## Idempotent on the leader (local DML already applied the same engines).
+  let dot = fullKey.find('.')
+  let table = if dot > 0: fullKey[0..<dot] else: ""
+  let (found, existing) = ctx.db.get(fullKey)
+  if found and table.len > 0:
+    removeIndexesForRow(ctx, table, fullKey, cast[string](existing))
+  ctx.db.put(fullKey, value)
+  if table.len > 0 and value.len > 0:
+    insertIndexesForRow(ctx, table, fullKey, cast[string](value))
+
+proc applyReplicatedDelete*(ctx: ExecutionContext, fullKey: string) =
+  ## Apply a raft/replication delete: LSM delete + drop secondary index entries.
+  let dot = fullKey.find('.')
+  let table = if dot > 0: fullKey[0..<dot] else: ""
+  let (found, existing) = ctx.db.get(fullKey)
+  if found and table.len > 0:
+    removeIndexesForRow(ctx, table, fullKey, cast[string](existing))
+  ctx.db.delete(fullKey)

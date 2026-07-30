@@ -211,14 +211,15 @@ proc runWritesScenario() =
       return
     echo "leader elected: ", nodes[leaderIdx].id, " (term ", leaderTerm, ")"
 
-    # Schema: CREATE TABLE is not a raft write (DML only is), and its _schema
-    # keys are not replicated — create the table locally on every node.
+    # Schema: CREATE TABLE / INDEX are not raft writes (no kvPairs), and
+    # _schema keys are not replicated — create them locally on every node.
     for i in 0 ..< nodes.len:
       let db = openClient(nodes[i].clientPort)
       try:
         db.exec(sql"CREATE TABLE rw_test (id INT PRIMARY KEY, name STRING)")
+        db.exec(sql"CREATE INDEX idx_rw_name ON rw_test (name)")
       except CatchableError as e:
-        echo "CREATE TABLE failed on ", nodes[i].id, ": ", e.msg
+        echo "CREATE TABLE/INDEX failed on ", nodes[i].id, ": ", e.msg
         dumpAll(nodes)
         fail()
         return
@@ -249,6 +250,31 @@ proc runWritesScenario() =
       fail()
       return
     echo "row replicated to follower ", nodes[followerIdx].id
+
+    # Index path: rich apply must have updated the follower B-tree so a
+    # filtered SELECT (planner prefers secondary index) still finds the row.
+    block:
+      let db = openClient(nodes[followerIdx].clientPort)
+      var saw = false
+      try:
+        let rows = db.getAllRows(
+          sql"SELECT id, name FROM rw_test WHERE name = 'raft-row'")
+        for row in rows:
+          if row.len >= 2 and row[1] == "raft-row":
+            saw = true
+      except CatchableError as e:
+        echo "follower index SELECT failed: ", e.msg
+        dumpAll(nodes)
+        fail()
+        return
+      db.close()
+      if not saw:
+        echo "follower ", nodes[followerIdx].id,
+             " index-backed SELECT missed the replicated row"
+        dumpAll(nodes)
+        fail()
+        return
+    echo "follower index-backed SELECT saw the row"
 
     # Follower rejection: DML on a follower must fail with "not leader".
     block:

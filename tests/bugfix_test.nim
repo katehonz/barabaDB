@@ -396,3 +396,15 @@ suite "Raft write classification":
     check not isWrite(parse("CREATE TABLE t (id INT)").stmts[0])
     check not isWrite(parse("BEGIN").stmts[0])
     check not isWrite(parse("ROLLBACK").stmts[0])
+
+  test "multi-statement queries with a trailing write are still writes":
+    ## Server rejection must not look only at stmts[0] — a SELECT first
+    ## would otherwise let a follower execute the INSERT.
+    let ast = parse("SELECT 1; INSERT INTO t (id) VALUES (1)")
+    check ast.stmts.len == 2
+    check not isWrite(ast.stmts[0])
+    check isWrite(ast.stmts[1])
+    var anyWrite = false
+    for s in ast.stmts:
+      if isWrite(s): anyWrite = true
+    check anyWrite

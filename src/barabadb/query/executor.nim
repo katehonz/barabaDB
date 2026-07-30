@@ -971,9 +971,12 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       for key, version in ctx.pendingTxn.writeSet:
         if version.isDelete:
           ctx.db.delete(key)
+          # Empty value is the raft/replication "delete" convention — never
+          # ship a non-empty body for isDelete or followers will resurrect.
+          kvPairs.add((key, @[]))
         else:
           ctx.db.put(key, version.value)
-        kvPairs.add((key, version.value))
+          kvPairs.add((key, version.value))
       discard ctx.txnManager.commit(ctx.pendingTxn)
       ctx.pendingTxn = nil
       return okResult(msg="Transaction committed", kvPairs=kvPairs)
