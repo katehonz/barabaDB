@@ -142,6 +142,10 @@ proc runWritesScenario() =
   let peers = "n1@127.0.0.1:" & $(rbase + 1) &
               ",n2@127.0.0.1:" & $(rbase + 2) &
               ",n3@127.0.0.1:" & $(rbase + 3)
+  # SQL client ports for transparent leader write forwarding.
+  let clientPeers = "n1@127.0.0.1:" & $(cbase + 10) &
+                    ",n2@127.0.0.1:" & $(cbase + 20) &
+                    ",n3@127.0.0.1:" & $(cbase + 30)
 
   var nodes: seq[NodeProc]
   for i in 1 .. 3:
@@ -156,6 +160,7 @@ proc runWritesScenario() =
     env["BARADB_RAFT_PORT"] = $(rbase + i)
     env["BARADB_RAFT_NODE_ID"] = id
     env["BARADB_RAFT_PEERS"] = peers
+    env["BARADB_RAFT_CLIENT_PEERS"] = clientPeers
     env["BARADB_DATA_DIR"] = dataDir
     env["BARADB_LOG_LEVEL"] = "info"
     let p = startProcess(BinaryPath, env = env,
@@ -228,23 +233,29 @@ proc runWritesScenario() =
       db.close()
     echo "leader schema committed via raft ddl"
 
-    # Follower rejection of DDL (not just DML).
+    # Follower CREATE is forwarded to the leader (BARADB_RAFT_CLIENT_PEERS).
     block:
       let db = openClient(nodes[followerIdx].clientPort)
-      var rejected = false
       try:
-        db.exec(sql"CREATE TABLE should_fail (id INT)")
+        db.exec(sql"CREATE TABLE fwd_from_follower (id INT PRIMARY KEY)")
       except CatchableError as e:
-        rejected = "not leader" in e.msg
-        if not rejected:
-          echo "follower CREATE failed without 'not leader': ", e.msg
-      db.close()
-      if not rejected:
-        echo "follower CREATE was not rejected with 'not leader'"
+        echo "follower CREATE (forward) failed: ", e.msg
         dumpAll(nodes)
         fail()
         return
-    echo "follower CREATE rejected with 'not leader'"
+      db.close()
+    # Leader must see the table (forward applied on leader, then raft ddl).
+    block:
+      let db = openClient(nodes[leaderIdx].clientPort)
+      try:
+        discard db.getAllRows(sql"SELECT * FROM fwd_from_follower")
+      except CatchableError as e:
+        echo "leader never saw forwarded CREATE: ", e.msg
+        dumpAll(nodes)
+        fail()
+        return
+      db.close()
+    echo "follower CREATE forwarded to leader"
 
     # Wait until the follower has applied CREATE TABLE (SELECT no longer
     # errors with unknown table). Deadline 5s.
@@ -317,23 +328,23 @@ proc runWritesScenario() =
         return
     echo "follower index-backed SELECT saw the row"
 
-    # Follower rejection: DML on a follower must fail with "not leader".
+    # Follower DML is forwarded to the leader and replicated to the cluster.
     block:
       let db = openClient(nodes[followerIdx].clientPort)
-      var rejected = false
       try:
-        db.exec(sql"INSERT INTO rw_test (id, name) VALUES (99, 'nope')")
+        db.exec(sql"INSERT INTO rw_test (id, name) VALUES (99, 'via-forward')")
       except CatchableError as e:
-        rejected = "not leader" in e.msg
-        if not rejected:
-          echo "follower INSERT failed but without 'not leader': ", e.msg
-      db.close()
-      if not rejected:
-        echo "follower INSERT was not rejected with a 'not leader' error"
+        echo "follower INSERT (forward) failed: ", e.msg
         dumpAll(nodes)
         fail()
         return
-    echo "follower INSERT rejected with 'not leader'"
+      db.close()
+    if not waitForRow(nodes[leaderIdx].clientPort, "via-forward", 5):
+      echo "leader never saw forwarded INSERT row"
+      dumpAll(nodes)
+      fail()
+      return
+    echo "follower INSERT forwarded to leader"
 
     # Failover: kill the leader. A survivor must accept a write once it wins
     # a new term (majority of the remaining 2-of-3). Log lines can thrash

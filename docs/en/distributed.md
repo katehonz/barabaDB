@@ -16,8 +16,9 @@ Leader election and log replication over TCP. Enable with:
 | `BARADB_RAFT_PORT` | Raft TCP port |
 | `BARADB_RAFT_PEERS` | Comma-separated `id@host:port` (include self) |
 | `BARADB_RAFT_WRITE_TIMEOUT_MS` | Max wait for majority commit on SQL writes (default 5000) |
+| `BARADB_RAFT_CLIENT_PEERS` | Optional `id@host:clientPort` map for leader write forwarding |
 
-When Raft is enabled, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` and transactional `COMMIT`) and schema DDL (`CREATE`/`DROP`/`ALTER` table, index, view, graph, …) are accepted only on the leader of the **`default`** database. DML ships as put/delete log entries; DDL ships as a `ddl` entry with the original SQL and is re-executed on every node at apply. Followers reject both with `not leader; leader is '…'`. Writes against any other database name are rejected (`raft writes only supported on the 'default' database`). `CREATE`/`DROP DATABASE` are not raft-replicated (multi-DB is out of scope for v1). Committed DML also updates secondary B-tree/FTS/HNSW indexes and in-memory graphs.
+When Raft is enabled, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` and transactional `COMMIT`) and schema DDL (`CREATE`/`DROP`/`ALTER` table, index, view, graph, …) are accepted only on the leader of the **`default`** database. DML ships as put/delete log entries; DDL ships as a `ddl` entry with the original SQL and is re-executed on every node at apply. Followers that receive a write/DDL **forward** it to the leader when `BARADB_RAFT_CLIENT_PEERS` maps the leader id to a SQL client address; otherwise they return `not leader; leader is '…'`. Writes against any other database name are rejected (`raft writes only supported on the 'default' database`). `CREATE`/`DROP DATABASE` are not raft-replicated (multi-DB is out of scope for v1). Committed DML also updates secondary B-tree/FTS/HNSW indexes and in-memory graphs.
 
 ```nim
 import barabadb/core/raft

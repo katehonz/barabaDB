@@ -362,6 +362,15 @@ suite "Bug fixes — UNIQUE index enforcement":
 
 suite "Raft peer address parsing":
 
+  test "BARADB_RAFT_CLIENT_PEERS populates raftPeerClientAddrs":
+    putEnv("BARADB_RAFT_CLIENT_PEERS", "n1@10.0.0.1:9472,n2@10.0.0.2:9472")
+    defer: delEnv("BARADB_RAFT_CLIENT_PEERS")
+    var cfg = defaultConfig()
+    loadConfigFromEnv(cfg)
+    check cfg.raftPeerClientAddrs.len == 2
+    check cfg.raftPeerClientAddrs["n1"] == ("10.0.0.1", 9472)
+    check cfg.raftPeerClientAddrs["n2"] == ("10.0.0.2", 9472)
+
   test "id@host:port entries populate raftPeerAddrs":
     putEnv("BARADB_RAFT_PEERS", "n1@127.0.0.1:9473,n2@10.0.0.5:9474,n3")
     defer: delEnv("BARADB_RAFT_PEERS")

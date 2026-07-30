@@ -207,6 +207,90 @@ proc valueToWire(val: string, colType: string): WireValue =
     return WireValue(kind: fkJson, jsonVal: val)
   return WireValue(kind: fkString, strVal: val)
 
+proc forwardRecvExact(sock: AsyncSocket, size: int): Future[string] {.async.} =
+  var buf = ""
+  while buf.len < size:
+    let chunk = await sock.recv(size - buf.len)
+    if chunk.len == 0: break
+    buf.add(chunk)
+  return buf
+
+proc forwardQueryToLeader*(host: string, port: int, query: string,
+                           params: seq[WireValue] = @[],
+                           timeoutMs: int = 5000): Future[(bool, QueryResult, string)] {.async.} =
+  ## Proxy a write/DDL to the known leader's SQL port. Used by followers when
+  ## BARADB_RAFT_CLIENT_PEERS maps leader id → host:clientPort.
+  var sock: AsyncSocket = nil
+  try:
+    sock = newAsyncSocket()
+    let okConn = await withTimeout(sock.connect(host, Port(port)), min(timeoutMs, 2000))
+    if not okConn:
+      return (false, QueryResult(), "leader forward connect timeout")
+    let reqId = 1'u32
+    let msg = if params.len > 0:
+        makeQueryParamsMessage(reqId, query, params)
+      else:
+        makeQueryMessage(reqId, query)
+    await sock.send(cast[string](msg))
+
+    var qr = QueryResult()
+    var gotComplete = false
+    while true:
+      let headerData = await forwardRecvExact(sock, 12)
+      if headerData.len < 12:
+        break
+      var hbytes = newSeq[byte](headerData.len)
+      for i, c in headerData: hbytes[i] = byte(c)
+      var pos = 0
+      let kind = MsgKind(readUint32(hbytes, pos))
+      let length = int(readUint32(hbytes, pos))
+      discard readUint32(hbytes, pos)  # requestId
+      let payloadStr = if length > 0: await forwardRecvExact(sock, length) else: ""
+      if payloadStr.len < length:
+        break
+      var payload = newSeq[byte](payloadStr.len)
+      for i, c in payloadStr: payload[i] = byte(c)
+      case kind
+      of mkError:
+        var epos = 0
+        discard readUint32(payload, epos)
+        let emsg = readString(payload, epos)
+        return (false, QueryResult(), emsg)
+      of mkData:
+        var dpos = 0
+        let colCount = int(readUint32(payload, dpos))
+        qr.columns = @[]
+        for i in 0 ..< colCount:
+          qr.columns.add(readString(payload, dpos))
+        qr.columnTypes = @[]
+        for i in 0 ..< colCount:
+          qr.columnTypes.add(FieldKind(payload[dpos]))
+          inc dpos
+        let rowCount = int(readUint32(payload, dpos))
+        qr.rowCount = rowCount
+        qr.rows = @[]
+        for r in 0 ..< rowCount:
+          var row: seq[WireValue] = @[]
+          for c in 0 ..< colCount:
+            row.add(deserializeValue(payload, dpos))
+          qr.rows.add(row)
+      of mkComplete:
+        var cpos = 0
+        if payload.len >= 4:
+          qr.affectedRows = int(readUint32(payload, cpos))
+        gotComplete = true
+        break
+      else:
+        discard
+    if gotComplete:
+      return (true, qr, "")
+    return (false, QueryResult(), "leader forward incomplete response")
+  except CatchableError as e:
+    return (false, QueryResult(), "leader forward failed: " & e.msg)
+  finally:
+    if sock != nil:
+      try: sock.close() except CatchableError: discard
+
 proc waitRaftCommit(node: RaftNode, lastIdx: uint64, timeoutMs: int): Future[(bool, string)] {.async.} =
   let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
   while node.commitIndex < lastIdx and getMonoTime() < deadline:
@@ -249,7 +333,9 @@ proc appendDdlToRaft*(node: RaftNode, sql: string,
 proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq[WireValue] = @[],
                    replication: ReplicationManager = nil,
                    raftNode: RaftNode = nil,
-                   raftWriteTimeoutMs: int = 5000): Future[(bool, QueryResult, string)] {.async.} =
+                   raftWriteTimeoutMs: int = 5000,
+                   raftPeerClientAddrs: Table[string, tuple[host: string, port: int]] =
+                     initTable[string, tuple[host: string, port: int]]()): Future[(bool, QueryResult, string)] {.async.} =
   ## All storage access is under the global StorageGate so HTTP worker threads
   ## and the TCP event loop never touch ORC-managed LSM/executor state concurrently.
   ## The gate is released BEFORE the Raft commit wait — see appendWriteToRaft.
@@ -258,6 +344,9 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
   var msg = ""
   var kvPairs: seq[(string, seq[byte])] = @[]
   var needsRaftDdl = false
+  var needsForward = false
+  var forwardHost = ""
+  var forwardPort = 0
   withStorageGate:
     try:
       let tokens = tokenize(query)
@@ -282,59 +371,71 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
             dbName & "'")
         if raftNode.state != rsLeader:
           let who = if raftNode.leaderId.len > 0: raftNode.leaderId else: "none elected"
-          return (false, QueryResult(), "not leader; leader is '" & who & "'")
+          # Transparent leader forwarding when client SQL addresses are known.
+          if who != "none elected" and who in raftPeerClientAddrs:
+            let peerAddr = raftPeerClientAddrs[who]
+            needsForward = true
+            forwardHost = peerAddr.host
+            forwardPort = peerAddr.port
+          else:
+            return (false, QueryResult(), "not leader; leader is '" & who & "'")
 
-      let res = executor.executeQuery(ctx, astNode, params)
-      if res.success:
-        # Ship written key-value pairs to replicas (legacy path; skipped when
-        # the raft path below handles the statement).
-        if raftNode == nil and replication != nil and res.keyValuePairs.len > 0:
-          for (key, value) in res.keyValuePairs:
-            var data = newSeq[byte](key.len + 1 + value.len)
-            for i, c in key: data[i] = byte(c)
-            data[key.len] = byte(0)
-            for i, c in value: data[key.len + 1 + i] = c
-            discard replication.writeLsn(data)
-        qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
-        qr.columns = res.columns
+      if not needsForward:
+        let res = executor.executeQuery(ctx, astNode, params)
+        if res.success:
+          # Ship written key-value pairs to replicas (legacy path; skipped when
+          # the raft path below handles the statement).
+          if raftNode == nil and replication != nil and res.keyValuePairs.len > 0:
+            for (key, value) in res.keyValuePairs:
+              var data = newSeq[byte](key.len + 1 + value.len)
+              for i, c in key: data[i] = byte(c)
+              data[key.len] = byte(0)
+              for i, c in value: data[key.len + 1 + i] = c
+              discard replication.writeLsn(data)
+          qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
+          qr.columns = res.columns
 
-        var colTypes: seq[string] = @[]
-        var tableName = ""
-        if astNode.stmts[0].kind == nkSelect and astNode.stmts[0].selFrom != nil:
-          tableName = astNode.stmts[0].selFrom.fromTable
-        elif astNode.stmts[0].kind == nkInsert:
-          tableName = astNode.stmts[0].insTarget
-        elif astNode.stmts[0].kind == nkUpdate:
-          tableName = astNode.stmts[0].updTarget
+          var colTypes: seq[string] = @[]
+          var tableName = ""
+          if astNode.stmts[0].kind == nkSelect and astNode.stmts[0].selFrom != nil:
+            tableName = astNode.stmts[0].selFrom.fromTable
+          elif astNode.stmts[0].kind == nkInsert:
+            tableName = astNode.stmts[0].insTarget
+          elif astNode.stmts[0].kind == nkUpdate:
+            tableName = astNode.stmts[0].updTarget
 
-        if tableName.len > 0 and tableName in ctx.tables:
-          let tbl = ctx.tables[tableName]
-          for col in res.columns:
-            var found = ""
-            for c in tbl.columns:
-              if c.name.toLower() == col.toLower():
-                found = c.colType
-                break
-            colTypes.add(found)
+          if tableName.len > 0 and tableName in ctx.tables:
+            let tbl = ctx.tables[tableName]
+            for col in res.columns:
+              var found = ""
+              for c in tbl.columns:
+                if c.name.toLower() == col.toLower():
+                  found = c.colType
+                  break
+              colTypes.add(found)
+          else:
+            colTypes = newSeq[string](res.columns.len)
+
+          qr.columnTypes = colTypes.mapIt(typeToFieldKind(it))
+          qr.rows = @[]
+          for row in res.rows:
+            var wireRow: seq[WireValue] = @[]
+            for i, col in res.columns:
+              let val = if col in row: valueToString(row[col]) else: "\\N"
+              let cType = if i < colTypes.len: colTypes[i] else: ""
+              wireRow.add(valueToWire(val, cType))
+            qr.rows.add(wireRow)
+          ok = true
+          msg = res.message
+          kvPairs = res.keyValuePairs
         else:
-          colTypes = newSeq[string](res.columns.len)
-
-        qr.columnTypes = colTypes.mapIt(typeToFieldKind(it))
-        qr.rows = @[]
-        for row in res.rows:
-          var wireRow: seq[WireValue] = @[]
-          for i, col in res.columns:
-            let val = if col in row: valueToString(row[col]) else: "\\N"
-            let cType = if i < colTypes.len: colTypes[i] else: ""
-            wireRow.add(valueToWire(val, cType))
-          qr.rows.add(wireRow)
-        ok = true
-        msg = res.message
-        kvPairs = res.keyValuePairs
-      else:
-        return (false, QueryResult(), res.message)
+          return (false, QueryResult(), res.message)
     except Exception as e:
       return (false, QueryResult(), e.msg)
+  # Follower write/DDL: proxy to leader SQL port (outside the storage gate).
+  if needsForward:
+    return await forwardQueryToLeader(forwardHost, forwardPort, query, params,
+                                      raftWriteTimeoutMs)
   # Raft log append + majority wait (outside the storage gate).
   # DDL batches ship the original SQL once (re-executed on apply). Pure DML
   # ships KV pairs. Mixed DDL+DML in one query uses the DDL path only so the
@@ -650,7 +751,10 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
         if shardCheck:
           let startTicks = getMonoTime().ticks()
-          let (success, result, errorMsg) = await executeQuery(connCtx.db, connCtx, queryStr, replication=server.replicationManager, raftNode=server.raftNode, raftWriteTimeoutMs=server.config.raftWriteTimeoutMs)
+          let (success, result, errorMsg) = await executeQuery(connCtx.db, connCtx, queryStr,
+            replication=server.replicationManager, raftNode=server.raftNode,
+            raftWriteTimeoutMs=server.config.raftWriteTimeoutMs,
+            raftPeerClientAddrs=server.config.raftPeerClientAddrs)
           let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
           if durationMs >= slowThreshold:
@@ -670,7 +774,10 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         info("[" & $clientId & "] QueryParams: " & queryStr & " (" & $params.len & " params)")
 
         let startTicks = getMonoTime().ticks()
-        let (success, result, errorMsg) = await executeQuery(connCtx.db, connCtx, queryStr, params, replication=server.replicationManager, raftNode=server.raftNode, raftWriteTimeoutMs=server.config.raftWriteTimeoutMs)
+        let (success, result, errorMsg) = await executeQuery(connCtx.db, connCtx, queryStr, params,
+          replication=server.replicationManager, raftNode=server.raftNode,
+          raftWriteTimeoutMs=server.config.raftWriteTimeoutMs,
+          raftPeerClientAddrs=server.config.raftPeerClientAddrs)
         let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
         if durationMs >= slowThreshold:
