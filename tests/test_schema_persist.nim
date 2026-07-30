@@ -168,6 +168,73 @@ suite "Schema persistence":
       db2.close()
     removeDir(dir)
 
+  test "Unnamed FTS index survives reopen":
+    let dir = "/tmp/baradb_schema_persist_fts_noname"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE docs (id INTEGER PRIMARY KEY, content TEXT)").success
+      check execSql(ctx, "INSERT INTO docs (id, content) VALUES (1, 'quick brown fox')").success
+      # No index name — idxName defaults to colKey (docs.content) at execution
+      check execSql(ctx, "CREATE INDEX ON docs (content) USING FTS").success
+      check ctx.ftsIndexes.hasKey("docs.content")
+      db.close()
+    # Reopen fresh context (simulates process restart)
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      # Persisted DDL must be replayable — the dotted fallback name is not.
+      check ctx2.ftsIndexes.hasKey("docs.content")
+      if ctx2.ftsIndexes.hasKey("docs.content"):
+        check ctx2.ftsIndexes["docs.content"].search("quick", limit = 10).len >= 1
+      # Nameless persisted DDL must not confuse DROP INDEX name matching
+      let d = execSql(ctx2, "DROP INDEX content")
+      check d.success
+      check "docs.content" notin ctx2.ftsIndexes
+      let (found, _) = db2.get(SchemaFtsIndexPrefix & "docs.content")
+      check not found
+      db2.close()
+    block:
+      var db3 = newLSMTree(dir)
+      var ctx3 = newExecutionContext(db3)
+      check "docs.content" notin ctx3.ftsIndexes  # no ghost rebuild
+      db3.close()
+    removeDir(dir)
+
+  test "Unnamed HNSW index survives reopen":
+    let dir = "/tmp/baradb_schema_persist_vec_noname"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE vecs (id INTEGER PRIMARY KEY, embedding TEXT)").success
+      check execSql(ctx, "INSERT INTO vecs (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')").success
+      # No index name — idxName defaults to colKey (vecs.embedding)
+      check execSql(ctx, "CREATE INDEX ON vecs (embedding) USING HNSW").success
+      check ctx.vectorIndexes.hasKey("vecs.embedding")
+      db.close()
+    # Reopen fresh context (simulates process restart)
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      check ctx2.vectorIndexes.hasKey("vecs.embedding")
+      if ctx2.vectorIndexes.hasKey("vecs.embedding"):
+        check vengine.search(ctx2.vectorIndexes["vecs.embedding"],
+                             @[1.0'f32, 0.0'f32, 0.0'f32], k = 5).len >= 1
+      let d = execSql(ctx2, "DROP INDEX embedding")
+      check d.success
+      check "vecs.embedding" notin ctx2.vectorIndexes
+      let (found, _) = db2.get(SchemaVecIndexPrefix & "vecs.embedding")
+      check not found
+      db2.close()
+    block:
+      var db3 = newLSMTree(dir)
+      var ctx3 = newExecutionContext(db3)
+      check "vecs.embedding" notin ctx3.vectorIndexes  # no ghost rebuild
+      db3.close()
+    removeDir(dir)
+
   test "Graph survives reopen":
     let dir = "/tmp/baradb_schema_persist_graph"
     removeDir(dir)

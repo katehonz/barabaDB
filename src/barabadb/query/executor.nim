@@ -1321,7 +1321,13 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       ctx.ftsIndexes[colKey] = ftsIdx
       # Persist reconstructed DDL so restoreEngines can rebuild the index
       # from table data after a restart (replay re-writes the same key).
-      let ftsDdl = "CREATE INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ") USING FTS"
+      # Unnamed indexes: the colKey fallback name is dotted ("docs.content")
+      # and unparseable, so persist the nameless form — replay regenerates
+      # the same colKey default.
+      let ftsDdl = if stmt.ciName.len > 0:
+          "CREATE INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ") USING FTS"
+        else:
+          "CREATE INDEX ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ") USING FTS"
       ctx.db.put(SchemaFtsIndexPrefix & colKey, cast[seq[byte]](ftsDdl))
       return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING FTS")
 
@@ -1359,7 +1365,11 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       ctx.vectorIndexes[colKey] = hnswIdx
       # Persist reconstructed DDL so restoreEngines can rebuild the index
       # from table data after a restart (replay re-writes the same key).
-      let vecDdl = "CREATE INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ") USING HNSW"
+      # Unnamed indexes: persist the nameless form (see FTS branch above).
+      let vecDdl = if stmt.ciName.len > 0:
+          "CREATE INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ") USING HNSW"
+        else:
+          "CREATE INDEX ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ") USING HNSW"
       ctx.db.put(SchemaVecIndexPrefix & colKey, cast[seq[byte]](vecDdl))
       return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING HNSW")
 
