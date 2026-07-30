@@ -328,6 +328,7 @@ proc main() =
   var tcpServer = newServerWithRegistry(config, registry)
 
   # Start Raft cluster if enabled
+  var raftNet: RaftNetwork = nil
   if config.raftEnabled:
     info("Starting Raft node " & config.raftNodeId & " on port " & $config.raftPort)
     let raftDataDir = config.dataDir / "raft"
@@ -357,7 +358,7 @@ proc main() =
     # Wire replication ↔ DistTxn
     wireReplicationDistTxn(tcpServer.replicationManager, tcpServer.distTxnManager)
 
-    var raftNet = newRaftNetwork(raftNode)
+    raftNet = newRaftNetwork(raftNode)
     asyncCheck raftNet.run()
 
   # Start replication health check and reconnection loops
@@ -386,6 +387,8 @@ proc main() =
   tcpServer.stop()
   if tcpServer.gossipProtocol != nil:
     tcpServer.gossipProtocol.stop()
+  if raftNet != nil:
+    raftNet.stop()
   withStorageGate:
     registry.closeAll()
 
