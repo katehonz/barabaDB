@@ -2706,6 +2706,41 @@ suite "Raft SQL Write Path":
     check res.keyValuePairs.len == 1
     check res.keyValuePairs[0][1].len == 0
 
+  test "compactLog discards applied prefix and preserves lastSnapshot base":
+    var n = newRaftNode("n1", @[], raftPort = 29120)
+    n.logMaxEntries = 8
+    n.becomeLeader()
+    # Single-node: simulate applied entries then compact.
+    for i in 1 .. 20:
+      let e = n.appendLog("put", cast[seq[byte]]("k" & $i & "\x00v"))
+      check e.index == uint64(i)
+      n.commitIndex = e.index
+      n.lastApplied = e.index
+      n.compactLog()
+    check n.log.len <= n.logMaxEntries
+    check n.lastSnapshotIndex > 0
+    check n.lastLogIndex == 20
+    let e21 = n.appendLog("put", cast[seq[byte]]("k21\x00v"))
+    check e21.index == 21
+    n.commitIndex = 21
+    n.lastApplied = 21
+    n.compactLog()
+    check n.lastLogIndex == 21
+
+  test "leader compactLog never discards past a lagging peer matchIndex":
+    var n = newRaftNode("n1", @["n2"], raftPort = 29121)
+    n.logMaxEntries = 5
+    n.becomeLeader()
+    n.matchIndex["n2"] = 0  # peer never caught up
+    for i in 1 .. 15:
+      discard n.appendLog("put", cast[seq[byte]]("x"))
+      n.commitIndex = uint64(i)
+      n.lastApplied = uint64(i)
+    n.compactLog()
+    # With matchIndex[n2]=0, through=0 — no compaction past snapshot 0
+    check n.lastSnapshotIndex == 0
+    check n.log.len == 15
+
   test "appendDdlToRaft fails when node is not leader":
     var n = newRaftNode("n1", @["n2"], raftPort = 29113)
     let (ok, err) = waitFor appendDdlToRaft(n,

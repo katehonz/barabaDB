@@ -343,6 +343,8 @@ proc main() =
     var raftNode = newRaftNode(config.raftNodeId, raftPeers, config.raftPort,
                                dataDir = raftDataDir)
     raftNode.peerAddrs = config.raftPeerAddrs
+    if config.raftLogMaxEntries > 0:
+      raftNode.logMaxEntries = config.raftLogMaxEntries
     tcpServer.raftNode = raftNode  # C3b: executeQuery rejects writes on followers
     # Wire state machine: committed entries update LSM + secondary indexes
     # (B-tree/FTS/HNSW/graphs) and re-execute schema DDL on every node.

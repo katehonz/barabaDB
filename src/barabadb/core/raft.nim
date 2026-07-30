@@ -33,6 +33,14 @@ type
     log*: seq[LogEntry]
     commitIndex*: uint64
     lastApplied*: uint64
+    ## Compacted prefix: log entries with index <= lastSnapshotIndex are gone.
+    ## Safe compaction only discards entries every peer has already matched
+    ## (leader) or that this node has applied (follower), so catch-up via
+    ## AppendEntries still works without InstallSnapshot payloads.
+    lastSnapshotIndex*: uint64
+    lastSnapshotTerm*: uint64
+    ## Trigger compaction when log.len exceeds this (0 = default 256).
+    logMaxEntries*: int
     # State machine callback
     applyCommand*: proc(cmd: string, data: seq[byte]) {.gcsafe.}
     # Distributed transaction callbacks (for raft→disttxn integration)
@@ -100,6 +108,9 @@ proc saveState(node: RaftNode) =
     s.write(uint32(entry.data.len))
     if entry.data.len > 0:
       s.writeData(addr entry.data[0], entry.data.len)
+  # Snapshot base (appended for backward-compatible load of older files)
+  s.write(node.lastSnapshotIndex)
+  s.write(node.lastSnapshotTerm)
   s.close()
   moveFile(tmpPath, path)
 
@@ -133,6 +144,16 @@ proc loadState(node: RaftNode) =
         if s.readData(addr data[0], dataLen) != dataLen:
           raise newException(IOError, "Incomplete Raft log data read")
       node.log[i] = LogEntry(term: term, index: index, command: cmd, data: data)
+    # Optional trailing snapshot fields (absent in pre-compaction state files)
+    if not s.atEnd:
+      node.lastSnapshotIndex = s.readUint64()
+      if not s.atEnd:
+        node.lastSnapshotTerm = s.readUint64()
+      # lastApplied/commitIndex must not sit below the compacted base
+      if node.lastApplied < node.lastSnapshotIndex:
+        node.lastApplied = node.lastSnapshotIndex
+      if node.commitIndex < node.lastSnapshotIndex:
+        node.commitIndex = node.lastSnapshotIndex
   except IOError, OSError:
     echo "[WARN] Failed to load Raft state from ", path, ": ", getCurrentExceptionMsg()
   s.close()
@@ -148,6 +169,9 @@ proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0,
     log: @[],
     commitIndex: 0,
     lastApplied: 0,
+    lastSnapshotIndex: 0,
+    lastSnapshotTerm: 0,
+    logMaxEntries: 256,
     nextIndex: initTable[string, uint64](),
     matchIndex: initTable[string, uint64](),
     peers: peers,
@@ -176,12 +200,12 @@ proc addNode*(cluster: RaftCluster, id: string) =
 
 proc lastLogIndex*(node: RaftNode): uint64 =
   if node.log.len == 0:
-    return 0
+    return node.lastSnapshotIndex
   return node.log[^1].index
 
 proc lastLogTerm*(node: RaftNode): uint64 =
   if node.log.len == 0:
-    return 0
+    return node.lastSnapshotTerm
   return node.log[^1].term
 
 proc findLogEntryByIndex(node: RaftNode, index: uint64): int =
@@ -192,9 +216,52 @@ proc findLogEntryByIndex(node: RaftNode, index: uint64): int =
       return i
   return -1
 
+proc termAtIndex(node: RaftNode, index: uint64): uint64 =
+  ## Term of the log entry (or snapshot base) at `index`, or 0 if unknown.
+  if index == 0: return 0
+  if index == node.lastSnapshotIndex: return node.lastSnapshotTerm
+  let pos = node.findLogEntryByIndex(index)
+  if pos >= 0: return node.log[pos].term
+  return 0
+
+proc compactLog*(node: RaftNode) =
+  ## Drop a fully-replicated / applied log prefix so the in-memory log stays
+  ## bounded. Leader: never discard past any peer's matchIndex (catch-up via
+  ## AppendEntries remains possible). Follower: discard through lastApplied.
+  let maxEntries = if node.logMaxEntries > 0: node.logMaxEntries else: 256
+  if node.log.len <= maxEntries:
+    return
+  var through = node.lastApplied
+  if node.state == rsLeader and node.peers.len > 0:
+    var minMatch = through
+    for peer in node.peers:
+      let m = node.matchIndex.getOrDefault(peer, 0'u64)
+      if m < minMatch: minMatch = m
+    through = minMatch
+  if through <= node.lastSnapshotIndex:
+    return
+  let pos = node.findLogEntryByIndex(through)
+  if pos < 0:
+    return
+  node.lastSnapshotTerm = node.log[pos].term
+  node.lastSnapshotIndex = through
+  if pos + 1 < node.log.len:
+    node.log = node.log[(pos + 1) .. ^1]
+  else:
+    node.log = @[]
+  # Keep lastApplied/commit at least at the snapshot base
+  if node.lastApplied < node.lastSnapshotIndex:
+    node.lastApplied = node.lastSnapshotIndex
+  if node.commitIndex < node.lastSnapshotIndex:
+    node.commitIndex = node.lastSnapshotIndex
+  node.saveState()
+
 proc applyCommitted(node: RaftNode) =
   while node.lastApplied < node.commitIndex:
     inc node.lastApplied
+    # Entries at/below the snapshot base were already applied before compact.
+    if node.lastApplied <= node.lastSnapshotIndex:
+      continue
     let pos = node.findLogEntryByIndex(node.lastApplied)
     if pos >= 0:
       let entry = node.log[pos]
@@ -213,6 +280,7 @@ proc applyCommitted(node: RaftNode) =
       else:
         if node.applyCommand != nil:
           node.applyCommand(entry.command, entry.data)
+  node.compactLog()
 
 proc becomeFollower*(node: RaftNode, term: uint64) =
   node.state = rsFollower
@@ -283,13 +351,20 @@ proc handleAppendEntries*(node: RaftNode, msg: RaftMessage): RaftMessage =
 
   # Check if log contains entry at prevLogIndex with prevLogTerm
   if msg.prevLogIndex > 0:
-    let prevPos = node.findLogEntryByIndex(msg.prevLogIndex)
-    if prevPos < 0:
+    if msg.prevLogIndex < node.lastSnapshotIndex:
+      # Leader is behind our snapshot base — reject
       return reply
-    if node.log[prevPos].term != msg.prevLogTerm:
-      # Delete conflicting entries
-      node.log.setLen(prevPos)
-      return reply
+    if msg.prevLogIndex == node.lastSnapshotIndex:
+      if msg.prevLogTerm != node.lastSnapshotTerm:
+        return reply
+    else:
+      let prevPos = node.findLogEntryByIndex(msg.prevLogIndex)
+      if prevPos < 0:
+        return reply
+      if node.log[prevPos].term != msg.prevLogTerm:
+        # Delete conflicting entries
+        node.log.setLen(prevPos)
+        return reply
 
   # Append new entries
   var logChanged = false
@@ -328,13 +403,13 @@ proc requestVote*(node: RaftNode): seq[RaftMessage] =
     ))
 
 proc appendEntries*(node: RaftNode, peerId: string): RaftMessage =
-  let nextIdx = node.nextIndex.getOrDefault(peerId, node.lastLogIndex + 1)
+  var nextIdx = node.nextIndex.getOrDefault(peerId, node.lastLogIndex + 1)
+  # Never try to send entries already discarded by our snapshot base.
+  if nextIdx <= node.lastSnapshotIndex:
+    nextIdx = node.lastSnapshotIndex + 1
+    node.nextIndex[peerId] = nextIdx
   let prevIdx = nextIdx - 1
-  var prevTerm: uint64 = 0
-  if prevIdx > 0:
-    let prevPos = node.findLogEntryByIndex(prevIdx)
-    if prevPos >= 0:
-      prevTerm = node.log[prevPos].term
+  let prevTerm = node.termAtIndex(prevIdx)
 
   var entries: seq[LogEntry] = @[]
   let startPos = node.findLogEntryByIndex(nextIdx)
@@ -398,29 +473,33 @@ proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
     # Update commit index using true majority calculation
     let majority = (node.peers.len + 1 + 1) div 2  # majority of cluster (peers + leader)
     var newCommitIdx = node.commitIndex
-    
-    # Check each index from highest to current commitIndex+1
+
+    # Walk logical indices high→low via findLogEntryByIndex (log may be compacted).
     for idx in countdown(int(node.lastLogIndex), int(node.commitIndex) + 1):
       if idx <= 0:
         break
+      let pos = node.findLogEntryByIndex(uint64(idx))
+      if pos < 0:
+        continue
       # Only commit entries from current term (Raft safety property)
-      if uint64(idx) <= node.lastLogIndex and node.log[idx - 1].term == node.currentTerm:
-        # Count how many nodes have replicated this index
+      if node.log[pos].term == node.currentTerm:
         var count = 1  # Leader itself
         for peerId2, mIdx in node.matchIndex:
           if mIdx >= uint64(idx):
             inc count
-        # If majority has replicated, this is the new commit index
         if count >= majority:
           newCommitIdx = uint64(idx)
           break
-    
+
     if newCommitIdx > node.commitIndex:
       node.commitIndex = newCommitIdx
       node.applyCommitted()
   else:
-    if node.nextIndex[peerId] > 1:
+    let floor = node.lastSnapshotIndex + 1
+    if node.nextIndex.getOrDefault(peerId, 1) > floor:
       dec node.nextIndex[peerId]
+    else:
+      node.nextIndex[peerId] = floor
 
 proc state*(node: RaftNode): RaftState = node.state
 proc isLeader*(node: RaftNode): bool = node.state == rsLeader

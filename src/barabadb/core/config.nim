@@ -43,6 +43,7 @@ type
     ## SQL client ports for leader forwarding (id@host:clientPort).
     raftPeerClientAddrs*: Table[string, tuple[host: string, port: int]]
     raftWriteTimeoutMs*: int
+    raftLogMaxEntries*: int
 
   CompactionStrategy* = enum
     csSizeTiered = "size_tiered"
@@ -84,6 +85,7 @@ proc defaultConfig*(): BaraConfig =
     raftPeerAddrs: initTable[string, tuple[host: string, port: int]](),
     raftPeerClientAddrs: initTable[string, tuple[host: string, port: int]](),
     raftWriteTimeoutMs: 5_000,
+    raftLogMaxEntries: 256,
   )
 
 # ----------------------------------------------------------------------
@@ -210,6 +212,7 @@ proc loadConfigFromEnv*(cfg: var BaraConfig) =
         cfg.raftPeerAddrs[id] = (host, port)
   cfg.raftNodeId = getEnv("BARADB_RAFT_NODE_ID", cfg.raftNodeId)
   cfg.raftWriteTimeoutMs = parseEnvInt(getEnv("BARADB_RAFT_WRITE_TIMEOUT_MS", ""), cfg.raftWriteTimeoutMs)
+  cfg.raftLogMaxEntries = parseEnvInt(getEnv("BARADB_RAFT_LOG_MAX_ENTRIES", ""), cfg.raftLogMaxEntries)
   # Optional: client (SQL) addresses for leader write forwarding.
   # Same id@host:port shape as BARADB_RAFT_PEERS, but ports are BARADB_PORT values.
   let clientPeersEnv = getEnv("BARADB_RAFT_CLIENT_PEERS", "")
