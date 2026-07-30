@@ -425,7 +425,11 @@ proc runFailoverLoadScenario() =
 suite "Raft failover under load E2E":
   test "committed writes survive a leader kill under sustained write load":
     if not fileExists(BinaryPath):
-      echo "[SKIP] ", BinaryPath, " missing — run `nimble test` (builds the server first)"
-      skip()
+      if getEnv("CI").len > 0:
+        echo "[FAIL] ", BinaryPath, " missing under CI — build step broken?"
+        fail()
+      else:
+        echo "[SKIP] ", BinaryPath, " missing — run `nimble test` (builds the server first)"
+        skip()
     else:
       runFailoverLoadScenario()

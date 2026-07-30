@@ -412,7 +412,11 @@ proc runWritesScenario() =
 suite "Raft replicated writes E2E":
   test "writes replicate, followers reject, failover resumes writes":
     if not fileExists(BinaryPath):
-      echo "[SKIP] ", BinaryPath, " missing — run `nimble test` (builds the server first)"
-      skip()
+      if getEnv("CI").len > 0:
+        echo "[FAIL] ", BinaryPath, " missing under CI — build step broken?"
+        fail()
+      else:
+        echo "[SKIP] ", BinaryPath, " missing — run `nimble test` (builds the server first)"
+        skip()
     else:
       runWritesScenario()

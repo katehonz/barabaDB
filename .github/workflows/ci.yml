@@ -61,6 +61,28 @@ jobs:
           done
           echo "--- Done ---"
 
+  raft-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Nim
+        uses: jiro4989/setup-nim-action@v1
+        with:
+          nim-version: '2.2.10'
+      - name: Install system dependencies
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq libssl-dev libpcre3-dev openssl ca-certificates
+      - name: Install Nim dependencies
+        run: nimble install --depsOnly -y
+      - name: Build server
+        run: nim c -d:ssl -o:build/baradadb src/baradadb.nim
+      - name: Raft e2e suites
+        env:
+          CI: "true"
+        run: |
+          nim c -d:ssl --threads:on --path:src -r tests/raft_e2e_test.nim
+          nim c -d:ssl --threads:on --path:src -r tests/raft_writes_e2e_test.nim
+          nim c -d:ssl --threads:on --path:src -r tests/raft_failover_load_e2e_test.nim
+
   verify:
     runs-on: ubuntu-latest
     steps:

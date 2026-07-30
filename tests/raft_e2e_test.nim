@@ -208,7 +208,11 @@ proc runClusterScenario() =
 suite "Raft E2E cluster":
   test "3-node election and failover":
     if not fileExists(BinaryPath):
-      echo "[SKIP] ", BinaryPath, " missing — run `nimble test` (builds the server first)"
-      skip()
+      if getEnv("CI").len > 0:
+        echo "[FAIL] ", BinaryPath, " missing under CI — build step broken?"
+        fail()
+      else:
+        echo "[SKIP] ", BinaryPath, " missing — run `nimble test` (builds the server first)"
+        skip()
     else:
       runClusterScenario()
