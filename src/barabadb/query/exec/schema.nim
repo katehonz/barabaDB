@@ -17,6 +17,7 @@ const
   SchemaUserPrefix* = "_schema:users:"
   SchemaPolicyPrefix* = "_schema:policies:"
   SchemaFtsIndexPrefix* = "_schema:ftsidx:"
+  SchemaVecIndexPrefix* = "_schema:vecidx:"
   ## Legacy CREATE TABLE keys (pre-fix) used a migrations: counter suffix
   SchemaLegacyCreatePrefix* = "_schema:migrations:"
 

@@ -7,6 +7,7 @@ import barabadb/storage/lsm
 import barabadb/query/executor
 import barabadb/query/parser
 import barabadb/fts/engine
+import barabadb/vector/engine as vengine
 
 proc execSql(ctx: ExecutionContext, sql: string): ExecResult =
   let node = parse(sql)
@@ -134,6 +135,35 @@ suite "Schema persistence":
       check execSql(ctx2, "INSERT INTO docs (id, content) VALUES (2, 'quick red fox')").success
       if ctx2.ftsIndexes.hasKey("docs.content"):
         check ctx2.ftsIndexes["docs.content"].search("red", limit = 10).len >= 1
+      db2.close()
+    removeDir(dir)
+
+  test "HNSW vector index survives reopen":
+    let dir = "/tmp/baradb_schema_persist_vec"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE vecs (id INTEGER PRIMARY KEY, embedding TEXT)").success
+      check execSql(ctx, "INSERT INTO vecs (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')").success
+      check execSql(ctx, "CREATE INDEX vecs_hnsw ON vecs (embedding) USING HNSW").success
+      check ctx.vectorIndexes.hasKey("vecs.embedding")
+      db.close()
+    # Reopen fresh context (simulates process restart)
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      # Index must be rebuilt from the persisted schema key — today it is
+      # silently missing, so vector searches return empty results after reopen.
+      check ctx2.vectorIndexes.hasKey("vecs.embedding")
+      if ctx2.vectorIndexes.hasKey("vecs.embedding"):
+        check vengine.search(ctx2.vectorIndexes["vecs.embedding"],
+                             @[1.0'f32, 0.0'f32, 0.0'f32], k = 5).len >= 1
+      # index keeps updating after reopen
+      check execSql(ctx2, "INSERT INTO vecs (id, embedding) VALUES (2, '[0.0, 1.0, 0.0]')").success
+      if ctx2.vectorIndexes.hasKey("vecs.embedding"):
+        check vengine.search(ctx2.vectorIndexes["vecs.embedding"],
+                             @[0.0'f32, 1.0'f32, 0.0'f32], k = 5).len >= 1
       db2.close()
     removeDir(dir)
 

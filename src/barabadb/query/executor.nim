@@ -1336,6 +1336,10 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
                 docId = docId * 31 + uint64(ord(ch))
               vengine.insert(hnswIdx, docId, vec, meta)
       ctx.vectorIndexes[colKey] = hnswIdx
+      # Persist reconstructed DDL so restoreEngines can rebuild the index
+      # from table data after a restart (replay re-writes the same key).
+      let vecDdl = "CREATE INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ") USING HNSW"
+      ctx.db.put(SchemaVecIndexPrefix & colKey, cast[seq[byte]](vecDdl))
       return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING HNSW")
 
     ctx.btrees[colKey] = newBTreeIndex[string, IndexEntry]()
@@ -1569,12 +1573,13 @@ proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult =
   return okResult(msg="Empty migration body")
 
 proc restoreEngines*(ctx: ExecutionContext) =
-  ## Rebuild ephemeral engines (FTS indexes) from persisted schema keys after
-  ## restoreSchema. Invoked via context.restoreEnginesHook at the end of
+  ## Rebuild ephemeral engines (FTS/HNSW indexes) from persisted schema keys
+  ## after restoreSchema. Invoked via context.restoreEnginesHook at the end of
   ## newExecutionContext. Replay re-persists the same key, so it is idempotent.
   var ddls: seq[string] = @[]
   for (key, value) in ctx.db.scanAll():
-    if not key.startsWith(SchemaFtsIndexPrefix): continue
+    if not key.startsWith(SchemaFtsIndexPrefix) and
+       not key.startsWith(SchemaVecIndexPrefix): continue
     let ddl = cast[string](value)
     if ddl.len == 0: continue
     ddls.add(ddl)
