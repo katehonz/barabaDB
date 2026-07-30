@@ -1560,7 +1560,7 @@ features are still being refined:
 | HNSW vector search | ✅ Implemented | Hierarchical graph navigation with SIMD-optimized distance metrics. |
 | TCP server execution | ✅ Implemented | Full binary wire protocol parsing and BaraQL query execution. |
 | Raft consensus | ✅ Core logic | Full Raft algorithm with log replication; network transport pluggable. |
-| Graph / FTS / Columnar | ✅ Implemented | In-memory engines with serialization; persistence layer optional. |
+| Graph / FTS / Columnar | ✅ Implemented | In-memory engines with serialization; FTS/vector/graph indexes persist across restarts. |
 | Query codegen | ✅ Implemented | IR plans compile to storage engine operations with optimization passes. |
 
 All core functionality is complete and production-tested. The roadmap above

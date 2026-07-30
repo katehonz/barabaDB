@@ -1,7 +1,7 @@
 # Engine Persistence (C1) — Design
 
 Date: 2026-07-30
-Status: Approved direction (user: "продължи"); implementation follows.
+Status: Done — schema keys + restoreEngines replay for FTS/HNSW, table-scan loader for graphs, DROP path cleanup, unnamed-index fix.
 
 ## Problem
 
