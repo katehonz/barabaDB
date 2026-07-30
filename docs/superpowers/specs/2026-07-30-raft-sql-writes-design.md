@@ -1,7 +1,7 @@
 # SQL Writes Through Raft (C3b) — Design
 
 Date: 2026-07-30
-Status: Approved direction (user: "ок ... продължавай"); implementation follows.
+Status: Done (implemented on `feat/raft-sql-writes`).
 
 ## Problem
 

@@ -7,7 +7,17 @@ BaraDB поддържа разпределено внедряване с Raft к
 
 ## Raft Консенсус
 
-Leader election и log репликация:
+Leader election и log репликация през TCP. Включване:
+
+| Env | Значение |
+|-----|----------|
+| `BARADB_RAFT_ENABLED=true` | Включва Raft |
+| `BARADB_RAFT_NODE_ID` | Id на този възел |
+| `BARADB_RAFT_PORT` | Raft TCP порт |
+| `BARADB_RAFT_PEERS` | Списък `id@host:port` (вкл. себе си) |
+| `BARADB_RAFT_WRITE_TIMEOUT_MS` | Макс. изчакване за majority commit при SQL записи (по подразбиране 5000) |
+
+Когато Raft е активен, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` и транзакционен `COMMIT`) се приема само от лидера: KV двойките се добавят в Raft лога и клиентът чака majority commit. Followers отказват записи с `not leader; leader is '…'`. Приложените записи отиват в **default** базата. DDL (напр. `CREATE TABLE`) още не се репликира — схемата трябва да се създаде на всеки възел.
 
 ```nim
 import barabadb/core/raft

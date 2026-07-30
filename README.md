@@ -1559,7 +1559,7 @@ features are still being refined:
 | LSM-Tree SSTable reads | ✅ Implemented | Full disk I/O with compaction, WAL, and bloom filters. |
 | HNSW vector search | ✅ Implemented | Hierarchical graph navigation with SIMD-optimized distance metrics. |
 | TCP server execution | ✅ Implemented | Full binary wire protocol parsing and BaraQL query execution. |
-| Raft consensus | ✅ Core logic | Full Raft algorithm with log replication; network transport pluggable. |
+| Raft consensus | ✅ Core logic | Leader election + log replication over TCP; SQL DML commits through the raft log when `BARADB_RAFT_ENABLED=true` (followers reject writes). |
 | Graph / FTS / Columnar | ✅ Implemented | In-memory engines with serialization; FTS/vector/graph indexes persist across restarts. |
 | Query codegen | ✅ Implemented | IR plans compile to storage engine operations with optimization passes. |
 
