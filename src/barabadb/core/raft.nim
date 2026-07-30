@@ -560,16 +560,26 @@ proc newRaftNetwork*(node: RaftNode): RaftNetwork =
     timer: newElectionTimer(node, node.electionTimeout),
   )
 
+const RaftConnectTimeoutMs = 200
+
 proc connectToPeer(net: RaftNetwork, peerId: string) {.async.} =
+  ## Dial a peer with a short timeout so a dead peer cannot stall the whole
+  ## heartbeat / RequestVote fan-out (default TCP connect can hang for many
+  ## seconds, which lets live followers trip their election timers).
   if peerId notin net.node.peerAddrs:
     return
   let (host, port) = net.node.peerAddrs[peerId]
+  var sock: AsyncSocket = nil
   try:
-    let sock = newAsyncSocket()
-    await sock.connect(host, Port(port))
+    sock = newAsyncSocket()
+    let ok = await withTimeout(sock.connect(host, Port(port)), RaftConnectTimeoutMs)
+    if not ok:
+      sock.close()
+      return
     net.peerSockets[peerId] = sock
   except CatchableError:
-    discard
+    if sock != nil:
+      try: sock.close() except CatchableError: discard
 
 proc send*(net: RaftNetwork, peerId: string, msg: RaftMessage) {.async.} =
   if peerId notin net.peerSockets:
@@ -582,6 +592,7 @@ proc send*(net: RaftNetwork, peerId: string, msg: RaftMessage) {.async.} =
     try:
       await net.peerSockets[peerId].send(cast[string](header) & cast[string](data))
     except CatchableError:
+      try: net.peerSockets[peerId].close() except CatchableError: discard
       net.peerSockets.del(peerId)
 
 proc broadcast*(net: RaftNetwork, msgs: seq[RaftMessage]) {.async.} =
@@ -643,11 +654,19 @@ proc receiveLoop(net: RaftNetwork, client: AsyncSocket) {.async.} =
     client.close()
 
 proc heartbeatLoop(net: RaftNetwork) {.async.} =
+  ## Fan out heartbeats in parallel so a slow/dead peer cannot delay
+  ## AppendEntries to the rest of the cluster.
   while net.running:
     if net.node.state == rsLeader:
+      var futs: seq[Future[void]] = @[]
       for peer in net.node.peers:
         let msg = net.node.appendEntries(peer)
-        await net.send(peer, msg)
+        futs.add(net.send(peer, msg))
+      for f in futs:
+        try:
+          await f
+        except CatchableError:
+          discard
     await sleepAsync(net.node.heartbeatTimeout)
 
 proc timerLoop*(net: RaftNetwork) {.async.}

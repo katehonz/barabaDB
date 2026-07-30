@@ -156,9 +156,11 @@ proc migrateLegacyData(registry: DatabaseRegistry, config: BaraConfig) =
     moveDir(legacyDir, legacyDir & ".migrated")
     info("Legacy data migration complete. Original renamed to " & legacyDir & ".migrated")
 
-proc runTcpServer(config: BaraConfig) {.async.} =
-  info("BaraDB TCP listening on " & config.address & ":" & $config.port)
-  var server = newServer(config)
+proc runTcpServer(server: Server) {.async.} =
+  ## Run the already-wired TCP Server. Must use the same instance that main
+  ## attaches raftNode / replication / gossip to — a fresh newServer(config)
+  ## would leave those fields nil and open a second registry over the same data.
+  info("BaraDB TCP listening on " & server.config.address & ":" & $server.config.port)
   await server.run()
 
 proc wireRaftDistTxn(raftNode: RaftNode, tcpServer: Server) =
@@ -381,7 +383,8 @@ proc main() =
           info("Joined gossip cluster via seed " & host & ":" & $port)
 
   # Start TCP wire protocol server on main thread with async event loop
-  waitFor runTcpServer(config)
+  # (must be the wired tcpServer — not a fresh newServer(config)).
+  waitFor runTcpServer(tcpServer)
 
   # Shutdown: stop listeners first, then close storage under the gate
   httpServer.stop(closeStorage = false)

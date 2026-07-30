@@ -29,7 +29,8 @@ task test, "Run all tests":
   # Quick embedded suites first, heavy fuzz/stress suites last.
   for t in ["test_minimal", "test_all", "bugfix_test", "join_tests", "test_lock",
             "test_schema_persist", "test_storage_hardening", "tla_faithfulness",
-            "nimforum_smoke_test", "raft_e2e_test", "fuzz_test", "prop_test",
+            "nimforum_smoke_test", "raft_e2e_test", "raft_writes_e2e_test",
+            "fuzz_test", "prop_test",
             "test_wire_insert_stress", "stress_test"]:
     exec "nim c -r tests/" & t & ".nim"
 
