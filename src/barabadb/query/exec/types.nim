@@ -113,7 +113,12 @@ type
     outerRow*: Table[string, string]  # outer query row for correlated subqueries
     subqueryPlan*: IRPlan  # current subquery plan being evaluated
     currentDatabase*: string  # name of the currently selected database
-    registry*: DatabaseRegistry  # nil for single-DB mode
+    # The registry owns this context (registry -> DatabaseInfo -> ctx), so this
+    # back-reference is a non-owning cursor: it breaks the registry <-> ctx
+    # reference cycle. The registry always outlives its contexts (closeAll at
+    # shutdown). Note: breaking this cycle alone does NOT make ORC usable —
+    # the ORC crash under wire INSERT load persists (see tests/orc_repro.py).
+    registry* {.cursor.}: DatabaseRegistry  # nil for single-DB mode
 
   MigrationRecord* = object
     name*: string

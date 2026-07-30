@@ -32,7 +32,7 @@ jobs:
 
       - name: Run tests
         run: |
-          nim c -d:ssl --threads:on --path:src -r tests/test_all.nim > test_output.log 2>&1
+          nimble test > test_output.log 2>&1
           EXIT=$?
           tail -n 200 test_output.log
           exit $EXIT
@@ -51,12 +51,6 @@ jobs:
 
       - name: Compile benchmarks
         run: nim c -d:release --threads:on benchmarks/bench_all.nim
-
-      - name: Compile stress test
-        run: nim c -d:ssl --threads:on --path:src tests/stress_test.nim
-
-      - name: Run stress test
-        run: ./tests/stress_test
 
       - name: Check for unused declarations and imports
         run: |

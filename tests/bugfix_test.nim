@@ -250,3 +250,74 @@ suite "Bug fixes — IN list, nkPath exprToSql, multi-table joins":
     check rmax.success
     check rmax.rows.len == 1
     check valueToString(rmax.rows[0]["m"]) == "30"
+
+suite "Bug fixes — keyword 'header' usable as column name":
+
+  test "CREATE TABLE / INSERT / SELECT with column named 'header'":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    # nimforum schema uses a column named 'header' (tkHeader is the CSV IMPORT keyword)
+    let c = executeQuery(ctx, parse("CREATE TABLE post (id INTEGER PRIMARY KEY, header TEXT, content TEXT)"))
+    check c.success
+    let i = executeQuery(ctx, parse("INSERT INTO post (id, header, content) VALUES (1, 'Hello', 'World')"))
+    check i.success
+    let r = executeQuery(ctx, parse("SELECT header FROM post WHERE id = 1"))
+    check r.success
+    check r.rows.len == 1
+    check valueToString(r.rows[0]["header"]) == "Hello"
+    let rw = executeQuery(ctx, parse("SELECT id FROM post WHERE header = 'Hello'"))
+    check rw.success
+    check rw.rows.len == 1
+
+  test "IMPORT ... HEADER clause still parses after soft-keyword change":
+    let ast = parse("IMPORT FROM 'data.csv' INTO post HEADER no")
+    check ast.stmts.len == 1
+    check ast.stmts[0].kind == nkImportFrom
+    check ast.stmts[0].impHasHeader == false
+    let ast2 = parse("EXPORT TO 'out.csv' FROM post HEADER yes")
+    check ast2.stmts.len == 1
+    check ast2.stmts[0].kind == nkExportTo
+    check ast2.stmts[0].expIncludeHeader == true
+
+suite "Bug fixes — clause keywords usable as identifiers":
+
+  test "columns named after clause keywords (format, status, user, ...)":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    let c = executeQuery(ctx, parse("""
+      CREATE TABLE kw (id INTEGER PRIMARY KEY, format TEXT, status TEXT, user TEXT,
+                       batch INTEGER, csv TEXT, ndjson TEXT, delimiter TEXT,
+                       migration TEXT, apply TEXT, up TEXT, down TEXT, dryrun TEXT,
+                       policy TEXT, enable TEXT, disable TEXT, recover TEXT,
+                       before TEXT, after TEXT, instead TEXT, of TEXT)
+    """))
+    check c.success
+    let i = executeQuery(ctx, parse(
+      "INSERT INTO kw (id, format, status, user, batch, of) VALUES (1, 'csv', 'active', 'admin', 7, 'x')"))
+    check i.success
+    let u = executeQuery(ctx, parse("UPDATE kw SET status = 'done' WHERE id = 1"))
+    check u.success
+    let r = executeQuery(ctx, parse("SELECT format, status, user, batch, of FROM kw WHERE id = 1"))
+    check r.success
+    check r.rows.len == 1
+    check valueToString(r.rows[0]["format"]) == "csv"
+    check valueToString(r.rows[0]["status"]) == "done"
+    check valueToString(r.rows[0]["user"]) == "admin"
+    check valueToString(r.rows[0]["batch"]) == "7"
+    let rq = executeQuery(ctx, parse("SELECT kw.status FROM kw WHERE kw.status = 'done'"))
+    check rq.success
+    check rq.rows.len == 1
+
+  test "IMPORT/EXPORT accept keyword values: FORMAT csv/ndjson/json, HEADER true/false":
+    let a1 = parse("IMPORT FROM 'd.csv' INTO t FORMAT csv HEADER true")
+    check a1.stmts[0].impFormat == "csv"
+    check a1.stmts[0].impHasHeader == true
+    let a2 = parse("IMPORT FROM 'd.csv' INTO t FORMAT ndjson HEADER false")
+    check a2.stmts[0].impFormat == "ndjson"
+    check a2.stmts[0].impHasHeader == false
+    let a3 = parse("EXPORT TO 'o.csv' FROM t FORMAT json HEADER true")
+    check a3.stmts[0].expFormat == "json"
+    check a3.stmts[0].expIncludeHeader == true
+    let a4 = parse("EXPORT TO 'o.csv' FROM t FORMAT csv DELIMITER ';' HEADER false")
+    check a4.stmts[0].expFormat == "csv"
+    check a4.stmts[0].expIncludeHeader == false

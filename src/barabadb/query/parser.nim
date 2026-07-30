@@ -35,7 +35,12 @@ proc match(p: var Parser, kind: TokenKind): bool =
   return false
 
 # Token kinds that can also serve as identifiers in table/column name positions
-const identLikeKinds = {tkIdent, tkLabels, tkCount, tkSum, tkAvg, tkMin, tkMax, tkArrayAgg, tkStringAgg, tkJsonFmt, tkArray, tkVector, tkGraph, tkDocument}
+const identLikeKinds = {tkIdent, tkLabels, tkCount, tkSum, tkAvg, tkMin, tkMax,
+    tkArrayAgg, tkStringAgg, tkJsonFmt, tkArray, tkVector, tkGraph, tkDocument,
+    tkHeader, tkFormat, tkDelimiter, tkBatch, tkCsv, tkNdjson,
+    tkStatus, tkMigration, tkApply, tkUp, tkDown, tkDryRun,
+    tkUser, tkPolicy, tkEnable, tkDisable, tkRecover,
+    tkBefore, tkAfter, tkInstead, tkOf}
 
 proc expectIdent(p: var Parser): Token =
   ## Expect a token that can serve as an identifier (table name, column name, alias, etc.).
@@ -81,7 +86,11 @@ proc parsePrimary(p: var Parser): Node =
   of tkCurrentRole:
     discard p.advance()
     Node(kind: nkCurrentRole, line: tok.line, col: tok.col)
-  of tkIdent, tkLabels, tkRowNumber, tkRank, tkDenseRank, tkLead, tkLag, tkFirstValue, tkLastValue, tkNtile:
+  of tkIdent, tkLabels, tkRowNumber, tkRank, tkDenseRank, tkLead, tkLag, tkFirstValue, tkLastValue, tkNtile,
+      tkHeader, tkFormat, tkDelimiter, tkBatch, tkCsv, tkNdjson,
+      tkStatus, tkMigration, tkApply, tkUp, tkDown, tkDryRun,
+      tkUser, tkPolicy, tkEnable, tkDisable, tkRecover,
+      tkBefore, tkAfter, tkInstead, tkOf:
     discard p.advance()
     let funcName = tok.value
     # Check for function call: ident(...)
@@ -105,7 +114,7 @@ proc parsePrimary(p: var Parser): Node =
     var parts = @[funcName]
     while p.peek().kind == tkDot:
       discard p.advance()  # consume .
-      parts.add(p.expect(tkIdent).value)
+      parts.add(p.expectIdent().value)
     if parts.len == 1:
       return Node(kind: nkIdent, identName: funcName, line: tok.line, col: tok.col)
     return Node(kind: nkPath, pathParts: parts, line: tok.line, col: tok.col)
@@ -462,7 +471,7 @@ proc parseWith(p: var Parser): Node =
     isRecursive = true
 
   # Parse first CTE
-  let cteName = p.expect(tkIdent).value
+  let cteName = p.expectIdent().value
   discard p.expect(tkAs)
   discard p.expect(tkLParen)
   let cteQuery = p.parseSelect()
@@ -471,7 +480,7 @@ proc parseWith(p: var Parser): Node =
 
   # Parse additional CTEs
   while p.match(tkComma):
-    let name = p.expect(tkIdent).value
+    let name = p.expectIdent().value
     discard p.expect(tkAs)
     discard p.expect(tkLParen)
     let query = p.parseSelect()
@@ -498,12 +507,12 @@ proc parseSelect(p: var Parser): Node =
   result.selResult = @[]
   var expr = p.parseExpr()
   if p.match(tkAs):
-    expr.exprAlias = p.expect(tkIdent).value
+    expr.exprAlias = p.expectIdent().value
   result.selResult.add(expr)
   while p.match(tkComma):
     expr = p.parseExpr()
     if p.match(tkAs):
-      expr.exprAlias = p.expect(tkIdent).value
+      expr.exprAlias = p.expectIdent().value
     result.selResult.add(expr)
 
   # Parse FROM
@@ -516,7 +525,7 @@ proc parseSelect(p: var Parser): Node =
       discard p.expect(tkRParen)
       var alias = ""
       if p.match(tkAs):
-        alias = p.expect(tkIdent).value
+        alias = p.expectIdent().value
       elif p.peek().kind == tkIdent:
         alias = p.advance().value
       result.selFrom = Node(kind: nkFrom, fromTable: "(subquery)",
@@ -525,7 +534,7 @@ proc parseSelect(p: var Parser): Node =
       # GRAPH_TABLE(name MATCH (pattern) COLUMNS (cols))
       discard p.advance()
       discard p.expect(tkLParen)
-      let graphName = p.expect(tkIdent).value
+      let graphName = p.expectIdent().value
       var hasMatch = p.match(tkMatch)
       var patternNodes: seq[string]
       var patternEdges: seq[string]
@@ -595,7 +604,7 @@ proc parseSelect(p: var Parser): Node =
             if p.peek().kind in {tkIdent, tkLabels, tkEdge, tkGraph, tkRank, tkBfs, tkDfs, tkMatch, tkColumns, tkEnd, tkSrc, tkDst, tkMerge}:
               colName &= "." & p.advance().value
             else:
-              colName &= "." & p.expect(tkIdent).value
+              colName &= "." & p.expectIdent().value
           returnCols.add(colName)
           while p.match(tkComma):
             if p.peek().kind in {tkIdent, tkLabels, tkEdge, tkGraph, tkRank, tkEnd, tkMatch, tkColumns, tkSrc, tkDst, tkBfs, tkDfs, tkMerge}:
@@ -605,7 +614,7 @@ proc parseSelect(p: var Parser): Node =
                 if p.peek().kind in {tkIdent, tkLabels, tkEdge, tkGraph, tkRank, tkBfs, tkDfs, tkMatch, tkColumns, tkEnd, tkSrc, tkDst, tkMerge}:
                   colName &= "." & p.advance().value
                 else:
-                  colName &= "." & p.expect(tkIdent).value
+                  colName &= "." & p.expectIdent().value
               returnCols.add(colName)
             if p.match(tkAs):
               discard p.advance()
@@ -629,10 +638,10 @@ proc parseSelect(p: var Parser): Node =
                             gtDirection: "out", gtEnd: endNode, gtMaxDepth: maxDepth,
                             gtReturnCols: returnCols, gtAlgo: algo, line: tok.line, col: tok.col)
     else:
-      let tableTok = p.expect(tkIdent)
+      let tableTok = p.expectIdent()
       var alias = ""
       if p.match(tkAs):
-        alias = p.expect(tkIdent).value
+        alias = p.expectIdent().value
       elif p.peek().kind == tkIdent:
         alias = p.advance().value
       result.selFrom = Node(kind: nkFrom, fromTable: tableTok.value,
@@ -641,10 +650,10 @@ proc parseSelect(p: var Parser): Node =
     # Comma join: FROM t1, t2 → implicit CROSS JOIN
     while p.peek().kind == tkComma:
       discard p.advance()
-      let nextTableTok = p.expect(tkIdent)
+      let nextTableTok = p.expectIdent()
       var nextAlias = ""
       if p.match(tkAs):
-        nextAlias = p.expect(tkIdent).value
+        nextAlias = p.expectIdent().value
       elif p.peek().kind == tkIdent:
         nextAlias = p.advance().value
       let joinNode = Node(kind: nkJoin, joinKind: jkCross,
@@ -660,7 +669,7 @@ proc parseSelect(p: var Parser): Node =
       discard p.expect(tkLParen)
       let aggFunc = p.parseExpr()  # e.g. SUM(salary)
       discard p.expect(tkFor)
-      let forCol = p.expect(tkIdent).value
+      let forCol = p.expectIdent().value
       discard p.expect(tkIn)
       discard p.expect(tkLParen)
       var inValues: seq[string] = @[]
@@ -675,15 +684,15 @@ proc parseSelect(p: var Parser): Node =
     elif p.peek().kind == tkUnpivot:
       discard p.advance()
       discard p.expect(tkLParen)
-      let valCol = p.expect(tkIdent).value
+      let valCol = p.expectIdent().value
       discard p.expect(tkFor)
-      let forCol = p.expect(tkIdent).value
+      let forCol = p.expectIdent().value
       discard p.expect(tkIn)
       discard p.expect(tkLParen)
       var inCols: seq[string] = @[]
-      inCols.add(p.expect(tkIdent).value)
+      inCols.add(p.expectIdent().value)
       while p.match(tkComma):
-        inCols.add(p.expect(tkIdent).value)
+        inCols.add(p.expectIdent().value)
       discard p.expect(tkRParen)
       discard p.expect(tkRParen)
       result.selFrom = Node(kind: nkUnpivot, unpivotSource: result.selFrom,
@@ -718,15 +727,15 @@ proc parseSelect(p: var Parser): Node =
         let subquery = p.parseSelect()
         discard p.expect(tkRParen)
         if p.match(tkAs):
-          joinAlias = p.expect(tkIdent).value
+          joinAlias = p.expectIdent().value
         elif p.peek().kind == tkIdent:
           joinAlias = p.advance().value
         joinTarget = Node(kind: nkSubquery, subQuery: subquery,
                           line: tok.line, col: tok.col)
       else:
-        let joinTable = p.expect(tkIdent)
+        let joinTable = p.expectIdent()
         if p.match(tkAs):
-          joinAlias = p.expect(tkIdent).value
+          joinAlias = p.expectIdent().value
         elif p.peek().kind == tkIdent:
           joinAlias = p.advance().value
         joinTarget = Node(kind: nkFrom, fromTable: joinTable.value,
@@ -846,7 +855,7 @@ proc parseSelect(p: var Parser): Node =
 proc parseInsert(p: var Parser): Node =
   let tok = p.expect(tkInsert)
   discard p.match(tkInto)  # optional INTO
-  let target = p.expect(tkIdent).value
+  let target = p.expectIdent().value
   result = Node(kind: nkInsert, insTarget: target, line: tok.line, col: tok.col)
   result.insFields = @[]
   result.insValues = @[]
@@ -892,18 +901,18 @@ proc parseInsert(p: var Parser): Node =
 
 proc parseUpdate(p: var Parser): Node =
   let tok = p.expect(tkUpdate)
-  let target = p.expect(tkIdent).value
+  let target = p.expectIdent().value
   result = Node(kind: nkUpdate, updTarget: target, line: tok.line, col: tok.col)
   if p.match(tkSet):
     result.updSet = @[]
-    let field = p.expect(tkIdent).value
+    let field = p.expectIdent().value
     discard p.match(tkEq)  # = or :=
     let val = p.parseExpr()
     result.updSet.add(Node(kind: nkBinOp, binOp: bkAssign,
       binLeft: Node(kind: nkIdent, identName: field),
       binRight: val))
     while p.match(tkComma):
-      let f = p.expect(tkIdent).value
+      let f = p.expectIdent().value
       discard p.match(tkEq)
       let v = p.parseExpr()
       result.updSet.add(Node(kind: nkBinOp, binOp: bkAssign,
@@ -920,7 +929,7 @@ proc parseUpdate(p: var Parser): Node =
 proc parseDelete(p: var Parser): Node =
   let tok = p.expect(tkDelete)
   discard p.match(tkFrom)  # optional FROM keyword
-  let target = p.expect(tkIdent).value
+  let target = p.expectIdent().value
   result = Node(kind: nkDelete, delTarget: target, line: tok.line, col: tok.col)
   if p.match(tkWhere):
     result.delWhere = Node(kind: nkWhere, whereExpr: p.parseExpr())
@@ -934,9 +943,9 @@ proc parseMerge(p: var Parser): Node =
   let tok = p.expect(tkMerge)
   discard p.match(tkInto)  # optional INTO
   result = Node(kind: nkMerge, line: tok.line, col: tok.col)
-  result.mergeTarget = p.expect(tkIdent).value
+  result.mergeTarget = p.expectIdent().value
   if p.match(tkAs):
-    result.mergeTargetAlias = p.expect(tkIdent).value
+    result.mergeTargetAlias = p.expectIdent().value
   elif p.peek().kind == tkIdent:
     result.mergeTargetAlias = p.advance().value
   discard p.expect(tkUsing)
@@ -946,10 +955,10 @@ proc parseMerge(p: var Parser): Node =
     result.mergeSource = p.parseSelect()
     discard p.expect(tkRParen)
   else:
-    let srcTable = p.expect(tkIdent).value
+    let srcTable = p.expectIdent().value
     result.mergeSource = Node(kind: nkIdent, identName: srcTable, line: tok.line, col: tok.col)
   if p.match(tkAs):
-    result.mergeSourceAlias = p.expect(tkIdent).value
+    result.mergeSourceAlias = p.expectIdent().value
   elif p.peek().kind == tkIdent:
     result.mergeSourceAlias = p.advance().value
   discard p.expect(tkOn)
@@ -977,9 +986,9 @@ proc parseMerge(p: var Parser): Node =
     elif p.peek().kind == tkInsert:
       discard p.advance()
       discard p.expect(tkLParen)
-      result.mergeNotMatchedInsert.add(Node(kind: nkIdent, identName: p.expect(tkIdent).value))
+      result.mergeNotMatchedInsert.add(Node(kind: nkIdent, identName: p.expectIdent().value))
       while p.match(tkComma):
-        result.mergeNotMatchedInsert.add(Node(kind: nkIdent, identName: p.expect(tkIdent).value))
+        result.mergeNotMatchedInsert.add(Node(kind: nkIdent, identName: p.expectIdent().value))
       discard p.expect(tkRParen)
       discard p.expect(tkValues)
       discard p.expect(tkLParen)
@@ -990,13 +999,13 @@ proc parseMerge(p: var Parser): Node =
     elif p.peek().kind == tkUpdate:
       discard p.advance()
       discard p.expect(tkSet)
-      let col = p.expect(tkIdent).value
+      let col = p.expectIdent().value
       discard p.expect(tkEq)
       result.mergeMatchedUpdate.add(Node(kind: nkBinOp, binOp: bkAssign,
         binLeft: Node(kind: nkIdent, identName: col),
         binRight: p.parseExpr()))
       while p.match(tkComma):
-        let col2 = p.expect(tkIdent).value
+        let col2 = p.expectIdent().value
         discard p.expect(tkEq)
         result.mergeMatchedUpdate.add(Node(kind: nkBinOp, binOp: bkAssign,
           binLeft: Node(kind: nkIdent, identName: col2),
@@ -1005,7 +1014,7 @@ proc parseMerge(p: var Parser): Node =
 proc parseCreateType(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkType)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkCreateType, ctName: name, line: tok.line, col: tok.col)
   result.ctBases = @[]
   if p.match(tkIdent):
@@ -1023,10 +1032,10 @@ proc parseCreateType(p: var Parser): Node =
       if p.peek().kind == tkMulti:
         discard p.advance()
         isMulti = true
-      let fieldTok = p.expect(tkIdent)
+      let fieldTok = p.expectIdent()
       if p.peek().kind == tkArrow:
         discard p.advance()
-        let target = p.expect(tkIdent).value
+        let target = p.expectIdent().value
         result.ctLinks.add(Node(kind: nkLinkDef,
           ldName: fieldTok.value, ldTarget: target,
           ldRequired: isRequired,
@@ -1034,7 +1043,7 @@ proc parseCreateType(p: var Parser): Node =
       else:
         var typeName = ""
         if p.match(tkColon):
-          typeName = p.expect(tkIdent).value
+          typeName = p.expectIdent().value
         result.ctProperties.add(Node(kind: nkPropertyDef,
           pdName: fieldTok.value, pdType: typeName,
           pdRequired: isRequired))
@@ -1270,14 +1279,14 @@ proc parseAlterTable(p: var Parser): Node =
   if p.peek().kind == tkEnable:
     discard p.advance()
     discard p.expect(tkRow)    # ROW
-    discard p.expect(tkIdent)  # LEVEL
-    discard p.expect(tkIdent)  # SECURITY
+    discard p.expectIdent()  # LEVEL
+    discard p.expectIdent()  # SECURITY
     return Node(kind: nkEnableRLS, erlsTable: tableName, line: tok.line, col: tok.col)
   elif p.peek().kind == tkDisable:
     discard p.advance()
     discard p.expect(tkRow)    # ROW
-    discard p.expect(tkIdent)  # LEVEL
-    discard p.expect(tkIdent)  # SECURITY
+    discard p.expectIdent()  # LEVEL
+    discard p.expectIdent()  # SECURITY
     return Node(kind: nkDisableRLS, drlsTable: tableName, line: tok.line, col: tok.col)
   result = Node(kind: nkAlterTable, line: tok.line, col: tok.col)
   result.altName = tableName
@@ -1349,10 +1358,10 @@ proc parseCreateView(p: var Parser): Node =
   var orReplace = false
   if p.peek().kind == tkIdent and p.peek().value.toLower() == "or":
     discard p.advance()
-    discard p.expect(tkIdent)  # REPLACE
+    discard p.expectIdent()  # REPLACE
     orReplace = true
   discard p.expect(tkView)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   discard p.expect(tkAs)
   let query = p.parseSelect()
   result = Node(kind: nkCreateView, cvName: name, cvQuery: query,
@@ -1366,14 +1375,14 @@ proc parseDropView(p: var Parser): Node =
     discard p.advance()
     discard p.expect(tkExists)
     ifExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkDropView, dvName: name, dvIfExists: ifExists,
                 line: tok.line, col: tok.col)
 
 proc parseCreateTrigger(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkTrigger)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   # Parse timing: BEFORE | AFTER | INSTEAD OF
   var timing = ""
   let timingTok = p.peek()
@@ -1404,7 +1413,7 @@ proc parseCreateTrigger(p: var Parser): Node =
   else:
     raise newException(ValueError, "Expected INSERT, UPDATE, or DELETE in TRIGGER definition")
   discard p.expect(tkOn)
-  let tableName = p.expect(tkIdent).value
+  let tableName = p.expectIdent().value
   discard p.expect(tkAs)
   # Parse action as raw string until end of statement
   var actionStr = ""
@@ -1425,7 +1434,7 @@ proc parseDropTrigger(p: var Parser): Node =
     discard p.advance()
     discard p.expect(tkExists)
     ifExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkDropTrigger, trigDropName: name, trigDropIfExists: ifExists,
                 line: tok.line, col: tok.col)
 
@@ -1437,13 +1446,13 @@ proc parseDropIndex(p: var Parser): Node =
     discard p.advance()
     discard p.expect(tkExists)
     ifExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkDropIndex, diName: name, line: tok.line, col: tok.col)
 
 proc parseCreateMigration(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkMigration)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   var upBody = ""
   var downBody = ""
   if p.peek().kind == tkAs:
@@ -1463,7 +1472,7 @@ proc parseCreateMigration(p: var Parser): Node =
         discard p.advance()
         section = "down"
       elif sectionTok.kind == tkIdent:
-        section = p.expect(tkIdent).value.toLower()
+        section = p.expectIdent().value.toLower()
       else:
         raise newException(ValueError, "Expected UP or DOWN in migration body, got: " & $sectionTok.kind)
       discard p.expect(tkColon)
@@ -1492,7 +1501,7 @@ proc parseCreateMigration(p: var Parser): Node =
 proc parseApplyMigration(p: var Parser): Node =
   let tok = p.expect(tkApply)
   discard p.expect(tkMigration)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkApplyMigration, amName: name, line: tok.line, col: tok.col)
 
 proc parseMigrationStatus(p: var Parser): Node =
@@ -1519,7 +1528,7 @@ proc parseMigrationDown(p: var Parser): Node =
 proc parseMigrationDryRun(p: var Parser): Node =
   let tok = p.expect(tkMigration)
   discard p.expect(tkDryRun)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkMigrationDryRun, mdrName: name, line: tok.line, col: tok.col)
 
 proc parseImportFrom(p: var Parser): Node =
@@ -1527,7 +1536,7 @@ proc parseImportFrom(p: var Parser): Node =
   discard p.expect(tkFrom)
   let path = p.expect(tkStringLit).value
   discard p.expect(tkInto)
-  let table = p.expect(tkIdent).value
+  let table = p.expectIdent().value
   var format = "csv"
   var delimiter = ','
   var hasHeader = true
@@ -1536,14 +1545,20 @@ proc parseImportFrom(p: var Parser): Node =
     let kw = p.advance()
     case kw.kind
     of tkFormat:
-      let fmt = p.expect(tkIdent).value.toLower()
-      format = fmt
+      format = p.expectIdent().value.toLower()
     of tkDelimiter:
       let delim = p.expect(tkStringLit).value
       if delim.len > 0: delimiter = delim[0]
     of tkHeader:
-      let hdr = p.expect(tkIdent).value.toLower()
-      hasHeader = hdr == "true" or hdr == "yes"
+      if p.peek().kind == tkTrue:
+        discard p.advance()
+        hasHeader = true
+      elif p.peek().kind == tkFalse:
+        discard p.advance()
+        hasHeader = false
+      else:
+        let hdr = p.expectIdent().value.toLower()
+        hasHeader = hdr == "true" or hdr == "yes"
     of tkBatch:
       batchSize = parseInt(p.expect(tkIntLit).value)
     else: discard
@@ -1557,7 +1572,7 @@ proc parseExportTo(p: var Parser): Node =
   discard p.expect(tkTo)
   let path = p.expect(tkStringLit).value
   discard p.expect(tkFrom)
-  let table = p.expect(tkIdent).value
+  let table = p.expectIdent().value
   var format = "csv"
   var delimiter = ','
   var includeHeader = true
@@ -1565,14 +1580,20 @@ proc parseExportTo(p: var Parser): Node =
     let kw = p.advance()
     case kw.kind
     of tkFormat:
-      let fmt = p.expect(tkIdent).value.toLower()
-      format = fmt
+      format = p.expectIdent().value.toLower()
     of tkDelimiter:
       let delim = p.expect(tkStringLit).value
       if delim.len > 0: delimiter = delim[0]
     of tkHeader:
-      let hdr = p.expect(tkIdent).value.toLower()
-      includeHeader = hdr == "true" or hdr == "yes"
+      if p.peek().kind == tkTrue:
+        discard p.advance()
+        includeHeader = true
+      elif p.peek().kind == tkFalse:
+        discard p.advance()
+        includeHeader = false
+      else:
+        let hdr = p.expectIdent().value.toLower()
+        includeHeader = hdr == "true" or hdr == "yes"
     else: discard
   result = Node(kind: nkExportTo, expPath: path, expTable: table,
                 expFormat: format, expDelimiter: delimiter,
@@ -1582,7 +1603,7 @@ proc parseExportTo(p: var Parser): Node =
 proc parseCreateUser(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkUser)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   var password = ""
   var isSuper = false
   if p.peek().kind == tkWith:
@@ -1611,16 +1632,16 @@ proc parseDropUser(p: var Parser): Node =
     discard p.advance()
     discard p.expect(tkExists)
     ifExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkDropUser, duName: name, duIfExists: ifExists,
                 line: tok.line, col: tok.col)
 
 proc parseCreatePolicy(p: var Parser): Node =
   let tok = p.expect(tkCreate)
   discard p.expect(tkPolicy)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   discard p.expect(tkOn)
-  let tableName = p.expect(tkIdent).value
+  let tableName = p.expectIdent().value
   var cmd = "ALL"
   var usingNode: Node = nil
   var withCheckNode: Node = nil
@@ -1652,9 +1673,9 @@ proc parseDropPolicy(p: var Parser): Node =
     discard p.advance()
     discard p.expect(tkExists)
     ifExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   discard p.expect(tkOn)
-  let tableName = p.expect(tkIdent).value
+  let tableName = p.expectIdent().value
   result = Node(kind: nkDropPolicy, dpName: name, dpTable: tableName,
                 dpIfExists: ifExists, line: tok.line, col: tok.col)
 
@@ -1669,9 +1690,9 @@ proc parseGrant(p: var Parser): Node =
   else:
     raise newException(ValueError, "Expected privilege in GRANT")
   discard p.expect(tkOn)
-  let tableName = p.expect(tkIdent).value
+  let tableName = p.expectIdent().value
   discard p.expect(tkTo)
-  let grantee = p.expect(tkIdent).value
+  let grantee = p.expectIdent().value
   result = Node(kind: nkGrant, grPrivilege: priv, grTable: tableName,
                 grGrantee: grantee, line: tok.line, col: tok.col)
 
@@ -1686,19 +1707,19 @@ proc parseRevoke(p: var Parser): Node =
   else:
     raise newException(ValueError, "Expected privilege in REVOKE")
   discard p.expect(tkOn)
-  let tableName = p.expect(tkIdent).value
+  let tableName = p.expectIdent().value
   discard p.expect(tkFrom)
-  let grantee = p.expect(tkIdent).value
+  let grantee = p.expectIdent().value
   result = Node(kind: nkRevoke, rvPrivilege: priv, rvTable: tableName,
                 rvGrantee: grantee, line: tok.line, col: tok.col)
 
 proc parseSetVar(p: var Parser): Node =
   let tok = p.expect(tkSet)
-  var varName = p.expect(tkIdent).value
+  var varName = p.expectIdent().value
   while p.peek().kind == tkDot:
     discard p.advance()
     varName.add(".")
-    varName.add(p.expect(tkIdent).value)
+    varName.add(p.expectIdent().value)
   if p.match(tkEq) or p.match(tkTo):
     discard
   let valTok = p.peek()
@@ -1730,7 +1751,7 @@ proc parseCreateGraph(p: var Parser): Node =
     discard p.expect(tkNot)
     discard p.expect(tkExists)
     ifNotExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkCreateGraph, cgName: name, cgIfNotExists: ifNotExists,
                 line: tok.line, col: tok.col)
 
@@ -1742,7 +1763,7 @@ proc parseDropGraph(p: var Parser): Node =
     discard p.advance()
     discard p.expect(tkExists)
     ifExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkDropGraph, dgName: name, dgIfExists: ifExists,
                 line: tok.line, col: tok.col)
 
@@ -1755,7 +1776,7 @@ proc parseCreateDatabase(p: var Parser): Node =
     discard p.expect(tkNot)
     discard p.expect(tkExists)
     ifNotExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkCreateDatabase, cdDbName: name, cdIfNotExists: ifNotExists,
                 line: tok.line, col: tok.col)
 
@@ -1767,13 +1788,13 @@ proc parseDropDatabase(p: var Parser): Node =
     discard p.advance()
     discard p.expect(tkExists)
     ifExists = true
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkDropDatabase, ddDbName: name, ddIfExists: ifExists,
                 line: tok.line, col: tok.col)
 
 proc parseUseDatabase(p: var Parser): Node =
   let tok = p.expect(tkUse)
-  let name = p.expect(tkIdent).value
+  let name = p.expectIdent().value
   result = Node(kind: nkUseDatabase, udDbName: name,
                 line: tok.line, col: tok.col)
 

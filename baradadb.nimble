@@ -24,7 +24,14 @@ task build_release, "Build release version":
   exec "nim c -d:release --opt:speed -o:build/baramcp src/baramcp.nim"
 
 task test, "Run all tests":
-  exec "nim c -r tests/test_all.nim"
+  # Smoke test talks to ./build/baradadb over TCP — build it first.
+  exec "nim c -o:build/baradadb src/baradadb.nim"
+  # Quick embedded suites first, heavy fuzz/stress suites last.
+  for t in ["test_minimal", "test_all", "bugfix_test", "join_tests", "test_lock",
+            "test_schema_persist", "test_storage_hardening", "tla_faithfulness",
+            "nimforum_smoke_test", "fuzz_test", "prop_test",
+            "test_wire_insert_stress", "stress_test"]:
+    exec "nim c -r tests/" & t & ".nim"
 
 task bench, "Run embedded micro-benchmarks (in-process)":
   exec "nim c -d:release -r benchmarks/bench_all.nim"
