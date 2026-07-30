@@ -193,6 +193,109 @@ suite "Schema persistence":
       db2.close()
     removeDir(dir)
 
+  test "DROP INDEX removes FTS index and its schema key (custom name)":
+    let dir = "/tmp/baradb_schema_persist_dropfts"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE docs (id INTEGER PRIMARY KEY, content TEXT)").success
+      check execSql(ctx, "INSERT INTO docs (id, content) VALUES (1, 'quick brown fox')").success
+      check execSql(ctx, "CREATE INDEX docs_fts ON docs (content) USING FTS").success
+      check ctx.ftsIndexes.hasKey("docs.content")
+      # Drop by the custom index name — the in-memory key is table.col
+      let d = execSql(ctx, "DROP INDEX docs_fts")
+      check d.success
+      check "docs.content" notin ctx.ftsIndexes
+      let (found, _) = db.get(SchemaFtsIndexPrefix & "docs.content")
+      check not found
+      db.close()
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      check "docs.content" notin ctx2.ftsIndexes  # no ghost rebuild
+      db2.close()
+    removeDir(dir)
+
+  test "DROP INDEX removes FTS index by column key":
+    let dir = "/tmp/baradb_schema_persist_dropfts_col"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE docs (id INTEGER PRIMARY KEY, content TEXT)").success
+      check execSql(ctx, "INSERT INTO docs (id, content) VALUES (1, 'quick brown fox')").success
+      # No custom name — idxName defaults to colKey (docs.content)
+      check execSql(ctx, "CREATE INDEX ON docs (content) USING FTS").success
+      check ctx.ftsIndexes.hasKey("docs.content")
+      # Drop by column name — matches endsWith(".content")
+      let d = execSql(ctx, "DROP INDEX content")
+      check d.success
+      check "docs.content" notin ctx.ftsIndexes
+      let (found, _) = db.get(SchemaFtsIndexPrefix & "docs.content")
+      check not found
+      db.close()
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      check "docs.content" notin ctx2.ftsIndexes  # no ghost rebuild
+      db2.close()
+    removeDir(dir)
+
+  test "DROP INDEX removes HNSW index and its schema key":
+    let dir = "/tmp/baradb_schema_persist_drophnsw"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE vecs (id INTEGER PRIMARY KEY, embedding TEXT)").success
+      check execSql(ctx, "INSERT INTO vecs (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')").success
+      check execSql(ctx, "CREATE INDEX vecs_hnsw ON vecs (embedding) USING HNSW").success
+      check ctx.vectorIndexes.hasKey("vecs.embedding")
+      let d = execSql(ctx, "DROP INDEX vecs_hnsw")
+      check d.success
+      check "vecs.embedding" notin ctx.vectorIndexes
+      let (found, _) = db.get(SchemaVecIndexPrefix & "vecs.embedding")
+      check not found
+      db.close()
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      check "vecs.embedding" notin ctx2.vectorIndexes  # no ghost rebuild
+      db2.close()
+    removeDir(dir)
+
+  test "DROP TABLE removes engine indexes for that table":
+    let dir = "/tmp/baradb_schema_persist_droptbl"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE docs (id INTEGER PRIMARY KEY, content TEXT)").success
+      check execSql(ctx, "INSERT INTO docs (id, content) VALUES (1, 'quick brown fox')").success
+      check execSql(ctx, "CREATE INDEX docs_fts ON docs (content) USING FTS").success
+      check execSql(ctx, "CREATE TABLE vecs (id INTEGER PRIMARY KEY, embedding TEXT)").success
+      check execSql(ctx, "INSERT INTO vecs (id, embedding) VALUES (1, '[1.0, 0.0, 0.0]')").success
+      check execSql(ctx, "CREATE INDEX vecs_hnsw ON vecs (embedding) USING HNSW").success
+      check ctx.ftsIndexes.hasKey("docs.content")
+      check ctx.vectorIndexes.hasKey("vecs.embedding")
+      check execSql(ctx, "DROP TABLE docs").success
+      check "docs.content" notin ctx.ftsIndexes
+      check execSql(ctx, "DROP TABLE vecs").success
+      check "vecs.embedding" notin ctx.vectorIndexes
+      let (ftsFound, _) = db.get(SchemaFtsIndexPrefix & "docs.content")
+      check not ftsFound
+      let (vecFound, _) = db.get(SchemaVecIndexPrefix & "vecs.embedding")
+      check not vecFound
+      db.close()
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      check "docs.content" notin ctx2.ftsIndexes    # no ghost rebuild
+      check "vecs.embedding" notin ctx2.vectorIndexes
+      db2.close()
+    removeDir(dir)
+
   test "Stable schema key format":
     check tableSchemaKey("users") == "_schema:tables:users"
     check serializeTableDdl(TableDef(

@@ -859,6 +859,15 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     for idxName in ctx.btrees.keys.toSeq():
       if idxName.startsWith(dropName & "."): toDelete.add(idxName)
     for idxName in toDelete: ctx.btrees.del(idxName)
+    # Drop FTS/HNSW engine indexes for this table (in-memory entries)
+    var ftsToDelete: seq[string] = @[]
+    for key in ctx.ftsIndexes.keys.toSeq():
+      if key.startsWith(dropName & "."): ftsToDelete.add(key)
+    for key in ftsToDelete: ctx.ftsIndexes.del(key)
+    var vecToDelete: seq[string] = @[]
+    for key in ctx.vectorIndexes.keys.toSeq():
+      if key.startsWith(dropName & "."): vecToDelete.add(key)
+    for key in vecToDelete: ctx.vectorIndexes.del(key)
     # Remove durable schema entry
     dropTableSchema(ctx, dropName)
     # Remove row data for this table
@@ -868,6 +877,14 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       if key.startsWith(prefix):
         dataKeys.add(key)
     for key in dataKeys:
+      ctx.db.delete(key)
+    # Remove persisted FTS/HNSW index schema keys for this table
+    var engineKeys: seq[string] = @[]
+    for (key, _) in ctx.db.scanAll():
+      if key.startsWith(SchemaFtsIndexPrefix & prefix) or
+         key.startsWith(SchemaVecIndexPrefix & prefix):
+        engineKeys.add(key)
+    for key in engineKeys:
       ctx.db.delete(key)
     # Drop orphan legacy schema keys that mentioned this table
     var legacyKeys: seq[string] = @[]
@@ -1375,6 +1392,35 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         break
     if found:
       ctx.btrees.del(targetKey)
+      return okResult(msg="DROP INDEX " & stmt.diName)
+    # FTS/HNSW engine indexes: in-memory maps are keyed by table.col, and a
+    # custom index name only appears in the persisted DDL — match it against
+    # the stored "CREATE INDEX <name> ON" text as well.
+    var ftsKey = ""
+    for key in ctx.ftsIndexes.keys.toSeq():
+      if key == stmt.diName or key.endsWith("." & stmt.diName):
+        ftsKey = key
+        break
+      let (hasDdl, ddl) = ctx.db.get(SchemaFtsIndexPrefix & key)
+      if hasDdl and cast[string](ddl).startsWith("CREATE INDEX " & stmt.diName & " ON "):
+        ftsKey = key
+        break
+    if ftsKey.len > 0:
+      ctx.ftsIndexes.del(ftsKey)
+      ctx.db.delete(SchemaFtsIndexPrefix & ftsKey)
+      return okResult(msg="DROP INDEX " & stmt.diName)
+    var vecKey = ""
+    for key in ctx.vectorIndexes.keys.toSeq():
+      if key == stmt.diName or key.endsWith("." & stmt.diName):
+        vecKey = key
+        break
+      let (hasDdl, ddl) = ctx.db.get(SchemaVecIndexPrefix & key)
+      if hasDdl and cast[string](ddl).startsWith("CREATE INDEX " & stmt.diName & " ON "):
+        vecKey = key
+        break
+    if vecKey.len > 0:
+      ctx.vectorIndexes.del(vecKey)
+      ctx.db.delete(SchemaVecIndexPrefix & vecKey)
       return okResult(msg="DROP INDEX " & stmt.diName)
     else:
       # Also remove from schema storage
