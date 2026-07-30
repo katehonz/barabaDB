@@ -8,18 +8,13 @@ import std/tables
 import std/hashes
 import std/sequtils
 import std/algorithm
-import std/re
-import checksums/sha2
 import std/math
 import std/times
 import std/json
-import std/random
-import std/monotimes
 import std/locks
 import lexer as qlex
 import parser as qpar
 import ast
-import ir
 import ../core/types
 import ../protocol/wire
 import ../storage/lsm
@@ -33,10 +28,6 @@ import ../core/registry
 
 import ../vector/engine as vengine
 import ../graph/engine as gengine
-import ../graph/community as gcomm
-import ../ai/chunk as chunkmod
-import ../ai/llm as llmmod
-import ../graph/cypher as cyphermod
 
 import exec/types
 import exec/values
@@ -395,7 +386,6 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       var expandedCols: seq[string] = @[]
       var seenColNames = initTable[string, bool]()
       let fromTable = if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromTable else: ""
-      let fromAlias = if stmt.selFrom != nil and stmt.selFrom.kind == nkFrom: stmt.selFrom.fromAlias else: ""
       for c in cols:
         if c == "*":
           if fromTable.len > 0:
@@ -1574,9 +1564,10 @@ proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult =
   return okResult(msg="Empty migration body")
 
 # ----------------------------------------------------------------------
-# Hook wiring — eval.nim back-edges (subqueries, hybrid search, NL->SQL
-# validation). Resolved at module scope; stays valid when executePlan
-# moves to its own module in a later task.
+# Hook wiring — breaks the module cycle between executor and the exec/*
+# submodules: eval.nim calls back into the engine for subqueries, hybrid
+# search, and NL->SQL validation; triggers.nim executes trigger bodies.
+# Wired once at module scope.
 # ----------------------------------------------------------------------
 eval.executePlanHook = plan_exec.executePlan
 eval.execScanHook = scan.execScan
