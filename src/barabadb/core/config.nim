@@ -1,6 +1,7 @@
 import std/os
 import std/strutils
 import std/json
+import std/tables
 
 type
   BaraConfig* = object
@@ -38,6 +39,7 @@ type
     raftPort*: int
     raftPeers*: seq[string]
     raftNodeId*: string
+    raftPeerAddrs*: Table[string, tuple[host: string, port: int]]
 
   CompactionStrategy* = enum
     csSizeTiered = "size_tiered"
@@ -76,6 +78,7 @@ proc defaultConfig*(): BaraConfig =
     raftPort: 9473,
     raftPeers: @[],
     raftNodeId: "",
+    raftPeerAddrs: initTable[string, tuple[host: string, port: int]](),
   )
 
 # ----------------------------------------------------------------------
@@ -175,7 +178,31 @@ proc loadConfigFromEnv*(cfg: var BaraConfig) =
   cfg.raftPort = parseEnvInt(getEnv("BARADB_RAFT_PORT", ""), cfg.raftPort)
   let peersEnv = getEnv("BARADB_RAFT_PEERS", "")
   if peersEnv.len > 0:
-    cfg.raftPeers = peersEnv.split(",")
+    cfg.raftPeers = @[]
+    cfg.raftPeerAddrs = initTable[string, tuple[host: string, port: int]]()
+    for raw in peersEnv.split(","):
+      let entry = raw.strip()
+      if entry.len == 0: continue
+      let atPos = entry.rfind('@')
+      if atPos < 0:
+        # bare id — no network address
+        cfg.raftPeers.add(entry)
+      else:
+        let id = entry[0 ..< atPos]
+        let hostPort = entry[atPos + 1 .. ^1]
+        let colonPos = hostPort.rfind(':')
+        let host = if colonPos >= 0: hostPort[0 ..< colonPos] else: ""
+        let portStr = if colonPos >= 0: hostPort[colonPos + 1 .. ^1] else: ""
+        var port = 0
+        try:
+          port = parseInt(portStr)
+        except ValueError:
+          discard
+        if id.len == 0 or host.len == 0 or port < 1 or port > 65535:
+          raise newException(ValueError,
+            "Invalid BARADB_RAFT_PEERS entry '" & entry & "': expected id@host:port with port 1-65535")
+        cfg.raftPeers.add(id)
+        cfg.raftPeerAddrs[id] = (host, port)
   cfg.raftNodeId = getEnv("BARADB_RAFT_NODE_ID", cfg.raftNodeId)
 
 # ----------------------------------------------------------------------

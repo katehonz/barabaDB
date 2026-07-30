@@ -4,6 +4,7 @@ import std/os
 import std/tables
 import ../src/barabadb/query/[parser, executor, lexer, ast]
 import ../src/barabadb/core/types
+import ../src/barabadb/core/config
 import ../src/barabadb/storage/lsm
 
 const testDir = "/tmp/baradb_bugfix_test"
@@ -357,3 +358,28 @@ suite "Bug fixes — UNIQUE index enforcement":
     discard executeQuery(ctx, parse("INSERT INTO accts (id, email) VALUES (2, 'a@b.c')"))
     let c = executeQuery(ctx, parse("CREATE UNIQUE INDEX accts_email ON accts (email)"))
     check not c.success
+
+suite "Raft peer address parsing":
+
+  test "id@host:port entries populate raftPeerAddrs":
+    putEnv("BARADB_RAFT_PEERS", "n1@127.0.0.1:9473,n2@10.0.0.5:9474,n3")
+    defer: delEnv("BARADB_RAFT_PEERS")
+    var cfg = defaultConfig()
+    loadConfigFromEnv(cfg)
+    check cfg.raftPeers == @["n1", "n2", "n3"]
+    check cfg.raftPeerAddrs["n1"] == ("127.0.0.1", 9473)
+    check cfg.raftPeerAddrs["n2"] == ("10.0.0.5", 9474)
+    check "n3" notin cfg.raftPeerAddrs
+
+  test "malformed peer entries raise with the entry in the message":
+    for bad in ["n1@:9473", "n1@host:notaport", "@host:9473", "n1@host:0", "n1@host:70000"]:
+      putEnv("BARADB_RAFT_PEERS", bad)
+      var cfg = defaultConfig()
+      var msg = ""
+      try:
+        loadConfigFromEnv(cfg)
+      except ValueError as e:
+        msg = e.msg
+      delEnv("BARADB_RAFT_PEERS")
+      check msg.len > 0
+      check bad in msg

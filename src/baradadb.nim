@@ -330,7 +330,11 @@ proc main() =
   # Start Raft cluster if enabled
   if config.raftEnabled:
     info("Starting Raft node " & config.raftNodeId & " on port " & $config.raftPort)
-    var raftNode = newRaftNode(config.raftNodeId, config.raftPeers, config.raftPort)
+    let raftDataDir = config.dataDir / "raft"
+    createDir(raftDataDir)  # idempotent; loadState reads from it, saveState writes
+    var raftNode = newRaftNode(config.raftNodeId, config.raftPeers, config.raftPort,
+                               dataDir = raftDataDir)
+    raftNode.peerAddrs = config.raftPeerAddrs
     # Wire state machine to apply committed entries to the default database
     let defaultDbInfo = getDatabaseInfo(registry, "default")
     raftNode.applyCommand = proc(cmd: string, data: seq[byte]) {.gcsafe.} =
