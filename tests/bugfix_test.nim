@@ -521,3 +521,34 @@ suite "Raft write classification":
     check not isRaftDdl(parse("CREATE DATABASE other").stmts[0])
     check not isRaftDdl(parse("INSERT INTO t (id) VALUES (1)").stmts[0])
     check not isRaftDdl(parse("SELECT 1").stmts[0])
+
+
+suite "Raft TLS config":
+
+  test "default config has raft TLS disabled with empty paths":
+    let cfg = defaultConfig()
+    check cfg.raftTlsEnabled == false
+    check cfg.raftTlsCertFile == ""
+    check cfg.raftTlsKeyFile == ""
+    check cfg.raftTlsCaFile == ""
+    check cfg.raftTlsVerifyPeer == false
+
+  test "env vars parse into raft TLS config":
+    putEnv("BARADB_RAFT_TLS_ENABLED", "true")
+    putEnv("BARADB_RAFT_TLS_CERT_FILE", "/tmp/raft.crt")
+    putEnv("BARADB_RAFT_TLS_KEY_FILE", "/tmp/raft.key")
+    putEnv("BARADB_RAFT_TLS_CA_FILE", "/tmp/raft-ca.crt")
+    putEnv("BARADB_RAFT_TLS_VERIFY_PEER", "1")
+    defer:
+      delEnv("BARADB_RAFT_TLS_ENABLED")
+      delEnv("BARADB_RAFT_TLS_CERT_FILE")
+      delEnv("BARADB_RAFT_TLS_KEY_FILE")
+      delEnv("BARADB_RAFT_TLS_CA_FILE")
+      delEnv("BARADB_RAFT_TLS_VERIFY_PEER")
+    var cfg = defaultConfig()
+    loadConfigFromEnv(cfg)
+    check cfg.raftTlsEnabled == true
+    check cfg.raftTlsCertFile == "/tmp/raft.crt"
+    check cfg.raftTlsKeyFile == "/tmp/raft.key"
+    check cfg.raftTlsCaFile == "/tmp/raft-ca.crt"
+    check cfg.raftTlsVerifyPeer == true

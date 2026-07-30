@@ -44,6 +44,11 @@ type
     raftPeerClientAddrs*: Table[string, tuple[host: string, port: int]]
     raftWriteTimeoutMs*: int
     raftLogMaxEntries*: int
+    raftTlsEnabled*: bool
+    raftTlsCertFile*: string
+    raftTlsKeyFile*: string
+    raftTlsCaFile*: string
+    raftTlsVerifyPeer*: bool
 
   CompactionStrategy* = enum
     csSizeTiered = "size_tiered"
@@ -86,6 +91,11 @@ proc defaultConfig*(): BaraConfig =
     raftPeerClientAddrs: initTable[string, tuple[host: string, port: int]](),
     raftWriteTimeoutMs: 5_000,
     raftLogMaxEntries: 256,
+    raftTlsEnabled: false,
+    raftTlsCertFile: "",
+    raftTlsKeyFile: "",
+    raftTlsCaFile: "",
+    raftTlsVerifyPeer: false,
   )
 
 # ----------------------------------------------------------------------
@@ -213,6 +223,11 @@ proc loadConfigFromEnv*(cfg: var BaraConfig) =
   cfg.raftNodeId = getEnv("BARADB_RAFT_NODE_ID", cfg.raftNodeId)
   cfg.raftWriteTimeoutMs = parseEnvInt(getEnv("BARADB_RAFT_WRITE_TIMEOUT_MS", ""), cfg.raftWriteTimeoutMs)
   cfg.raftLogMaxEntries = parseEnvInt(getEnv("BARADB_RAFT_LOG_MAX_ENTRIES", ""), cfg.raftLogMaxEntries)
+  cfg.raftTlsEnabled = parseEnvBool(getEnv("BARADB_RAFT_TLS_ENABLED", ""), cfg.raftTlsEnabled)
+  cfg.raftTlsCertFile = getEnv("BARADB_RAFT_TLS_CERT_FILE", cfg.raftTlsCertFile)
+  cfg.raftTlsKeyFile = getEnv("BARADB_RAFT_TLS_KEY_FILE", cfg.raftTlsKeyFile)
+  cfg.raftTlsCaFile = getEnv("BARADB_RAFT_TLS_CA_FILE", cfg.raftTlsCaFile)
+  cfg.raftTlsVerifyPeer = parseEnvBool(getEnv("BARADB_RAFT_TLS_VERIFY_PEER", ""), cfg.raftTlsVerifyPeer)
   # Optional: client (SQL) addresses for leader write forwarding.
   # Same id@host:port shape as BARADB_RAFT_PEERS, but ports are BARADB_PORT values.
   let clientPeersEnv = getEnv("BARADB_RAFT_CLIENT_PEERS", "")
