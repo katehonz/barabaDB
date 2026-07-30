@@ -110,9 +110,9 @@ re-test with a newer Nim runtime, or a minimal repro filed upstream).
 
 ## Proposed next phases (not started)
 
-- **B2. Split `query/executor.nim`** (5,398 lines) into focused modules
-  (DML, DDL, select pipeline, transactions). Now safe to do: the full suite
-  guards behavior. Large diff, mechanical.
+- **B2. Split `query/executor.nim`** (5,398 lines) — **DONE**: split into 15
+  modules under `query/exec/`, `executor.nim` down to 1,578 lines, full suite
+  green (650 checks).
 - **C. Features** — real Raft network transport, persistence for
   graph/FTS/columnar engines, benchmark validation.
 - **ORC (blocked):** re-test `tests/orc_repro.py` against a newer Nim runtime;
