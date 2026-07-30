@@ -319,7 +319,7 @@ proc main() =
 
   # Start HTTP server (blocking, multi-threaded via hunos) in background thread
   var httpServer = newHttpServerWithRegistry(config, registry)
-  spawn httpServer.run(config.port + 440)  # HTTP port = TCP port + 440
+  # raftNode is attached below before runTcpServer; HTTP thread reads it later.
 
   # Start background compaction loop for all databases
   let mcm = newMultiCompactionManager(registry)
@@ -346,6 +346,7 @@ proc main() =
     if config.raftLogMaxEntries > 0:
       raftNode.logMaxEntries = config.raftLogMaxEntries
     tcpServer.raftNode = raftNode  # C3b: executeQuery rejects writes on followers
+    httpServer.raftNode = raftNode  # /metrics + /health raft gauges
     # Wire state machine: committed entries update LSM + secondary indexes
     # (B-tree/FTS/HNSW/graphs) and re-execute schema DDL on every node.
     let defaultDbInfo = getDatabaseInfo(registry, "default")
@@ -369,6 +370,9 @@ proc main() =
 
     raftNet = newRaftNetwork(raftNode)
     asyncCheck raftNet.run()
+
+  # HTTP (hunos) after raft wiring so /metrics can see raftNode
+  spawn httpServer.run(config.port + 440)  # HTTP port = TCP port + 440
 
   # Start replication health check and reconnection loops
   asyncCheck tcpServer.replicationManager.startHealthCheck(5000)

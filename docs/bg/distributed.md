@@ -23,6 +23,8 @@ Leader election и log репликация през TCP. Включване:
 
 **Log compaction (v1):** след apply node-ът може да изреже safe prefix, когато log-ът надхвърли `BARADB_RAFT_LOG_MAX_ENTRIES`. Leader не реже след matchIndex на peer (catch-up с AppendEntries). Snapshot metadata се пази в `raft_state.bin`.
 
+**Metrics:** при включен raft `GET /metrics` (HTTP = `BARADB_PORT + 440`) дава Prometheus редове: `baradb_raft_is_leader`, `baradb_raft_term`, `baradb_raft_log_entries`, `baradb_raft_apply_lag`, `baradb_raft_commit_wait_ms_total`, `baradb_raft_elections_total`, `baradb_raft_forwards_total`, `baradb_raft_compactions_total`. `GET /health` включва обект `raft` (`role`, `term`, `leader_id`, …).
+
 ```nim
 import barabadb/core/raft
 

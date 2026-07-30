@@ -23,6 +23,8 @@ When Raft is enabled, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` and transactio
 
 **Log compaction (v1):** after apply, each node may drop a fully-safe log prefix once `log.len` exceeds `BARADB_RAFT_LOG_MAX_ENTRIES`. The leader never discards past any peer's `matchIndex` (so lagging followers still catch up via AppendEntries). Snapshot metadata (`lastSnapshotIndex`/`Term`) is persisted in `raft_state.bin`; full InstallSnapshot state-machine payloads are not required while this safe-prefix policy holds.
 
+**Metrics:** with raft enabled, `GET /metrics` (HTTP port = `BARADB_PORT + 440`) includes Prometheus lines such as `baradb_raft_is_leader`, `baradb_raft_term`, `baradb_raft_log_entries`, `baradb_raft_apply_lag`, `baradb_raft_commit_wait_ms_total`, `baradb_raft_elections_total`, `baradb_raft_forwards_total`, and `baradb_raft_compactions_total`. `GET /health` embeds a `raft` object (`role`, `term`, `leader_id`, `commit_index`, `apply_lag`, …).
+
 ```nim
 import barabadb/core/raft
 

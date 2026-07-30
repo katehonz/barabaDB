@@ -2706,6 +2706,25 @@ suite "Raft SQL Write Path":
     check res.keyValuePairs.len == 1
     check res.keyValuePairs[0][1].len == 0
 
+  test "raft metrics track elections, appends, and prometheus text":
+    var n = newRaftNode("n1", @[], raftPort = 29130)
+    check n.metrics != nil
+    check n.metrics.electionsTotal == 0
+    n.becomeLeader()
+    check n.metrics.electionsTotal == 1
+    discard n.appendLog("put", cast[seq[byte]]("a\x00b"))
+    check n.metrics.appendsTotal == 1
+    let text = n.prometheusText()
+    check "baradb_raft_is_leader" in text
+    check "baradb_raft_elections_total" in text
+    check "baradb_raft_appends_total" in text
+    check "baradb_raft_log_entries" in text
+    check "node=\"n1\"" in text
+    check n.applyLag == 0
+    n.commitIndex = 5
+    n.lastApplied = 2
+    check n.applyLag == 3
+
   test "compactLog discards applied prefix and preserves lastSnapshot base":
     var n = newRaftNode("n1", @[], raftPort = 29120)
     n.logMaxEntries = 8

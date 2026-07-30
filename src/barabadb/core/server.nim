@@ -292,11 +292,18 @@ proc forwardQueryToLeader*(host: string, port: int, query: string,
       try: sock.close() except CatchableError: discard
 
 proc waitRaftCommit(node: RaftNode, lastIdx: uint64, timeoutMs: int): Future[(bool, string)] {.async.} =
-  let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+  let start = getMonoTime()
+  let deadline = start + initDuration(milliseconds = timeoutMs)
   while node.commitIndex < lastIdx and getMonoTime() < deadline:
     await sleepAsync(10)
+  let waitedMs = int64((getMonoTime() - start).inMilliseconds)
   if node.commitIndex < lastIdx:
+    if node.metrics != nil:
+      inc node.metrics.commitTimeoutsTotal
     return (false, "raft commit timeout")
+  if node.metrics != nil:
+    inc node.metrics.commitWaitsTotal
+    node.metrics.commitWaitMsTotal += waitedMs
   return (true, "")
 
 proc appendWriteToRaft*(node: RaftNode, kvPairs: seq[(string, seq[byte])],
@@ -316,6 +323,8 @@ proc appendWriteToRaft*(node: RaftNode, kvPairs: seq[(string, seq[byte])],
       else:
         node.appendLog("delete", cast[seq[byte]](key))
     if entry.index == 0:
+      if node.metrics != nil:
+        inc node.metrics.lostLeadershipTotal
       return (false, "lost leadership during raft append")
     lastIdx = entry.index
   return await waitRaftCommit(node, lastIdx, timeoutMs)
@@ -327,6 +336,8 @@ proc appendDdlToRaft*(node: RaftNode, sql: string,
   ## MUST be called outside the storage gate (same as appendWriteToRaft).
   let entry = node.appendLog("ddl", cast[seq[byte]](sql))
   if entry.index == 0:
+    if node.metrics != nil:
+      inc node.metrics.lostLeadershipTotal
     return (false, "lost leadership during raft append")
   return await waitRaftCommit(node, entry.index, timeoutMs)
 
@@ -434,8 +445,12 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
       return (false, QueryResult(), e.msg)
   # Follower write/DDL: proxy to leader SQL port (outside the storage gate).
   if needsForward:
-    return await forwardQueryToLeader(forwardHost, forwardPort, query, params,
-                                      raftWriteTimeoutMs)
+    let (okF, qrF, errF) = await forwardQueryToLeader(forwardHost, forwardPort,
+      query, params, raftWriteTimeoutMs)
+    if raftNode != nil and raftNode.metrics != nil:
+      if okF: inc raftNode.metrics.forwardsTotal
+      else: inc raftNode.metrics.forwardErrorsTotal
+    return (okF, qrF, errF)
   # Raft log append + majority wait (outside the storage gate).
   # DDL batches ship the original SQL once (re-executed on apply). Pure DML
   # ships KV pairs. Mixed DDL+DML in one query uses the DDL path only so the

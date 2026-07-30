@@ -25,6 +25,21 @@ type
     command*: string
     data*: seq[byte]
 
+  ## Counters / gauges for Prometheus (/metrics). Updated on the raft/async
+  ## path; HTTP reads them without locks (best-effort consistency).
+  RaftMetrics* = ref object
+    electionsTotal*: int64          # times this node became leader
+    termChangesTotal*: int64        # currentTerm increases
+    appendsTotal*: int64            # appendLog successes
+    commitWaitsTotal*: int64        # successful wait-for-commit finishes
+    commitWaitMsTotal*: int64       # sum of wait durations (ms)
+    commitTimeoutsTotal*: int64     # raft commit timeout
+    lostLeadershipTotal*: int64     # append returned index 0
+    forwardsTotal*: int64           # follower→leader SQL forwards
+    forwardErrorsTotal*: int64      # failed forwards
+    appliesTotal*: int64            # applyCommand invocations
+    compactionsTotal*: int64        # compactLog that actually dropped entries
+
   RaftNode* = ref object
     id*: string
     state*: RaftState
@@ -41,6 +56,7 @@ type
     lastSnapshotTerm*: uint64
     ## Trigger compaction when log.len exceeds this (0 = default 256).
     logMaxEntries*: int
+    metrics*: RaftMetrics
     # State machine callback
     applyCommand*: proc(cmd: string, data: seq[byte]) {.gcsafe.}
     # Distributed transaction callbacks (for raft→disttxn integration)
@@ -172,6 +188,7 @@ proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0,
     lastSnapshotIndex: 0,
     lastSnapshotTerm: 0,
     logMaxEntries: 256,
+    metrics: RaftMetrics(),
     nextIndex: initTable[string, uint64](),
     matchIndex: initTable[string, uint64](),
     peers: peers,
@@ -254,6 +271,8 @@ proc compactLog*(node: RaftNode) =
     node.lastApplied = node.lastSnapshotIndex
   if node.commitIndex < node.lastSnapshotIndex:
     node.commitIndex = node.lastSnapshotIndex
+  if node.metrics != nil:
+    inc node.metrics.compactionsTotal
   node.saveState()
 
 proc applyCommitted(node: RaftNode) =
@@ -280,9 +299,13 @@ proc applyCommitted(node: RaftNode) =
       else:
         if node.applyCommand != nil:
           node.applyCommand(entry.command, entry.data)
+        if node.metrics != nil:
+          inc node.metrics.appliesTotal
   node.compactLog()
 
 proc becomeFollower*(node: RaftNode, term: uint64) =
+  if term > node.currentTerm and node.metrics != nil:
+    inc node.metrics.termChangesTotal
   node.state = rsFollower
   node.currentTerm = term
   node.votedFor = ""
@@ -294,6 +317,8 @@ proc becomeFollower*(node: RaftNode, term: uint64) =
 proc becomeCandidate*(node: RaftNode) =
   node.state = rsCandidate
   inc node.currentTerm
+  if node.metrics != nil:
+    inc node.metrics.termChangesTotal
   node.votedFor = node.id
   node.votesReceived.clear()
   node.votesReceived.incl(node.id)
@@ -302,6 +327,8 @@ proc becomeCandidate*(node: RaftNode) =
 proc becomeLeader*(node: RaftNode) =
   node.state = rsLeader
   node.leaderId = node.id
+  if node.metrics != nil:
+    inc node.metrics.electionsTotal
   info("Raft node " & node.id & " became leader for term " & $node.currentTerm)
   for peer in node.peers:
     node.nextIndex[peer] = node.lastLogIndex + 1
@@ -437,6 +464,8 @@ proc appendLog*(node: RaftNode, command: string, data: seq[byte] = @[]): LogEntr
     data: data,
   )
   node.log.add(result)
+  if node.metrics != nil:
+    inc node.metrics.appendsTotal
   node.saveState()
 
 proc handleVoteReply*(node: RaftNode, reply: RaftMessage) =
@@ -505,6 +534,81 @@ proc state*(node: RaftNode): RaftState = node.state
 proc isLeader*(node: RaftNode): bool = node.state == rsLeader
 proc leaderId*(node: RaftNode): string = node.leaderId
 proc logLen*(node: RaftNode): int = node.log.len
+
+proc applyLag*(node: RaftNode): uint64 =
+  ## commitIndex - lastApplied (0 when caught up).
+  if node.commitIndex > node.lastApplied:
+    return node.commitIndex - node.lastApplied
+  return 0
+
+proc prometheusText*(node: RaftNode): string =
+  ## Prometheus exposition lines for this raft node (gauges + counters).
+  let m = if node.metrics != nil: node.metrics else: RaftMetrics()
+  let isLead = if node.isLeader: 1 else: 0
+  let role = case node.state
+    of rsLeader: "leader"
+    of rsCandidate: "candidate"
+    of rsFollower: "follower"
+  result = ""
+  result.add("# HELP baradb_raft_is_leader 1 if this node is the raft leader\n")
+  result.add("# TYPE baradb_raft_is_leader gauge\n")
+  result.add("baradb_raft_is_leader{node=\"" & node.id & "\",role=\"" & role & "\"} " & $isLead & "\n")
+  result.add("# HELP baradb_raft_term Current raft term\n")
+  result.add("# TYPE baradb_raft_term gauge\n")
+  result.add("baradb_raft_term{node=\"" & node.id & "\"} " & $node.currentTerm & "\n")
+  result.add("# HELP baradb_raft_log_entries In-memory raft log length\n")
+  result.add("# TYPE baradb_raft_log_entries gauge\n")
+  result.add("baradb_raft_log_entries{node=\"" & node.id & "\"} " & $node.log.len & "\n")
+  result.add("# HELP baradb_raft_commit_index Raft commit index\n")
+  result.add("# TYPE baradb_raft_commit_index gauge\n")
+  result.add("baradb_raft_commit_index{node=\"" & node.id & "\"} " & $node.commitIndex & "\n")
+  result.add("# HELP baradb_raft_last_applied Raft lastApplied index\n")
+  result.add("# TYPE baradb_raft_last_applied gauge\n")
+  result.add("baradb_raft_last_applied{node=\"" & node.id & "\"} " & $node.lastApplied & "\n")
+  result.add("# HELP baradb_raft_apply_lag commitIndex - lastApplied\n")
+  result.add("# TYPE baradb_raft_apply_lag gauge\n")
+  result.add("baradb_raft_apply_lag{node=\"" & node.id & "\"} " & $node.applyLag & "\n")
+  result.add("# HELP baradb_raft_snapshot_index lastSnapshotIndex (compacted base)\n")
+  result.add("# TYPE baradb_raft_snapshot_index gauge\n")
+  result.add("baradb_raft_snapshot_index{node=\"" & node.id & "\"} " & $node.lastSnapshotIndex & "\n")
+  result.add("# HELP baradb_raft_elections_total Times this node became leader\n")
+  result.add("# TYPE baradb_raft_elections_total counter\n")
+  result.add("baradb_raft_elections_total{node=\"" & node.id & "\"} " & $m.electionsTotal & "\n")
+  result.add("# HELP baradb_raft_term_changes_total Term increases observed\n")
+  result.add("# TYPE baradb_raft_term_changes_total counter\n")
+  result.add("baradb_raft_term_changes_total{node=\"" & node.id & "\"} " & $m.termChangesTotal & "\n")
+  result.add("# HELP baradb_raft_appends_total Log appends on this node\n")
+  result.add("# TYPE baradb_raft_appends_total counter\n")
+  result.add("baradb_raft_appends_total{node=\"" & node.id & "\"} " & $m.appendsTotal & "\n")
+  result.add("# HELP baradb_raft_commit_waits_total Successful wait-for-commit completions\n")
+  result.add("# TYPE baradb_raft_commit_waits_total counter\n")
+  result.add("baradb_raft_commit_waits_total{node=\"" & node.id & "\"} " & $m.commitWaitsTotal & "\n")
+  result.add("# HELP baradb_raft_commit_wait_ms_total Sum of commit-wait durations in ms\n")
+  result.add("# TYPE baradb_raft_commit_wait_ms_total counter\n")
+  result.add("baradb_raft_commit_wait_ms_total{node=\"" & node.id & "\"} " & $m.commitWaitMsTotal & "\n")
+  result.add("# HELP baradb_raft_commit_timeouts_total Raft commit wait timeouts\n")
+  result.add("# TYPE baradb_raft_commit_timeouts_total counter\n")
+  result.add("baradb_raft_commit_timeouts_total{node=\"" & node.id & "\"} " & $m.commitTimeoutsTotal & "\n")
+  result.add("# HELP baradb_raft_lost_leadership_total Appends rejected (not leader)\n")
+  result.add("# TYPE baradb_raft_lost_leadership_total counter\n")
+  result.add("baradb_raft_lost_leadership_total{node=\"" & node.id & "\"} " & $m.lostLeadershipTotal & "\n")
+  result.add("# HELP baradb_raft_forwards_total Follower SQL forwards to leader\n")
+  result.add("# TYPE baradb_raft_forwards_total counter\n")
+  result.add("baradb_raft_forwards_total{node=\"" & node.id & "\"} " & $m.forwardsTotal & "\n")
+  result.add("# HELP baradb_raft_forward_errors_total Failed leader forwards\n")
+  result.add("# TYPE baradb_raft_forward_errors_total counter\n")
+  result.add("baradb_raft_forward_errors_total{node=\"" & node.id & "\"} " & $m.forwardErrorsTotal & "\n")
+  result.add("# HELP baradb_raft_applies_total State-machine applyCommand calls\n")
+  result.add("# TYPE baradb_raft_applies_total counter\n")
+  result.add("baradb_raft_applies_total{node=\"" & node.id & "\"} " & $m.appliesTotal & "\n")
+  result.add("# HELP baradb_raft_compactions_total Log prefix compactions\n")
+  result.add("# TYPE baradb_raft_compactions_total counter\n")
+  result.add("baradb_raft_compactions_total{node=\"" & node.id & "\"} " & $m.compactionsTotal & "\n")
+  if m.commitWaitsTotal > 0:
+    let avg = m.commitWaitMsTotal div m.commitWaitsTotal
+    result.add("# HELP baradb_raft_commit_wait_ms_avg Average commit-wait latency (ms)\n")
+    result.add("# TYPE baradb_raft_commit_wait_ms_avg gauge\n")
+    result.add("baradb_raft_commit_wait_ms_avg{node=\"" & node.id & "\"} " & $avg & "\n")
 
 # Leader election timer loop
 type

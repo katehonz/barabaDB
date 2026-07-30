@@ -24,6 +24,7 @@ import ../protocol/auth
 import ../protocol/ratelimit
 import ../core/registry
 import ../core/backup
+import ../core/raft
 
 type
   HttpServer* = ref object
@@ -37,6 +38,8 @@ type
     authManager*: AuthManager
     rateLimiter*: RateLimiter
     ws*: WsServer
+    ## Optional live raft node for /metrics and /health (set from main).
+    raftNode*: RaftNode
 
   Metrics* = ref object
     queriesTotal*: int
@@ -254,21 +257,47 @@ proc queryHandler(server: HttpServer): RequestHandler =
         server.metrics.queryErrors += 1
         ctx.json(%*{"error": errMsg}, 400)
 
-proc healthHandler(): RequestHandler =
+proc healthHandler(server: HttpServer): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
     let ctx = newContext(request)
-    ctx.json(%*{"status": "ok", "version": "1.1.6"})
+    var body = %*{
+      "status": "ok",
+      "version": "1.1.6"
+    }
+    if server.raftNode != nil:
+      let n = server.raftNode
+      let role = case n.state
+        of rsLeader: "leader"
+        of rsCandidate: "candidate"
+        of rsFollower: "follower"
+      body["raft"] = %*{
+        "enabled": true,
+        "node_id": n.id,
+        "role": role,
+        "term": n.currentTerm,
+        "leader_id": n.leaderId,
+        "commit_index": n.commitIndex,
+        "last_applied": n.lastApplied,
+        "apply_lag": n.applyLag,
+        "log_entries": n.log.len,
+        "snapshot_index": n.lastSnapshotIndex
+      }
+    else:
+      body["raft"] = %*{"enabled": false}
+    ctx.json(body)
 
 proc metricsHandler(server: HttpServer): RequestHandler =
   return proc(request: Request) {.gcsafe.} =
     let ctx = newContext(request)
     if not server.checkAuth(request, ctx):
       return
-    let prometheus = "baradb_queries_total " & $server.metrics.queriesTotal & "\n" &
+    var prometheus = "baradb_queries_total " & $server.metrics.queriesTotal & "\n" &
                      "baradb_query_errors_total " & $server.metrics.queryErrors & "\n" &
                      "baradb_inserts_total " & $server.metrics.insertCount & "\n" &
                      "baradb_selects_total " & $server.metrics.selectCount & "\n" &
                      "baradb_connections_active " & $server.metrics.activeConnections & "\n"
+    if server.raftNode != nil:
+      prometheus.add(server.raftNode.prometheusText())
     request.respond(200, @[("Content-Type", "text/plain; charset=utf-8")], prometheus)
 
 proc authHandler(server: HttpServer): RequestHandler =
@@ -886,7 +915,7 @@ proc run*(server: HttpServer, port: int = 9470) =
   router.get("/admin", server.adminHandler())
   router.get("/", server.adminHandler())
   router.post("/query", server.queryHandler())
-  router.get("/health", healthHandler())
+  router.get("/health", server.healthHandler())
   router.get("/metrics", server.metricsHandler())
   router.post("/auth", server.authHandler())
   router.post("/auth/scram/start", server.scramStartHandler())
