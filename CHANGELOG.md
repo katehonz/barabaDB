@@ -4,6 +4,20 @@ All notable changes to BaraDB are documented in this file.
 
 ## [1.2.0] — Unreleased
 
+### Raft cluster (C3a / C3b / ops)
+
+Production-ready path from config → election → SQL/DDL replication → ops.
+
+- **C3a — Networked bootstrap** — `BARADB_RAFT_PEERS=id@host:port`, election timer in production, heartbeat timer reset on AppendEntries, `raft_state.bin` persistence, partial-read-safe frames; E2E `tests/raft_e2e_test.nim` (3-node election + failover)
+- **C3b — SQL writes through Raft** — leader appends DML KV pairs and waits for majority commit; followers reject or **forward** via `BARADB_RAFT_CLIENT_PEERS`; apply path updates LSM + B-tree/FTS/HNSW + graphs; multi-statement write gate; writes only on `default` database
+- **DDL replication** — schema DDL (`CREATE`/`DROP`/`ALTER` table, index, view, graph, …) as `ddl` log entries; re-executed on apply; `CREATE`/`DROP DATABASE` excluded
+- **Leader write forwarding** — followers proxy DML/DDL to the leader SQL port when client peers are configured
+- **Safe log compaction** — soft cap `BARADB_RAFT_LOG_MAX_ENTRIES` (default 256); leader never discards past peer `matchIndex`; snapshot base (`lastSnapshotIndex`/`Term`) persisted
+- **Secondary-index point lookup fix** — index scans use `entry.lsmKey` (not the filter column as PK)
+- **Metrics** — Prometheus raft series on `GET /metrics` (HTTP = TCP port + 440); `GET /health` includes `raft` role/term/leader/lag/log size
+- **E2E writes** — `tests/raft_writes_e2e_test.nim` (schema, forward, index SELECT, failover)
+- **Docs** — `docs/en|bg/distributed.md`, `docs/superpowers/specs/2026-07-30-raft-cluster-status.md`
+
 ### Core Storage Hardening
 
 Foundational LSM improvements for write performance, durability, and compaction correctness.

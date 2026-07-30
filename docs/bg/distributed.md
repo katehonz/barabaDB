@@ -5,9 +5,11 @@ BaraDB поддържа разпределено внедряване с Raft к
 > ⚠️ **Ограничение при множество бази данни**
 > Разпределените модули (Raft, шардиране и репликация) в момента работят само с **`default`** базата данни. Ако използвате множество бази (`CREATE DATABASE`, `USE DATABASE`), разпределените функции още не ги обхващат. Всяка база данни се нуждае от отделна кластър конфигурация.
 
+> **Статус (2026-07-30):** Raft C3a (мрежова election), C3b (SQL записи), DDL репликация, leader forwarding, log compaction и metrics са **на `main`**. Преглед: `docs/superpowers/specs/2026-07-30-raft-cluster-status.md`.
+
 ## Raft Консенсус
 
-Leader election и log репликация през TCP. Включване:
+Leader election и log репликация през TCP; SQL DML/DDL за **default** минават през raft log. Включване:
 
 | Env | Значение |
 |-----|----------|

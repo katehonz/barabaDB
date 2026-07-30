@@ -4,21 +4,39 @@
 
 ### HTTP Health Endpoint
 
+HTTP listens on **TCP port + 440** (e.g. `BARADB_PORT=9472` → health on `9912`).
+
 ```bash
-curl http://localhost:9470/health
+curl http://localhost:9912/health
 ```
 
-Response:
+Response (raft disabled):
 
 ```json
 {
-  "status": "healthy",
-  "version": "0.1.0",
-  "uptime_seconds": 86400,
-  "checks": {
-    "storage": "ok",
-    "memory": "ok",
-    "connections": "ok"
+  "status": "ok",
+  "version": "1.1.6",
+  "raft": { "enabled": false }
+}
+```
+
+With `BARADB_RAFT_ENABLED=true`, a `raft` object is included:
+
+```json
+{
+  "status": "ok",
+  "version": "1.1.6",
+  "raft": {
+    "enabled": true,
+    "node_id": "n1",
+    "role": "leader",
+    "term": 2,
+    "leader_id": "n1",
+    "commit_index": 42,
+    "last_applied": 42,
+    "apply_lag": 0,
+    "log_entries": 12,
+    "snapshot_index": 30
   }
 }
 ```
@@ -35,9 +53,37 @@ Returns `200 OK` when the server is ready to accept traffic, `503` during startu
 
 ### Prometheus-Compatible Metrics
 
+Same HTTP base port as health (`BARADB_PORT + 440`). When auth is enabled, send a Bearer token.
+
 ```bash
-curl http://localhost:9470/metrics
+curl http://localhost:9912/metrics
 ```
+
+Always present:
+
+| Metric | Meaning |
+|--------|---------|
+| `baradb_queries_total` | HTTP queries handled |
+| `baradb_query_errors_total` | Failed HTTP queries |
+| `baradb_inserts_total` / `baradb_selects_total` | Statement class counts |
+| `baradb_connections_active` | Active connections |
+
+With raft enabled, additional series (labels include `node="…"`):
+
+| Metric | Meaning |
+|--------|---------|
+| `baradb_raft_is_leader` | 1 if this process is leader |
+| `baradb_raft_term` | Current term |
+| `baradb_raft_log_entries` | In-memory log length |
+| `baradb_raft_commit_index` / `baradb_raft_last_applied` | Raft indices |
+| `baradb_raft_apply_lag` | commit − applied |
+| `baradb_raft_snapshot_index` | Compacted log base |
+| `baradb_raft_elections_total` | Times this node became leader |
+| `baradb_raft_commit_wait_ms_total` / `_avg` | Wait-for-commit latency |
+| `baradb_raft_forwards_total` | Follower→leader SQL forwards |
+| `baradb_raft_compactions_total` | Log prefix compactions |
+
+See also [distributed.md](distributed.md) for cluster env vars and ops notes.
 
 Example output:
 

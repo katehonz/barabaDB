@@ -5,9 +5,11 @@ BaraDB supports distributed deployment with Raft consensus, sharding, and replic
 > ⚠️ **Multi-Database Limitation**
 > The distributed modules (Raft, sharding, and replication) are currently wired to the **`default`** database only. If you use multiple databases (`CREATE DATABASE`, `USE DATABASE`), distributed features do not yet span across them. Each database would need its own cluster setup.
 
+> **Status (2026-07-30):** Raft C3a (network election), C3b (SQL writes), DDL replication, leader forwarding, log compaction, and metrics are **shipped on `main`**. Design/history: `docs/superpowers/specs/2026-07-30-raft-cluster-status.md`.
+
 ## Raft Consensus
 
-Leader election and log replication over TCP. Enable with:
+Leader election and log replication over TCP; SQL DML/DDL on the default DB go through the raft log. Enable with:
 
 | Env | Meaning |
 |-----|---------|
@@ -25,6 +27,26 @@ When Raft is enabled, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` and transactio
 
 **Metrics:** with raft enabled, `GET /metrics` (HTTP port = `BARADB_PORT + 440`) includes Prometheus lines such as `baradb_raft_is_leader`, `baradb_raft_term`, `baradb_raft_log_entries`, `baradb_raft_apply_lag`, `baradb_raft_commit_wait_ms_total`, `baradb_raft_elections_total`, `baradb_raft_forwards_total`, and `baradb_raft_compactions_total`. `GET /health` embeds a `raft` object (`role`, `term`, `leader_id`, `commit_index`, `apply_lag`, …).
 
+### Minimal 3-node example
+
+```bash
+# Shared peers (raft ports) and client peers (SQL ports)
+export BARADB_RAFT_ENABLED=true
+export BARADB_RAFT_PEERS=n1@127.0.0.1:46101,n2@127.0.0.1:46102,n3@127.0.0.1:46103
+export BARADB_RAFT_CLIENT_PEERS=n1@127.0.0.1:46010,n2@127.0.0.1:46020,n3@127.0.0.1:46030
+
+# Terminal 1
+BARADB_PORT=46010 BARADB_RAFT_PORT=46101 BARADB_RAFT_NODE_ID=n1 \
+  BARADB_DATA_DIR=./data/n1 ./build/baradadb
+
+# Terminal 2 / 3 — n2@46020/46102, n3@46030/46103 similarly
+
+# After a leader appears (check logs for "became leader"):
+# curl http://127.0.0.1:46450/health   # n1 HTTP = 46010+440
+```
+
+### In-process API (tests / embedding)
+
 ```nim
 import barabadb/core/raft
 
@@ -38,6 +60,13 @@ n1.becomeCandidate()
 n1.becomeLeader()
 let entry = n1.appendLog("SET key1 value1")
 ```
+
+### E2E tests
+
+| Test | What it proves |
+|------|----------------|
+| `tests/raft_e2e_test.nim` | 3 real processes; election + kill-leader failover |
+| `tests/raft_writes_e2e_test.nim` | DDL/DML via raft, follower forward, index SELECT, failover writes |
 
 ## Sharding
 

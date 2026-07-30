@@ -4,29 +4,28 @@
 
 ### HTTP Health Endpoint
 
+HTTP слуша на **TCP порт + 440** (напр. `BARADB_PORT=9472` → health на `9912`).
+
 ```bash
-curl http://localhost:9470/health
+curl http://localhost:9912/health
 ```
 
-Отговор:
+Без raft:
 
 ```json
 {
-  "status": "healthy",
+  "status": "ok",
   "version": "1.1.6",
-  "uptime_seconds": 86400,
-  "checks": {
-    "storage": "ok",
-    "memory": "ok",
-    "connections": "ok"
-  }
+  "raft": { "enabled": false }
 }
 ```
+
+С `BARADB_RAFT_ENABLED=true` — обект `raft` (`role`, `term`, `leader_id`, `commit_index`, `apply_lag`, `log_entries`, `snapshot_index`).
 
 ### Readiness Probe
 
 ```bash
-curl http://localhost:9470/ready
+curl http://localhost:9912/ready
 ```
 
 Връща `200 OK` когато сървърът е готов да приема трафик, `503` по време на стартиране.
@@ -35,9 +34,15 @@ curl http://localhost:9470/ready
 
 ### Prometheus-Съвместими Метрики
 
+Същият HTTP порт като health (`BARADB_PORT + 440`).
+
 ```bash
-curl http://localhost:9470/metrics
+curl http://localhost:9912/metrics
 ```
+
+Базови: `baradb_queries_total`, `baradb_query_errors_total`, `baradb_inserts_total`, `baradb_selects_total`, `baradb_connections_active`.
+
+С raft: `baradb_raft_is_leader`, `baradb_raft_term`, `baradb_raft_log_entries`, `baradb_raft_apply_lag`, `baradb_raft_commit_wait_ms_total`, `baradb_raft_elections_total`, `baradb_raft_forwards_total`, `baradb_raft_compactions_total` и др. Пълен списък: [distributed.md](distributed.md) / [en/monitoring.md](../en/monitoring.md).
 
 Примерен изход:
 

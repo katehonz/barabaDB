@@ -155,6 +155,7 @@
 | `PLAN_SQL_ADVANCED.md` — Window Functions, MERGE, etc. | ✅ Завършен |
 | `PLAN_ID_GENERATORS.md` — AUTO_INCREMENT, Sequences, FK | ✅ Завършен |
 | **Този план** — Сесии 10, 11, 12 | ✅ Завършен |
+| Raft C3a/C3b + DDL/forward/compact/metrics (2026-07-30) | ✅ Завършен на `main` — `docs/superpowers/specs/2026-07-30-raft-cluster-status.md` |
 
 ---
 

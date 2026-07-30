@@ -1,6 +1,8 @@
 # SQL Writes Through Raft (C3b) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: DONE** — shipped on `main` (plus post-C3b DDL/forward/compact/metrics).
+> Historical plan; do not re-run tasks.
+> Overview: `docs/superpowers/specs/2026-07-30-raft-cluster-status.md`.
 
 **Goal:** When Raft is enabled, SQL writes commit through the Raft log before the client sees success; followers reject writes naming the leader and apply committed entries via the existing applyCommand loop.
 

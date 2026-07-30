@@ -1,6 +1,7 @@
 # Networked Raft Bootstrap (C3a) Implementation Plan
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Status: DONE** — shipped on `main`. Historical plan; do not re-run tasks.
+> Overview: `docs/superpowers/specs/2026-07-30-raft-cluster-status.md`.
 
 **Goal:** A 3-node BaraDB cluster started with ordinary config elects a leader over TCP, maintains it with heartbeats, and re-elects after the leader is killed.
 

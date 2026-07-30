@@ -733,6 +733,23 @@ let diff = s.diff(oldSchema, newSchema)
 
 ### Raft Consensus
 
+3-node cluster over TCP (env-driven). SQL DML and schema DDL go through the
+raft log on the **default** database. See **[docs/en/distributed.md](docs/en/distributed.md)**
+for full env vars, forwarding, compaction, and metrics.
+
+```bash
+# Node n1 example
+export BARADB_PORT=46010
+export BARADB_RAFT_ENABLED=true
+export BARADB_RAFT_NODE_ID=n1
+export BARADB_RAFT_PORT=46101
+export BARADB_RAFT_PEERS=n1@127.0.0.1:46101,n2@127.0.0.1:46102,n3@127.0.0.1:46103
+export BARADB_RAFT_CLIENT_PEERS=n1@127.0.0.1:46010,n2@127.0.0.1:46020,n3@127.0.0.1:46030
+export BARADB_DATA_DIR=./data/n1
+./build/baradadb
+# Health / metrics: HTTP on BARADB_PORT+440 → curl localhost:46450/health
+```
+
 ```nim
 import barabadb/core/raft
 
@@ -1559,7 +1576,7 @@ features are still being refined:
 | LSM-Tree SSTable reads | ✅ Implemented | Full disk I/O with compaction, WAL, and bloom filters. |
 | HNSW vector search | ✅ Implemented | Hierarchical graph navigation with SIMD-optimized distance metrics. |
 | TCP server execution | ✅ Implemented | Full binary wire protocol parsing and BaraQL query execution. |
-| Raft consensus | ✅ Core logic | Leader election + log replication over TCP; SQL DML commits through the raft log when `BARADB_RAFT_ENABLED=true` (followers reject writes). |
+| Raft consensus | ✅ Cluster path | TCP election + failover; SQL DML/DDL via raft log; leader forwarding; safe log compact; `/metrics` + `/health` raft gauges. See `docs/en/distributed.md`. |
 | Graph / FTS / Columnar | ✅ Implemented | In-memory engines with serialization; FTS/vector/graph indexes persist across restarts. |
 | Query codegen | ✅ Implemented | IR plans compile to storage engine operations with optimization passes. |
 
@@ -1568,7 +1585,7 @@ reflects 100% completion across all major phases.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for full release history. Package version is **v1.1.8**. The **v1.2.0** line (Unreleased) adds core storage hardening (hash MemTable, WAL group commit, schema persistence, ARC/wire stability) and the Unified Search Engine (heap-optimized HNSW, segment inverted index, boolean/phrase/n-gram/facets, multi-language stemmers).
+See [CHANGELOG.md](CHANGELOG.md) for full release history. Package version is **v1.1.8**. The **v1.2.0** line (Unreleased) adds core storage hardening, Unified Search Engine, **engine persistence** (FTS/HNSW/graphs/B-tree indexes across restart), **executor split**, and a full **Raft cluster path** (election, SQL/DDL replication, forwarding, log compact, metrics — see [docs/en/distributed.md](docs/en/distributed.md)).
 
 ## License
 
