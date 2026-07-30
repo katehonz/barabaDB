@@ -15,6 +15,12 @@ import ../../vector/engine as vengine
 import types
 import schema
 
+## Wired by executor.nim at module load. Breaks the context <-> executor
+## module cycle: newExecutionContext cannot call executor code directly, so
+## the engine-restore pass (FTS/HNSW/graph replay from persisted schema keys)
+## is injected here and invoked nil-safely below.
+var restoreEnginesHook*: proc(ctx: ExecutionContext)
+
 # ----------------------------------------------------------------------
 # Context management
 # ----------------------------------------------------------------------
@@ -39,6 +45,7 @@ proc newExecutionContext*(db: LSMTree, registry: DatabaseRegistry = nil): Execut
   result.sharedLock = SharedLock()
   initLock(result.sharedLock.lock)
   restoreSchema(result)
+  if restoreEnginesHook != nil: restoreEnginesHook(result)
 
 # ----------------------------------------------------------------------
 # AST to SQL serializer (for VIEW DDL persistence)

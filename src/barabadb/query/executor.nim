@@ -22,6 +22,7 @@ import ../storage/btree
 import ../storage/wal
 import ../core/mvcc
 import ../core/tracing
+import ../core/logging
 import ../client/fileops
 import ../fts/engine as fts
 import ../core/registry
@@ -1297,6 +1298,10 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
           if text.len > 0:
             ftsIdx.addDocument(docId, text)
       ctx.ftsIndexes[colKey] = ftsIdx
+      # Persist reconstructed DDL so restoreEngines can rebuild the index
+      # from table data after a restart (replay re-writes the same key).
+      let ftsDdl = "CREATE INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ") USING FTS"
+      ctx.db.put(SchemaFtsIndexPrefix & colKey, cast[seq[byte]](ftsDdl))
       return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget & " USING FTS")
 
     if stmt.ciKind == ikHNSW:
@@ -1563,6 +1568,24 @@ proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult =
     return executeQueryImpl(ctx, astNode)
   return okResult(msg="Empty migration body")
 
+proc restoreEngines*(ctx: ExecutionContext) =
+  ## Rebuild ephemeral engines (FTS indexes) from persisted schema keys after
+  ## restoreSchema. Invoked via context.restoreEnginesHook at the end of
+  ## newExecutionContext. Replay re-persists the same key, so it is idempotent.
+  var ddls: seq[string] = @[]
+  for (key, value) in ctx.db.scanAll():
+    if not key.startsWith(SchemaFtsIndexPrefix): continue
+    let ddl = cast[string](value)
+    if ddl.len == 0: continue
+    ddls.add(ddl)
+  for ddl in ddls:
+    try:
+      let res = executeQueryImpl(ctx, qpar.parse(qlex.tokenize(ddl)))
+      if not res.success:
+        warn("restoreEngines: replay failed for DDL '" & ddl & "': " & res.message)
+    except CatchableError as e:
+      warn("restoreEngines: replay raised for DDL '" & ddl & "': " & e.msg)
+
 # ----------------------------------------------------------------------
 # Hook wiring — breaks the module cycle between executor and the exec/*
 # submodules: eval.nim calls back into the engine for subqueries, hybrid
@@ -1572,6 +1595,7 @@ proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult =
 eval.executePlanHook = plan_exec.executePlan
 eval.execScanHook = scan.execScan
 eval.executeQueryHook = executeQuery
+context.restoreEnginesHook = restoreEngines
 
 # triggers.nim back-edge: fireTriggers executes trigger action statements
 # via the private dispatcher, so the lambda closes over executeQueryImpl.

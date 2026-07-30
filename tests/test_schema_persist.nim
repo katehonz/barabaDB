@@ -6,6 +6,7 @@ import std/tables
 import barabadb/storage/lsm
 import barabadb/query/executor
 import barabadb/query/parser
+import barabadb/fts/engine
 
 proc execSql(ctx: ExecutionContext, sql: string): ExecResult =
   let node = parse(sql)
@@ -105,6 +106,36 @@ suite "Schema persistence":
       check sel.success
       check sel.rows.len == 21
       db2.close()
+
+  test "FTS index survives reopen":
+    let dir = "/tmp/baradb_schema_persist_fts"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE docs (id INTEGER PRIMARY KEY, content TEXT)").success
+      check execSql(ctx, "INSERT INTO docs (id, content) VALUES (1, 'quick brown fox')").success
+      check execSql(ctx, "CREATE INDEX docs_fts ON docs (content) USING FTS").success
+      check ctx.ftsIndexes.hasKey("docs.content")
+      db.close()
+    # Reopen fresh context (simulates process restart)
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      # Index must be rebuilt from the persisted schema key — today it is
+      # silently missing, so FTS queries return empty results after reopen.
+      check ctx2.ftsIndexes.hasKey("docs.content")
+      if ctx2.ftsIndexes.hasKey("docs.content"):
+        check ctx2.ftsIndexes["docs.content"].search("quick", limit = 10).len >= 1
+      let r = execSql(ctx2, "SELECT id FROM docs WHERE content @@ 'quick'")
+      check r.success
+      check r.rows.len == 1
+      # index keeps updating after reopen
+      check execSql(ctx2, "INSERT INTO docs (id, content) VALUES (2, 'quick red fox')").success
+      if ctx2.ftsIndexes.hasKey("docs.content"):
+        check ctx2.ftsIndexes["docs.content"].search("red", limit = 10).len >= 1
+      db2.close()
+    removeDir(dir)
 
   test "Stable schema key format":
     check tableSchemaKey("users") == "_schema:tables:users"
