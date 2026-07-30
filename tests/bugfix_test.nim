@@ -3,6 +3,7 @@ import std/strutils
 import std/os
 import std/tables
 import ../src/barabadb/query/[parser, executor, lexer, ast]
+import ../src/barabadb/query/exec/params
 import ../src/barabadb/core/types
 import ../src/barabadb/core/config
 import ../src/barabadb/storage/lsm
@@ -383,3 +384,15 @@ suite "Raft peer address parsing":
       delEnv("BARADB_RAFT_PEERS")
       check msg.len > 0
       check bad in msg
+
+suite "Raft write classification":
+
+  test "isWrite classifies DML and COMMIT":
+    check isWrite(parse("INSERT INTO t (id) VALUES (1)").stmts[0])
+    check isWrite(parse("UPDATE t SET id = 2").stmts[0])
+    check isWrite(parse("DELETE FROM t WHERE id = 1").stmts[0])
+    check isWrite(parse("COMMIT").stmts[0])
+    check not isWrite(parse("SELECT * FROM t").stmts[0])
+    check not isWrite(parse("CREATE TABLE t (id INT)").stmts[0])
+    check not isWrite(parse("BEGIN").stmts[0])
+    check not isWrite(parse("ROLLBACK").stmts[0])

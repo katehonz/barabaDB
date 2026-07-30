@@ -178,3 +178,12 @@ proc isDDL*(stmt: Node): bool =
     result = true
   else:
     result = false
+
+proc isWrite*(stmt: Node): bool =
+  ## True for statements that mutate stored data. `nkCommitTxn` is included
+  ## because COMMIT emits the transaction's buffered kvPairs.
+  case stmt.kind
+  of nkInsert, nkUpdate, nkDelete, nkMerge, nkCommitTxn:
+    result = true
+  else:
+    result = false

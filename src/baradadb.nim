@@ -341,6 +341,7 @@ proc main() =
     var raftNode = newRaftNode(config.raftNodeId, raftPeers, config.raftPort,
                                dataDir = raftDataDir)
     raftNode.peerAddrs = config.raftPeerAddrs
+    tcpServer.raftNode = raftNode  # C3b: executeQuery rejects writes on followers
     # Wire state machine to apply committed entries to the default database
     let defaultDbInfo = getDatabaseInfo(registry, "default")
     raftNode.applyCommand = proc(cmd: string, data: seq[byte]) {.gcsafe.} =
