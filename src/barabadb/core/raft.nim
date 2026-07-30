@@ -548,12 +548,14 @@ type
     socket*: AsyncSocket
     running*: bool
     peerSockets*: Table[string, AsyncSocket]
+    timer*: ElectionTimer
 
 proc newRaftNetwork*(node: RaftNode): RaftNetwork =
   RaftNetwork(
     node: node,
     running: false,
     peerSockets: initTable[string, AsyncSocket](),
+    timer: newElectionTimer(node, node.electionTimeout),
   )
 
 proc connectToPeer(net: RaftNetwork, peerId: string) {.async.} =
@@ -585,7 +587,7 @@ proc broadcast*(net: RaftNetwork, msgs: seq[RaftMessage]) {.async.} =
     if i < msgs.len:
       await net.send(peer, msgs[i])
 
-proc processMessage(net: RaftNetwork, msg: RaftMessage) {.async.} =
+proc processMessage*(net: RaftNetwork, msg: RaftMessage) {.async.} =
   case msg.kind
   of rmkRequestVote:
     let reply = net.node.handleRequestVote(msg)
@@ -593,6 +595,11 @@ proc processMessage(net: RaftNetwork, msg: RaftMessage) {.async.} =
   of rmkRequestVoteReply:
     net.node.handleVoteReply(msg)
   of rmkAppendEntries:
+    # A plausible current leader (same acceptance condition as
+    # handleAppendEntries) resets the election timer; stale-term
+    # messages must not.
+    if msg.term >= net.node.currentTerm:
+      net.timer.resetTimeout()
     let reply = net.node.handleAppendEntries(msg)
     await net.send(msg.senderId, reply)
   of rmkAppendEntriesReply:
@@ -630,13 +637,17 @@ proc heartbeatLoop(net: RaftNetwork) {.async.} =
         await net.send(peer, msg)
     await sleepAsync(net.node.heartbeatTimeout)
 
+proc timerLoop*(net: RaftNetwork) {.async.}
+
 proc run*(net: RaftNetwork) {.async.} =
   net.socket = newAsyncSocket()
   net.socket.setSockOpt(OptReuseAddr, true)
   net.socket.bindAddr(Port(net.node.raftPort))
   net.socket.listen()
   net.running = true
+  net.timer.resetTimeout()
   asyncCheck net.heartbeatLoop()
+  asyncCheck net.timerLoop()
   while net.running:
     try:
       let client = await net.socket.accept()
@@ -646,6 +657,7 @@ proc run*(net: RaftNetwork) {.async.} =
 
 proc stop*(net: RaftNetwork) =
   net.running = false
+  net.timer.stop()
   if net.socket != nil:
     net.socket.close()
   for peerId, sock in net.peerSockets:
@@ -683,3 +695,10 @@ proc tick*(timer: ElectionTimer, net: RaftNetwork = nil) =
       timer.resetTimeout()
   of rsLeader:
     timer.resetTimeout()  # Keep alive
+
+proc timerLoop*(net: RaftNetwork) {.async.} =
+  ## Production election timer: ticks the node's ElectionTimer until the
+  ## network transport is stopped.
+  while net.running:
+    tick(net.timer, net)
+    await sleepAsync(50)

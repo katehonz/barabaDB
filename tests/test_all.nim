@@ -2390,6 +2390,75 @@ suite "Raft Network Transport":
     if n3.isLeader: inc leaderCount
     check leaderCount == 1
 
+  test "timerLoop elects a leader without manual ticks":
+    var n1 = newRaftNode("n1", @["n2", "n3"], raftPort = 29011)
+    var n2 = newRaftNode("n2", @["n1", "n3"], raftPort = 29012)
+    var n3 = newRaftNode("n3", @["n1", "n2"], raftPort = 29013)
+
+    # Distinct deterministic timeouts avoid split-vote livelock
+    n1.electionTimeout = 150
+    n2.electionTimeout = 250
+    n3.electionTimeout = 350
+
+    n1.peerAddrs["n2"] = ("127.0.0.1", 29012)
+    n1.peerAddrs["n3"] = ("127.0.0.1", 29013)
+    n2.peerAddrs["n1"] = ("127.0.0.1", 29011)
+    n2.peerAddrs["n3"] = ("127.0.0.1", 29013)
+    n3.peerAddrs["n1"] = ("127.0.0.1", 29011)
+    n3.peerAddrs["n2"] = ("127.0.0.1", 29012)
+
+    let net1 = newRaftNetwork(n1)
+    let net2 = newRaftNetwork(n2)
+    let net3 = newRaftNetwork(n3)
+
+    asyncCheck net1.run()
+    asyncCheck net2.run()
+    asyncCheck net3.run()
+    waitFor sleepAsync(50)
+
+    # No manual ticks — the production timerLoop must drive the election
+    var leaderCount = 0
+    var waited = 0
+    while waited < 3000:
+      leaderCount = 0
+      if n1.isLeader: inc leaderCount
+      if n2.isLeader: inc leaderCount
+      if n3.isLeader: inc leaderCount
+      if leaderCount == 1: break
+      waitFor sleepAsync(100)
+      waited += 100
+
+    net1.stop()
+    net2.stop()
+    net3.stop()
+    waitFor sleepAsync(50)
+
+    check leaderCount == 1
+
+  test "inbound AppendEntries resets the election timer":
+    var nodeA = newRaftNode("a", @["leader"], raftPort = 0)
+    nodeA.electionTimeout = 0  # any elapsed millisecond counts as a timeout
+    let netA = newRaftNetwork(nodeA)
+    let timer = netA.timer
+
+    waitFor sleepAsync(5)
+    check timer.checkTimeout()  # currently timed out
+
+    # Valid AppendEntries from a plausible current leader (term >= currentTerm)
+    let msg = RaftMessage(kind: rmkAppendEntries, term: nodeA.currentTerm,
+                          senderId: "leader")
+    waitFor netA.processMessage(msg)
+    check not timer.checkTimeout()
+
+    # Stale-term AppendEntries must NOT reset the timer
+    nodeA.currentTerm = 5
+    waitFor sleepAsync(5)
+    check timer.checkTimeout()
+    let staleMsg = RaftMessage(kind: rmkAppendEntries, term: 1,
+                               senderId: "leader")
+    waitFor netA.processMessage(staleMsg)
+    check timer.checkTimeout()
+
 suite "CLI Autocomplete":
   test "Autocomplete commands":
     let res = autocomplete("he")
