@@ -262,7 +262,7 @@ proc healthHandler(server: HttpServer): RequestHandler =
     let ctx = newContext(request)
     var body = %*{
       "status": "ok",
-      "version": "1.1.6"
+      "version": "1.2.0"
     }
     if server.raftNode != nil:
       let n = server.raftNode
@@ -368,7 +368,7 @@ proc openApiHandler(): RequestHandler =
     let ctx = newContext(request)
     ctx.json(%*{
       "openapi": "3.0.0",
-      "info": {"title": "BaraDB API", "version": "1.1.6"},
+      "info": {"title": "BaraDB API", "version": "1.2.0"},
       "paths": {
         "/query": {
           "post": {
@@ -906,7 +906,7 @@ function showTab(idx){
 }
 setInterval(() => { if(document.querySelectorAll('.panel')[4].classList.contains('active')) loadMetrics() }, 5000)
 </script>
-<div class='status' style='text-align:center;padding:10px'>BaraDB v1.1.6 — Multimodal Database Engine</div>
+<div class='status' style='text-align:center;padding:10px'>BaraDB v1.2.0 — Multimodal Database Engine</div>
 </body></html>"""
     request.respond(200, @[("Content-Type", "text/html; charset=utf-8")], html)
 

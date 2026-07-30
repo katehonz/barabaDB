@@ -1,39 +1,145 @@
 # Deployment Guide
 
+**Production GA (v1.2.0)** is **single-node**. See [known limitations](known-limitations.md).  
+Raft multi-node is [documented](distributed.md) as **experimental**.
+
+## Ports
+
+| Service | Port | Notes |
+|---------|------|--------|
+| Binary wire | `BARADB_PORT` (default 9472) | Clients |
+| HTTP REST | `BARADB_PORT + 440` (9912) | `/health`, `/query`, `/metrics` |
+| WebSocket | `BARADB_PORT + 441` (9913) | |
+| Raft | `BARADB_RAFT_PORT` | Experimental cluster only |
+
+There is **no** `BARADB_HTTP_PORT` — HTTP is always TCP+440.
+
 ## Docker
 
-За пълно ръководство за Docker deployment вижте [Docker Guide](docker.md).
+See also [Docker Guide](docker.md).
 
-### Бърз старт
+### Development
 
 ```bash
 docker build -t baradb:latest .
 docker compose up -d
 ```
 
-### Docker Compose файлове
+### Production (GA)
 
-| Файл | Назначение |
-|------|-----------|
+```bash
+export BARADB_JWT_SECRET="$(openssl rand -hex 32)"
+docker compose -f docker-compose.prod.yml up -d --build
+```
+
+- Auth is **on**; compose **fails** if `BARADB_JWT_SECRET` is unset.
+- Binary sets `BARADB_ENV=production` → process refuses empty/placeholder secrets.
+- Image tag: `baradb:1.2.0`.
+
+Optional backup sidecar:
+
+```bash
+docker compose -f docker-compose.prod.yml --profile backup up -d
+```
+
+| Compose file | Role |
+|--------------|------|
 | `docker-compose.yml` | Development |
-| `docker-compose.prod.yml` | Production |
-| `docker-compose.override.yml` | Dev override (автоматично) |
+| `docker-compose.prod.yml` | Production GA |
+| `docker-compose.override.yml` | Local override |
 
-### Production
+> Note: `deploy.resources` limits apply under Docker Swarm; plain Compose may ignore them.
 
-```bash
-docker compose -f docker-compose.prod.yml up -d
-```
+## Production runbook
 
-### Docker Swarm
+### Start (binary)
 
 ```bash
-docker stack deploy -c docker-compose.prod.yml baradb
+export BARADB_ENV=production
+export BARADB_AUTH_ENABLED=true
+export BARADB_JWT_SECRET="$(openssl rand -hex 32)"   # store securely
+export BARADB_PORT=9472
+export BARADB_DATA_DIR=/var/lib/baradb/data
+export BARADB_LOG_LEVEL=warn
+export BARADB_LOG_FILE=/var/log/baradb/baradb.log
+./build/baradadb
 ```
 
-## systemd Service
+### Stop
 
-Create `/etc/systemd/system/baradb.service`:
+```bash
+# systemd
+sudo systemctl stop baradb
+# docker
+docker compose -f docker-compose.prod.yml down
+# foreground: Ctrl+C / SIGTERM
+```
+
+### Health / metrics
+
+```bash
+curl -s http://127.0.0.1:9912/health
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9912/metrics
+```
+
+### Auth token (prod)
+
+```bash
+curl -s -X POST http://127.0.0.1:9912/auth \
+  -H 'Content-Type: application/json' \
+  -d "{\"username\":\"admin\",\"password\":\"$BARADB_JWT_SECRET\"}"
+```
+
+### Backup (server stopped or offline-consistent)
+
+Preferred offline / all-databases:
+
+```bash
+./build/backup backup --all-databases \
+  --data-root=/var/lib/baradb/data/databases \
+  --output=/backups/baradb_$(date +%Y%m%d_%H%M%S).tar.gz
+```
+
+Copy archives off-host. Details: [backup.md](backup.md).
+
+### Restore
+
+1. **Stop** BaraDB.
+2. Move aside or empty the data root (keep a copy of the broken dir).
+3. Restore:
+
+```bash
+./build/backup restore --input=/backups/baradb_YYYYMMDD.tar.gz \
+  --all-databases --data-root=/var/lib/baradb/data/databases --force
+```
+
+4. Start BaraDB; verify with a known query.
+
+### Automated drill
+
+```bash
+nim c -o:build/baradadb src/baradadb.nim
+nim c -o:build/backup src/barabadb/core/backup.nim
+./scripts/backup-restore-drill.sh
+```
+
+### Logs
+
+- File: `BARADB_LOG_FILE` (prod compose: `./logs` → `/var/log/baradb`)
+- Docker: `docker logs baradb`
+
+### Data layout
+
+```
+$BARADB_DATA_DIR/
+  databases/
+    default/     # LSM + WAL + schema keys
+  raft/          # only if raft enabled
+```
+
+## systemd
+
+`/etc/systemd/system/baradb.service`:
 
 ```ini
 [Unit]
@@ -49,16 +155,18 @@ ExecStart=/usr/local/bin/baradadb
 Restart=always
 RestartSec=5
 
+Environment=BARADB_ENV=production
 Environment=BARADB_PORT=9472
-Environment=BARADB_HTTP_PORT=9470
 Environment=BARADB_DATA_DIR=/var/lib/baradb/data
-Environment=BARADB_LOG_LEVEL=info
+Environment=BARADB_LOG_LEVEL=warn
+Environment=BARADB_AUTH_ENABLED=true
+# Environment=BARADB_JWT_SECRET=  # use EnvironmentFile
+EnvironmentFile=-/etc/baradb/baradb.env
 
-# Security hardening
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/baradb/data
+ReadWritePaths=/var/lib/baradb/data /var/log/baradb
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
@@ -67,114 +175,47 @@ ProtectControlGroups=true
 WantedBy=multi-user.target
 ```
 
-Enable and start:
-
 ```bash
 sudo useradd -r -s /bin/false baradb
-sudo mkdir -p /var/lib/baradb/data
-sudo chown -R baradb:baradb /var/lib/baradb
-sudo cp build/baradadb /usr/local/bin/
+sudo mkdir -p /var/lib/baradb/data /var/log/baradb /etc/baradb
+# put BARADB_JWT_SECRET=... in /etc/baradb/baradb.env (mode 600)
 sudo systemctl daemon-reload
 sudo systemctl enable --now baradb
 ```
 
-## Kubernetes
+## High Availability (experimental)
 
-### StatefulSet
+Raft multi-node is **not** the v1.2.0 GA tier. See [distributed.md](distributed.md)
+and [known-limitations](known-limitations.md). Use `id@host:port` peer format:
 
-```yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: baradb
-spec:
-  serviceName: baradb
-  replicas: 3
-  selector:
-    matchLabels:
-      app: baradb
-  template:
-    metadata:
-      labels:
-        app: baradb
-    spec:
-      containers:
-      - name: baradb
-        image: baradb:latest
-        ports:
-        - containerPort: 9472
-          name: binary
-        - containerPort: 9470
-          name: http
-        - containerPort: 9471
-          name: websocket
-        env:
-        - name: BARADB_DATA_DIR
-          value: /data
-        - name: BARADB_RAFT_NODE_ID
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
-        volumeMounts:
-        - name: data
-          mountPath: /data
-  volumeClaimTemplates:
-  - metadata:
-      name: data
-    spec:
-      accessModes: ["ReadWriteOnce"]
-      resources:
-        requests:
-          storage: 100Gi
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: baradb
-spec:
-  selector:
-    app: baradb
-  ports:
-  - port: 9472
-    name: binary
-  - port: 9470
-    name: http
-  - port: 9471
-    name: websocket
-  clusterIP: None
+```bash
+export BARADB_RAFT_ENABLED=true
+export BARADB_RAFT_NODE_ID=n1
+export BARADB_RAFT_PORT=46101
+export BARADB_RAFT_PEERS=n1@127.0.0.1:46101,n2@127.0.0.1:46102,n3@127.0.0.1:46103
+export BARADB_RAFT_CLIENT_PEERS=n1@127.0.0.1:46010,n2@127.0.0.1:46020,n3@127.0.0.1:46030
 ```
 
-## Reverse Proxy (nginx)
+## Reverse proxy (nginx)
+
+Proxy to **HTTP = TCP+440** (9912 if TCP is 9472):
 
 ```nginx
 upstream baradb_http {
-    server 127.0.0.1:9470;
+    server 127.0.0.1:9912;
 }
-
 upstream baradb_ws {
-    server 127.0.0.1:9471;
+    server 127.0.0.1:9913;
 }
-
-server {
-    listen 80;
-    server_name db.example.com;
-    return 301 https://$server_name$request_uri;
-}
-
 server {
     listen 443 ssl http2;
     server_name db.example.com;
-
-    ssl_certificate /etc/letsencrypt/live/db.example.com/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/db.example.com/privkey.pem;
-
-    location /api/ {
-        proxy_pass http://baradb_http/;
+    location / {
+        proxy_pass http://baradb_http;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
-
     location /ws/ {
         proxy_pass http://baradb_ws/;
         proxy_http_version 1.1;
@@ -184,66 +225,8 @@ server {
 }
 ```
 
-## High Availability
+## See also
 
-### 3-Node Raft Cluster
-
-```bash
-# Node 1
-BARADB_RAFT_NODE_ID=node1 \
-BARADB_RAFT_PEERS=node2:9001,node3:9001 \
-./build/baradadb
-
-# Node 2
-BARADB_RAFT_NODE_ID=node2 \
-BARADB_RAFT_PEERS=node1:9001,node3:9001 \
-./build/baradadb
-
-# Node 3
-BARADB_RAFT_NODE_ID=node3 \
-BARADB_RAFT_PEERS=node1:9001,node2:9001 \
-./build/baradadb
-```
-
-## Cloud Deployment
-
-### AWS EC2
-
-Recommended instance: `m6i.2xlarge` (8 vCPU, 32 GB RAM)
-
-```bash
-# User data script
-#!/bin/bash
-apt-get update
-apt-get install -y nim
-wget https://github.com/katehonz/barabaDB/releases/latest/download/baradadb-linux-amd64
-chmod +x baradadb-linux-amd64
-mv baradadb-linux-amd64 /usr/local/bin/baradadb
-
-mkdir -p /data/baradb
-cat > /etc/systemd/system/baradb.service << 'EOF'
-[Unit]
-Description=BaraDB
-After=network.target
-[Service]
-ExecStart=/usr/local/bin/baradadb
-Environment=BARADB_DATA_DIR=/data/baradb
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable --now baradb
-```
-
-### GCP Cloud Run (HTTP only)
-
-```bash
-gcloud run deploy baradb \
-  --image gcr.io/PROJECT/baradb \
-  --port 9470 \
-  --memory 4Gi \
-  --cpu 2 \
-  --max-instances 10
-```
+- [Known limitations](known-limitations.md)
+- [Release checklist](release-checklist.md)
+- [Backup](backup.md) · [Monitoring](monitoring.md) · [Distributed / Raft](distributed.md)

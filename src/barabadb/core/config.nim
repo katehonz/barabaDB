@@ -250,6 +250,28 @@ proc loadConfig*(): BaraConfig =
   # 2. Environment overrides (highest priority)
   loadConfigFromEnv(result)
 
+proc isProductionEnv*(): bool =
+  ## True when BARADB_ENV=production (or prod) or BARADB_AUTH_REQUIRED=true.
+  let env = getEnv("BARADB_ENV", "").toLowerAscii()
+  if env == "production" or env == "prod": return true
+  parseEnvBool(getEnv("BARADB_AUTH_REQUIRED", ""), false)
+
+proc validateProductionConfig*(cfg: BaraConfig) =
+  ## Fail closed for production: auth on + non-empty JWT secret.
+  ## Call after loadConfig() from the main entrypoint.
+  if not isProductionEnv(): return
+  if not cfg.authEnabled:
+    raise newException(ValueError,
+      "Production refuses to start with auth disabled. " &
+      "Set BARADB_AUTH_ENABLED=true (or unset BARADB_ENV=production for local dev).")
+  if cfg.jwtSecret.len == 0:
+    raise newException(ValueError,
+      "Production refuses to start without BARADB_JWT_SECRET. " &
+      "Generate one: openssl rand -hex 32")
+  if cfg.jwtSecret in ["change-me", "change-me-to-random-32-char-string", "secret", "default"]:
+    raise newException(ValueError,
+      "Production refuses insecure JWT secret placeholder. Set a strong BARADB_JWT_SECRET.")
+
 proc getEffectiveJwtSecret*(cfg: BaraConfig): string =
   if cfg.jwtSecret.len > 0:
     return cfg.jwtSecret

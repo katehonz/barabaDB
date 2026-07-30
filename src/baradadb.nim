@@ -278,15 +278,20 @@ proc main() =
         quit(0)
 
   var config = loadConfig()
+  try:
+    validateProductionConfig(config)
+  except ValueError as e:
+    stderr.writeLine("FATAL: " & e.msg)
+    quit(1)
   # Global exclusive gate for multi-thread storage (HTTP workers + TCP + compact)
   initStorageGate()
   # Init structured logger from config
   let logLvl = parseEnum[LogLevel]("ll" & capitalizeAscii(config.logLevel))
   defaultLogger = newLogger(logLvl, config.logFile)
-  info("BaraDB v1.1.6 — Multimodal Database Engine")
+  info("BaraDB v1.2.0 — Multimodal Database Engine")
   info("Storage gate initialized (serializes HTTP/TCP/compaction access)")
 
-  # Security check: warn if JWT secret is not configured
+  # Security check: warn if JWT secret is not configured (non-production only)
   if config.jwtSecret.len == 0:
     warn("JWT secret not configured! Set BARADB_JWT_SECRET env var or jwt_secret in config. Using default (INSECURE).")
 

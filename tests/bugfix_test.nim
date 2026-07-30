@@ -360,6 +360,29 @@ suite "Bug fixes — UNIQUE index enforcement":
     let c = executeQuery(ctx, parse("CREATE UNIQUE INDEX accts_email ON accts (email)"))
     check not c.success
 
+suite "Production config gate":
+
+  test "validateProductionConfig rejects missing secret":
+    putEnv("BARADB_ENV", "production")
+    defer: delEnv("BARADB_ENV")
+    var cfg = defaultConfig()
+    cfg.authEnabled = true
+    cfg.jwtSecret = ""
+    var msg = ""
+    try:
+      validateProductionConfig(cfg)
+    except ValueError as e:
+      msg = e.msg
+    check "JWT" in msg or "secret" in msg.toLower()
+
+  test "validateProductionConfig accepts strong secret":
+    putEnv("BARADB_ENV", "production")
+    defer: delEnv("BARADB_ENV")
+    var cfg = defaultConfig()
+    cfg.authEnabled = true
+    cfg.jwtSecret = "a".repeat(32)
+    validateProductionConfig(cfg)  # must not raise
+
 suite "Raft peer address parsing":
 
   test "BARADB_RAFT_CLIENT_PEERS populates raftPeerClientAddrs":

@@ -1576,7 +1576,7 @@ features are still being refined:
 | LSM-Tree SSTable reads | ✅ Implemented | Full disk I/O with compaction, WAL, and bloom filters. |
 | HNSW vector search | ✅ Implemented | Hierarchical graph navigation with SIMD-optimized distance metrics. |
 | TCP server execution | ✅ Implemented | Full binary wire protocol parsing and BaraQL query execution. |
-| Raft consensus | ✅ Cluster path | TCP election + failover; SQL DML/DDL via raft log; leader forwarding; safe log compact; `/metrics` + `/health` raft gauges. See `docs/en/distributed.md`. |
+| Raft consensus | ⚡ Experimental cluster | TCP election + SQL/DDL via log; single-node is **Production GA**. See `docs/en/known-limitations.md`. |
 | Graph / FTS / Columnar | ✅ Implemented | In-memory engines with serialization; FTS/vector/graph indexes persist across restarts. |
 | Query codegen | ✅ Implemented | IR plans compile to storage engine operations with optimization passes. |
 
@@ -1585,7 +1585,10 @@ reflects 100% completion across all major phases.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for full release history. Package version is **v1.1.8**. The **v1.2.0** line (Unreleased) adds core storage hardening, Unified Search Engine, **engine persistence** (FTS/HNSW/graphs/B-tree indexes across restart), **executor split**, and a full **Raft cluster path** (election, SQL/DDL replication, forwarding, log compact, metrics — see [docs/en/distributed.md](docs/en/distributed.md)).
+See [CHANGELOG.md](CHANGELOG.md) for full release history. Package version is **v1.2.0**.
+
+- **Production GA (single-node):** auth-on prod compose, backup/restore drill, runbook — [known-limitations](docs/en/known-limitations.md), [deployment](docs/en/deployment.md)
+- **Raft multi-node:** experimental — [distributed.md](docs/en/distributed.md)
 
 ## License
 

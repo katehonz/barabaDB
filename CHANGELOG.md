@@ -2,7 +2,15 @@
 
 All notable changes to BaraDB are documented in this file.
 
-## [1.2.0] — Unreleased
+## [1.2.0] — 2026-07-30
+
+### Production GA (single-node)
+
+- **Scope** — single-node production tier; Raft multi-node documented as experimental ([known-limitations](docs/en/known-limitations.md))
+- **Prod compose** — `docker-compose.prod.yml` requires `BARADB_JWT_SECRET` and enables auth; `BARADB_ENV=production` fails closed without secret
+- **Backup drill** — `scripts/backup-restore-drill.sh` (backup → wipe → restore → verify)
+- **Runbook** — start/stop/backup/restore in [deployment](docs/en/deployment.md)
+- **Release checklist** — [docs/en/release-checklist.md](docs/en/release-checklist.md)
 
 ### Raft cluster (C3a / C3b / ops)
 

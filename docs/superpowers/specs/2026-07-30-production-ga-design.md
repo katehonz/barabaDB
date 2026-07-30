@@ -1,7 +1,7 @@
 # Production GA (v1.2.0) — Design / cut line
 
 Date: 2026-07-30  
-Status: **Approved direction** — implementation follows the plan  
+Status: **Done (v1.2.0 GA shipped)** — plan  
 `docs/superpowers/plans/2026-07-30-production-ga.md`.
 
 ## Problem

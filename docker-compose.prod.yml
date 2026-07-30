@@ -1,82 +1,87 @@
-# BaraDB — Production Docker Compose
-# Usage: docker compose -f docker-compose.prod.yml up -d
+# BaraDB — Production Docker Compose (v1.2.0 GA)
 #
-# Препоръчителни стъпки преди production deployment:
-#   1. Създайте TLS сертификати в ./certs/
-#   2. Задайте силен BARADB_JWT_SECRET
-#   3. Настройте firewall правила за портовете
-#   4. Конфигурирайте регулярни backups
+# Usage:
+#   export BARADB_JWT_SECRET="$(openssl rand -hex 32)"
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Required:
+#   BARADB_JWT_SECRET  — strong secret (compose fails if unset)
+#
+# Ports (BARADB_PORT=9472):
+#   9472  binary wire
+#   9912  HTTP  (= TCP + 440)
+#   9913  WebSocket (= TCP + 441)
+#
+# Notes:
+#   - Auth is ON. Obtain a token via POST /auth before /query.
+#   - `deploy.resources` applies under Swarm; plain Compose ignores limits.
+#   - Raft is optional/experimental — not enabled here (single-node GA).
 
 services:
   baradb:
     build:
       context: .
       dockerfile: Dockerfile
-    image: baradb:latest
+    image: baradb:1.2.0
     container_name: baradb
     hostname: baradb
     restart: always
 
     ports:
       - "9472:9472"   # Binary protocol
-      - "9912:9912"   # HTTP/REST API
-      - "9913:9913"   # WebSocket
+      - "9912:9912"   # HTTP REST (TCP+440)
+      - "9913:9913"   # WebSocket (TCP+441)
 
     volumes:
       - baradb_data:/data
-      # TLS сертификати (read-only)
       - ./certs:/certs:ro
-      # Лог файлове на хоста
       - ./logs:/var/log/baradb
 
     environment:
-      # Network
+      - BARADB_ENV=production
       - BARADB_ADDRESS=0.0.0.0
       - BARADB_PORT=9472
 
-      # Storage
       - BARADB_DATA_DIR=/data
       - BARADB_MEMTABLE_SIZE_MB=256
       - BARADB_CACHE_SIZE_MB=512
 
-      # TLS (разкоментирайте когато имате сертификати)
+      # Security — fail closed without a real secret
+      - BARADB_AUTH_ENABLED=true
+      - BARADB_JWT_SECRET=${BARADB_JWT_SECRET:?Set BARADB_JWT_SECRET to a strong random value}
+      - BARADB_RATE_LIMIT_GLOBAL=10000
+      - BARADB_RATE_LIMIT_PER_CLIENT=1000
+
+      # TLS (uncomment when certs exist under ./certs)
       # - BARADB_TLS_ENABLED=true
       # - BARADB_CERT_FILE=/certs/server.crt
       # - BARADB_KEY_FILE=/certs/server.key
 
-      # Security (ЗАДЪЛЖИТЕЛНО сменете в production!)
-      # - BARADB_AUTH_ENABLED=true
-      # - BARADB_JWT_SECRET=change-me-to-random-32-char-string
-      # - BARADB_RATE_LIMIT_GLOBAL=10000
-      # - BARADB_RATE_LIMIT_PER_CLIENT=1000
-
-      # Logging
       - BARADB_LOG_LEVEL=warn
       - BARADB_LOG_FILE=/var/log/baradb/baradb.log
       - BARADB_LOG_FORMAT=json
 
-      # Performance
       - BARADB_COMPACTION_INTERVAL_MS=30000
-      - BARADB_WAL_SYNC_INTERVAL_MS=10
+      # Match config.nim env names
+      - BARADB_WAL_SYNC_MODE=group
+      - BARADB_WAL_GROUP_EVERY=64
 
     healthcheck:
-      test: ["CMD", "sh", "-c", "wget -qO- http://localhost:9912/health >/dev/null 2>&1"]
+      test: ["CMD", "sh", "-c", "wget -qO- http://127.0.0.1:9912/health >/dev/null 2>&1"]
       interval: 15s
       timeout: 5s
       retries: 5
       start_period: 30s
 
-    # Production resource limits
     deploy:
       resources:
         limits:
-          cpus: '4.0'
+          cpus: "4.0"
           memory: 8G
         reservations:
-          cpus: '1.0'
+          cpus: "1.0"
           memory: 1G
 
-    # Security hardening
     security_opt:
       - no-new-privileges:true
     read_only: true
@@ -91,19 +96,19 @@ services:
       options:
         max-size: "100m"
         max-file: "5"
-        labels: "service_name"
 
-  # Опционален: Backup cron job
+  # Optional offline-style backup sidecar (shares data volume read-only)
   backup:
-    image: baradb:latest
+    image: baradb:1.2.0
     container_name: baradb-backup
     restart: unless-stopped
+    profiles: ["backup"]
     command: >
       sh -c '
         while true; do
           sleep 86400;
-          /app/backup backup --all-databases --data-root=/data/databases --output=/backups/baradb_$$(date +%Y%m%d_%H%M%S).tar.gz --level=6;
-          /app/backup cleanup --data-root=/data/databases --keep=7;
+          /app/backup backup --all-databases --data-root=/data/databases --output=/backups/baradb_$$(date +%Y%m%d_%H%M%S).tar.gz --level=6 || true;
+          /app/backup cleanup --data-root=/data/databases --keep=7 || true;
         done
       '
     volumes:
@@ -111,11 +116,6 @@ services:
       - ./backups:/backups
     networks:
       - baradb_net
-    deploy:
-      resources:
-        limits:
-          cpus: '0.5'
-          memory: 512M
 
 volumes:
   baradb_data:
@@ -124,6 +124,3 @@ volumes:
 networks:
   baradb_net:
     driver: bridge
-    ipam:
-      config:
-        - subnet: 172.28.0.0/16

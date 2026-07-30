@@ -156,7 +156,7 @@
 | `PLAN_ID_GENERATORS.md` — AUTO_INCREMENT, Sequences, FK | ✅ Завършен |
 | **Този план** — Сесии 10, 11, 12 | ✅ Завършен |
 | Raft C3a/C3b + DDL/forward/compact/metrics (2026-07-30) | ✅ Завършен на `main` — `docs/superpowers/specs/2026-07-30-raft-cluster-status.md` |
-| **Production GA v1.2.0** (single-node) | 📋 План — `docs/superpowers/plans/2026-07-30-production-ga.md` |
+| **Production GA v1.2.0** (single-node) | ✅ `docs/superpowers/plans/2026-07-30-production-ga.md` |
 
 ---
 

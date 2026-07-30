@@ -5,7 +5,7 @@ BaraDB supports distributed deployment with Raft consensus, sharding, and replic
 > ⚠️ **Multi-Database Limitation**
 > The distributed modules (Raft, sharding, and replication) are currently wired to the **`default`** database only. If you use multiple databases (`CREATE DATABASE`, `USE DATABASE`), distributed features do not yet span across them. Each database would need its own cluster setup.
 
-> **Status (2026-07-30):** Raft C3a (network election), C3b (SQL writes), DDL replication, leader forwarding, log compaction, and metrics are **shipped on `main`**. Design/history: `docs/superpowers/specs/2026-07-30-raft-cluster-status.md`.
+> **Status (2026-07-30):** Raft C3a/C3b + DDL/forward/compact/metrics are **shipped**. Multi-node Raft is **experimental** for v1.2.0 GA (single-node is the production tier). See [known-limitations](known-limitations.md) and `docs/superpowers/specs/2026-07-30-raft-cluster-status.md`.
 
 ## Raft Consensus
 

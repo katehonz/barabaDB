@@ -19,7 +19,7 @@ ARG VCS_REF
 
 LABEL maintainer="BaraDB Team"
 LABEL description="BaraDB — Multimodal Database Engine"
-LABEL version="1.1.6"
+LABEL version="1.2.0"
 
 # Инсталираме runtime зависимости
 # libpcre3 — нужна за Nim regex (зарежда се динамично)
