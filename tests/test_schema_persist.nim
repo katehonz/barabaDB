@@ -8,6 +8,7 @@ import barabadb/query/executor
 import barabadb/query/parser
 import barabadb/fts/engine
 import barabadb/vector/engine as vengine
+import barabadb/graph/engine as gengine
 
 proc execSql(ctx: ExecutionContext, sql: string): ExecResult =
   let node = parse(sql)
@@ -164,6 +165,31 @@ suite "Schema persistence":
       if ctx2.vectorIndexes.hasKey("vecs.embedding"):
         check vengine.search(ctx2.vectorIndexes["vecs.embedding"],
                              @[0.0'f32, 1.0'f32, 0.0'f32], k = 5).len >= 1
+      db2.close()
+    removeDir(dir)
+
+  test "Graph survives reopen":
+    let dir = "/tmp/baradb_schema_persist_graph"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE GRAPH social").success
+      check execSql(ctx, "INSERT INTO social_nodes (id, node_label) VALUES (1, 'person')").success
+      check execSql(ctx, "INSERT INTO social_nodes (id, node_label) VALUES (2, 'person')").success
+      check execSql(ctx, "INSERT INTO social_edges (source_id, dest_id, edge_label, weight) VALUES (1, 2, 'knows', 1.0)").success
+      check "social" in ctx.graphs
+      db.close()
+    # Reopen fresh context (simulates process restart)
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      # Graph must be rebuilt from the backing tables — today it is
+      # silently missing after reopen.
+      check "social" in ctx2.graphs
+      if "social" in ctx2.graphs:
+        check gengine.nodeCount(ctx2.graphs["social"]) == 2
+        check gengine.edgeCount(ctx2.graphs["social"]) == 1
       db2.close()
     removeDir(dir)
 

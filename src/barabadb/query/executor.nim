@@ -903,6 +903,9 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       ctx.tables.del(name & "_nodes")
       ctx.graphs.del(name)
       return errResult("Failed to create graph edges table: " & edgesRes.message)
+    # Persist a marker so restoreEngines can rebuild the Graph from the
+    # backing tables after a restart. Written only on the success path.
+    ctx.db.put(SchemaGraphsPrefix & name, cast[seq[byte]]("CREATE GRAPH " & name))
     return okResult(msg="CREATE GRAPH " & name)
 
   of nkDropGraph:
@@ -912,6 +915,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         return okResult()
       return errResult("Graph '" & name & "' does not exist")
     ctx.graphs.del(name)
+    ctx.db.delete(SchemaGraphsPrefix & name)
     var dropNodesSql = "DROP TABLE " & name & "_nodes"
     var dropEdgesSql = "DROP TABLE " & name & "_edges"
     let nodesTokens = qlex.tokenize(dropNodesSql)
@@ -1573,9 +1577,10 @@ proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult =
   return okResult(msg="Empty migration body")
 
 proc restoreEngines*(ctx: ExecutionContext) =
-  ## Rebuild ephemeral engines (FTS/HNSW indexes) from persisted schema keys
-  ## after restoreSchema. Invoked via context.restoreEnginesHook at the end of
-  ## newExecutionContext. Replay re-persists the same key, so it is idempotent.
+  ## Rebuild ephemeral engines (FTS/HNSW indexes, graphs) from persisted
+  ## schema keys after restoreSchema. Invoked via context.restoreEnginesHook
+  ## at the end of newExecutionContext. Index replay re-persists the same
+  ## key, so it is idempotent.
   var ddls: seq[string] = @[]
   for (key, value) in ctx.db.scanAll():
     if not key.startsWith(SchemaFtsIndexPrefix) and
@@ -1590,6 +1595,57 @@ proc restoreEngines*(ctx: ExecutionContext) =
         warn("restoreEngines: replay failed for DDL '" & ddl & "': " & res.message)
     except CatchableError as e:
       warn("restoreEngines: replay raised for DDL '" & ddl & "': " & e.msg)
+
+  # Graphs cannot be replayed via CREATE GRAPH (the backing tables already
+  # exist after restart), so rebuild each Graph object from the rows of its
+  # <name>_nodes / <name>_edges backing tables. Row mapping mirrors the
+  # INSERT path in exec/dml.nim.
+  var graphNames: seq[string] = @[]
+  for (key, _) in ctx.db.scanAll():
+    if key.startsWith(SchemaGraphsPrefix):
+      let name = key[SchemaGraphsPrefix.len..^1]
+      if name.len > 0: graphNames.add(name)
+  for name in graphNames:
+    if name in ctx.graphs: continue
+    try:
+      var g = gengine.newGraph()
+      for row in execScan(ctx, name & "_nodes"):
+        try:
+          if "id" notin row: continue
+          let idStr = valueToString(row["id"])
+          if idStr.len == 0: continue
+          let nid = gengine.NodeId(parseUInt(idStr))
+          var label = ""
+          var props = initTable[string, string]()
+          for col, val in row:
+            if col == "node_label":
+              label = valueToString(val)
+            elif col != "id" and col != "properties" and
+                 col != "$key" and col != "$value":
+              props[col] = valueToString(val)
+          gengine.addNodeWithId(g, nid, label, props)
+        except CatchableError:
+          discard
+      for row in execScan(ctx, name & "_edges"):
+        try:
+          if "source_id" notin row or "dest_id" notin row: continue
+          let srcStr = valueToString(row["source_id"])
+          let dstStr = valueToString(row["dest_id"])
+          if srcStr.len == 0 or dstStr.len == 0: continue
+          var label = ""
+          var weight = 1.0
+          if "edge_label" in row:
+            label = valueToString(row["edge_label"])
+          if "weight" in row:
+            try: weight = parseFloat(valueToString(row["weight"]))
+            except CatchableError: discard
+          gengine.addEdgeWithId(g, gengine.NodeId(parseUInt(srcStr)),
+                                gengine.NodeId(parseUInt(dstStr)), label, weight)
+        except CatchableError:
+          discard
+      ctx.graphs[name] = g
+    except CatchableError as e:
+      warn("restoreEngines: graph rebuild failed for '" & name & "': " & e.msg)
 
 # ----------------------------------------------------------------------
 # Hook wiring — breaks the module cycle between executor and the exec/*
