@@ -216,16 +216,28 @@ proc forwardRecvExact(sock: AsyncSocket, size: int): Future[string] {.async.} =
   return buf
 
 proc forwardQueryToLeader*(host: string, port: int, query: string,
+                           tls: TLSContext = nil,
                            params: seq[WireValue] = @[],
                            timeoutMs: int = 5000): Future[(bool, QueryResult, string)] {.async.} =
   ## Proxy a write/DDL to the known leader's SQL port. Used by followers when
   ## BARADB_RAFT_CLIENT_PEERS maps leader id → host:clientPort.
+  ## `tls` is the local server's client-port TLS context: when the wire port
+  ## serves TLS, the leader's does too, so the forwarding dial must complete a
+  ## client handshake. The context is reused as-is (verifyMode stays
+  ## CVerifyNone — do NOT enable verifyPeer on the reused context); OpenSSL
+  ## contexts are role-agnostic in Nim's stdlib, wrapConnectedSocket with
+  ## handshakeAsClient sets the role.
   var sock: AsyncSocket = nil
   try:
     sock = newAsyncSocket()
     let okConn = await withTimeout(sock.connect(host, Port(port)), min(timeoutMs, 2000))
     if not okConn:
       return (false, QueryResult(), "leader forward connect timeout")
+    if tls != nil:
+      try:
+        tls.wrapClient(sock)
+      except CatchableError:
+        return (false, QueryResult(), "leader forward TLS handshake failed")
     let reqId = 1'u32
     let msg = if params.len > 0:
         makeQueryParamsMessage(reqId, query, params)
@@ -348,7 +360,8 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
                    raftNode: RaftNode = nil,
                    raftWriteTimeoutMs: int = 5000,
                    raftPeerClientAddrs: Table[string, tuple[host: string, port: int]] =
-                     initTable[string, tuple[host: string, port: int]]()): Future[(bool, QueryResult, string)] {.async.} =
+                     initTable[string, tuple[host: string, port: int]](),
+                   forwardTls: TLSContext = nil): Future[(bool, QueryResult, string)] {.async.} =
   ## All storage access is under the global StorageGate so HTTP worker threads
   ## and the TCP event loop never touch ORC-managed LSM/executor state concurrently.
   ## The gate is released BEFORE the Raft commit wait — see appendWriteToRaft.
@@ -451,7 +464,7 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
   # Follower write/DDL: proxy to leader SQL port (outside the storage gate).
   if needsForward:
     let (okF, qrF, errF) = await forwardQueryToLeader(forwardHost, forwardPort,
-      query, params, raftWriteTimeoutMs)
+      query, forwardTls, params, raftWriteTimeoutMs)
     if raftNode != nil and raftNode.metrics != nil:
       if okF: inc raftNode.metrics.forwardsTotal
       else: inc raftNode.metrics.forwardErrorsTotal
@@ -774,7 +787,8 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
           let (success, result, errorMsg) = await executeQuery(connCtx.db, connCtx, queryStr,
             replication=server.replicationManager, raftNode=server.raftNode,
             raftWriteTimeoutMs=server.config.raftWriteTimeoutMs,
-            raftPeerClientAddrs=server.config.raftPeerClientAddrs)
+            raftPeerClientAddrs=server.config.raftPeerClientAddrs,
+            forwardTls=server.tls)
           let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
           if durationMs >= slowThreshold:
@@ -797,7 +811,8 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
         let (success, result, errorMsg) = await executeQuery(connCtx.db, connCtx, queryStr, params,
           replication=server.replicationManager, raftNode=server.raftNode,
           raftWriteTimeoutMs=server.config.raftWriteTimeoutMs,
-          raftPeerClientAddrs=server.config.raftPeerClientAddrs)
+          raftPeerClientAddrs=server.config.raftPeerClientAddrs,
+          forwardTls=server.tls)
         let durationMs = int((getMonoTime().ticks() - startTicks) div 1_000_000)
 
         if durationMs >= slowThreshold:
