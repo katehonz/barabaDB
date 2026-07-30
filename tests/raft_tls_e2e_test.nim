@@ -31,6 +31,7 @@ type
   NodeProc = object
     id: string
     clientPort: int
+    raftPort: int
     p: Process
     dataDir: string
     output: string
@@ -66,6 +67,28 @@ proc portOpen(port: int): bool =
   except CatchableError:
     if s != nil: s.close()
     result = false
+
+proc tlsHandshake(port: int): bool =
+  ## True when a real TLS client handshake completes against `port`.
+  ## Wire-level discriminator: against a plaintext peer it fails — either
+  ## immediately (SSL error on the garbage reply) or, when the peer swallows
+  ## our ClientHello and waits for more bytes, via the 3s recv timeout.
+  var ctx: SslContext
+  var s: Socket
+  try:
+    ctx = newContext(verifyMode = CVerifyNone)
+    s = newSocket()
+    var tv = Timeval(tvSec: posix.Time(3), tvUsec: Suseconds(0))
+    discard setsockopt(s.getFd(), SOL_SOCKET, SO_RCVTIMEO,
+                       addr tv, SockLen(sizeof(tv)))
+    s.connect("127.0.0.1", Port(port), timeout = 3000)
+    ctx.wrapConnectedSocket(s, handshakeAsClient)
+    result = true
+  except CatchableError:
+    result = false
+  finally:
+    if s != nil: s.close()
+    if ctx != nil: ctx.destroyContext()
 
 proc killNode(n: var NodeProc) =
   if n.p != nil and n.alive:
@@ -159,7 +182,8 @@ proc startNode(id: string, clientPort, raftPort: int, peers, clientPeers: string
                        options = {poStdErrToStdOut, poDaemon})
   discard fcntl(p.outputHandle.cint, F_SETFL,
                 fcntl(p.outputHandle.cint, F_GETFL) or O_NONBLOCK)
-  NodeProc(id: id, clientPort: clientPort, p: p, dataDir: dataDir, alive: true)
+  NodeProc(id: id, clientPort: clientPort, raftPort: raftPort, p: p,
+           dataDir: dataDir, alive: true)
 
 proc runTlsScenario() =
   ## Fatal phase failures dump all captured node output, record a test
@@ -180,16 +204,18 @@ proc runTlsScenario() =
                     ",n3@127.0.0.1:" & $(cbase + 30)
 
   var nodes: seq[NodeProc]
-  for i in 1 .. 3:
-    nodes.add startNode("n" & $i, cbase + i * 10, rbase + i,
-                        peers, clientPeers, tlsEnabled = true)
-
   # Negative-case node: same peers, raft TLS DISABLED, own dir and ports
   # (4th port in each base range). Started later, after the TLS cluster is
   # up, so the positive assertions are not polluted by its noise.
   var rogue: NodeProc
 
   try:
+    # Node starts live inside the try so a raise from start #2/#3 still
+    # reaches the cleanup in the finally below.
+    for i in 1 .. 3:
+      nodes.add startNode("n" & $i, cbase + i * 10, rbase + i,
+                          peers, clientPeers, tlsEnabled = true)
+
     # Readiness: all three client ports accept TCP connections (10s each).
     for i in 0 ..< nodes.len:
       let readyStart = getTime()
@@ -234,6 +260,21 @@ proc runTlsScenario() =
       fail()
       return
     echo "TLS leader elected: ", nodes[leaderIdx].id, " (term ", leaderTerm, ")"
+
+    # Wire-level TLS assertion: a real client handshake must complete
+    # against every cluster node's raft port. Without this, the negative
+    # "plaintext node never becomes leader" check alone cannot distinguish
+    # TLS rejection from "can't win an election anyway" — if TLS wrapping
+    # were silently dropped from the transport, these handshakes raise and
+    # the suite fails.
+    for n in nodes.items:
+      if not tlsHandshake(n.raftPort):
+        echo "TLS handshake failed against raft port of ", n.id,
+             " (port ", n.raftPort, ") — raft transport not encrypted?"
+        dumpAll(nodes)
+        fail()
+        return
+    echo "TLS handshake verified against all 3 raft ports"
 
     let followerIdx = (if leaderIdx == 0: 1 else: 0)
 
@@ -319,9 +360,26 @@ proc runTlsScenario() =
         return
     echo "plaintext node n4 started against the TLS peers"
 
+    # Complementary wire-level negative: the rogue node's raft port speaks
+    # plaintext, so a TLS handshake against it must FAIL.
+    if tlsHandshake(rogue.raftPort):
+      echo "TLS handshake unexpectedly succeeded against plaintext n4 ",
+           "raft port ", rogue.raftPort
+      dumpAll(nodes)
+      fail()
+      return
+    echo "TLS handshake correctly fails against plaintext n4 raft port"
+
     # Give n4 many election cycles (timeouts 150-300ms) to try its luck.
     # The TLS cluster must keep operating among its 3 members meanwhile.
-    nodes.drainFor(6000)
+    # Drain n4's pipe alongside the others — its connection-refused spam
+    # must not fill the pipe and block the child.
+    block:
+      let negStart = getTime()
+      while getTime() - negStart < initDuration(seconds = 6):
+        nodes.drainAll()
+        rogue.drainOutput()
+        sleep(50)
 
     # Cluster still elects/operates: leader among the 3 TLS nodes accepts a
     # write and it replicates to a follower, with n4 running.
@@ -364,8 +422,6 @@ proc runTlsScenario() =
       fail()
       return
     echo "plaintext node never became leader (TLS rejection confirmed)"
-
-    check leaderIdx2 >= 0
   finally:
     for n in nodes.mitems:
       n.killNode()
