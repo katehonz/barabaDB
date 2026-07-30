@@ -30,14 +30,14 @@ proc enforceFkOnDelete*(ctx: ExecutionContext, parentTable: string, parentCol: s
           of "CASCADE":
             for refRow in refs:
               if "$key" in refRow:
-                var dummy: seq[(string, seq[byte])] = @[]
+                var dummy: seq[tuple[key: string, value: seq[byte], deleted: bool]] = @[]
                 discard execDelete(ctx, childTblName, valueToString(refRow["$key"]), dummy)
           of "SET NULL":
             for refRow in refs:
               if "$key" in refRow:
                 var sets = initTable[string, string]()
                 sets[col.name] = "\\N"
-                var dummy: seq[(string, seq[byte])] = @[]
+                var dummy: seq[tuple[key: string, value: seq[byte], deleted: bool]] = @[]
                 discard execUpdateRow(ctx, childTblName, valueToString(refRow["$key"]), sets, dummy)
           of "RESTRICT", "NO ACTION":
             return (false, "FOREIGN KEY violation: row is referenced by " & childTblName & "." & col.name)
@@ -56,14 +56,14 @@ proc enforceFkOnUpdate*(ctx: ExecutionContext, parentTable: string, parentCol: s
               if "$key" in refRow:
                 var sets = initTable[string, string]()
                 sets[col.name] = newVal
-                var dummy: seq[(string, seq[byte])] = @[]
+                var dummy: seq[tuple[key: string, value: seq[byte], deleted: bool]] = @[]
                 discard execUpdateRow(ctx, childTblName, valueToString(refRow["$key"]), sets, dummy)
           of "SET NULL":
             for refRow in refs:
               if "$key" in refRow:
                 var sets = initTable[string, string]()
                 sets[col.name] = "\\N"
-                var dummy: seq[(string, seq[byte])] = @[]
+                var dummy: seq[tuple[key: string, value: seq[byte], deleted: bool]] = @[]
                 discard execUpdateRow(ctx, childTblName, valueToString(refRow["$key"]), sets, dummy)
           of "RESTRICT", "NO ACTION":
             return (false, "FOREIGN KEY violation: row is referenced by " & childTblName & "." & col.name)

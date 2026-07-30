@@ -7,16 +7,6 @@
 ##                     follower has caught up.
 ## Process-management conventions follow tests/raft_writes_e2e_test.nim;
 ## client access follows tests/nimforum_smoke_test.nim.
-##
-## NOTE: load_test deliberately has a non-PK column. A table whose only
-## column is the PK stores an EMPTY LSM value per row (execInsert drops PK
-## columns from the value), and the raft write path (appendWriteToRaft in
-## src/barabadb/core/server.nim) encodes empty values as "delete" entries —
-## so on commit every node applies a delete over the just-inserted row and
-## it vanishes everywhere. That is a v1.2.0 product bug in the raft entry
-## encoding (put/delete must not be inferred from value emptiness); until it
-## is fixed in src/, this test exercises the two-column row shape that the
-## current encoding handles correctly.
 import std/unittest
 import std/osproc
 import std/os
@@ -176,7 +166,7 @@ proc writerLoop(args: WriterArgs) {.thread.} =
         sleep(50)
         continue
     try:
-      db.exec(sql("INSERT INTO load_test (id, n) VALUES (" & $n & ", " & $n & ")"))
+      db.exec(sql("INSERT INTO load_test (id) VALUES (" & $n & ")"))
       withLock args.lock[]:
         args.acked[].add n
       inc n
@@ -290,7 +280,7 @@ proc runFailoverLoadScenario() =
     block:
       let db = openClient(nodes[leaderIdx].clientPort)
       try:
-        db.exec(sql"CREATE TABLE load_test (id INT PRIMARY KEY, n INT)")
+        db.exec(sql"CREATE TABLE load_test (id INT PRIMARY KEY)")
       except CatchableError as e:
         echo "leader CREATE TABLE failed: ", e.msg
         dumpAll(nodes)
@@ -343,7 +333,7 @@ proc runFailoverLoadScenario() =
         try:
           let db = openClient(nodes[i].clientPort)
           try:
-            db.exec(sql("INSERT INTO load_test (id, n) VALUES (" & $probeId & ", " & $probeId & ")"))
+            db.exec(sql("INSERT INTO load_test (id) VALUES (" & $probeId & ")"))
             writerSurvivor = i
           finally:
             db.close()

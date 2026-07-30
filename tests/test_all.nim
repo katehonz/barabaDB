@@ -2670,7 +2670,7 @@ suite "Raft SQL Write Path":
 
         # Server-side leader write path: append + wait for majority commit
         let (ok, errMsg) = waitFor appendWriteToRaft(leader,
-          @[("users.1", cast[seq[byte]]("alice"))], timeoutMs = 3000)
+          @[("users.1", cast[seq[byte]]("alice"), false)], timeoutMs = 3000)
         check ok
         if not ok: echo "appendWriteToRaft failed: ", errMsg
 
@@ -2782,7 +2782,7 @@ suite "Raft SQL Write Path":
     var n = newRaftNode("n1", @["n2"], raftPort = 29111)
     # Still a follower — appendLog returns index 0.
     let (ok, err) = waitFor appendWriteToRaft(n,
-      @[("k", cast[seq[byte]]("v"))], timeoutMs = 200)
+      @[("k", cast[seq[byte]]("v"), false)], timeoutMs = 200)
     check not ok
     check "lost leadership" in err
 
@@ -2791,7 +2791,7 @@ suite "Raft SQL Write Path":
     var n = newRaftNode("n1", @["n2", "n3"], raftPort = 29112)
     n.becomeLeader()
     let (ok, err) = waitFor appendWriteToRaft(n,
-      @[("k", cast[seq[byte]]("v"))], timeoutMs = 300)
+      @[("k", cast[seq[byte]]("v"), false)], timeoutMs = 300)
     check not ok
     check "raft commit timeout" in err
 

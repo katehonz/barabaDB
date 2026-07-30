@@ -923,7 +923,6 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
         ddl.add("\n")
 
       # Sample data
-      var kvPairs: seq[(string, seq[byte])] = @[]
       let rows = requireExecScanHook()(ctx, table)
       let sampleLimit = min(5, rows.len)
       if sampleLimit > 0:

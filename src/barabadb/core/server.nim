@@ -306,10 +306,12 @@ proc waitRaftCommit(node: RaftNode, lastIdx: uint64, timeoutMs: int): Future[(bo
     node.metrics.commitWaitMsTotal += waitedMs
   return (true, "")
 
-proc appendWriteToRaft*(node: RaftNode, kvPairs: seq[(string, seq[byte])],
+proc appendWriteToRaft*(node: RaftNode,
+                        kvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]],
                         timeoutMs: int): Future[(bool, string)] {.async.} =
   ## C3b leader write path: append each written KV pair to the Raft log and
-  ## wait for majority commit. An empty value encodes a delete; the entry
+  ## wait for majority commit. The `deleted` flag encodes a delete — an empty
+  ## value alone is a put (PK-only tables store an empty LSM value); the entry
   ## format matches applyCommand ("put": key \x00 value, "delete": key).
   ##
   ## MUST be called from the async event-loop thread that owns `node` and
@@ -317,11 +319,11 @@ proc appendWriteToRaft*(node: RaftNode, kvPairs: seq[(string, seq[byte])],
   ## handleAppendReply on the same loop, and applyCommand re-enters the
   ## (non-reentrant) gate — waiting under the gate would deadlock the loop.
   var lastIdx = 0'u64
-  for (key, value) in kvPairs:
-    let entry = if value.len > 0:
-        node.appendLog("put", cast[seq[byte]](key & "\x00" & cast[string](value)))
+  for pair in kvPairs:
+    let entry = if pair.deleted:
+        node.appendLog("delete", cast[seq[byte]](pair.key))
       else:
-        node.appendLog("delete", cast[seq[byte]](key))
+        node.appendLog("put", cast[seq[byte]](pair.key & "\x00" & cast[string](pair.value)))
     if entry.index == 0:
       if node.metrics != nil:
         inc node.metrics.lostLeadershipTotal
@@ -353,7 +355,7 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
   var ok = false
   var qr = QueryResult()
   var msg = ""
-  var kvPairs: seq[(string, seq[byte])] = @[]
+  var kvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]] = @[]
   var needsRaftDdl = false
   var needsForward = false
   var forwardHost = ""
@@ -397,11 +399,14 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
           # Ship written key-value pairs to replicas (legacy path; skipped when
           # the raft path below handles the statement).
           if raftNode == nil and replication != nil and res.keyValuePairs.len > 0:
-            for (key, value) in res.keyValuePairs:
-              var data = newSeq[byte](key.len + 1 + value.len)
-              for i, c in key: data[i] = byte(c)
-              data[key.len] = byte(0)
-              for i, c in value: data[key.len + 1 + i] = c
+            for pair in res.keyValuePairs:
+              # Legacy REP wire format: key \x00 value, empty value = delete
+              # on the receiver. Deletes ship an empty value as before.
+              let value = if pair.deleted: @[] else: pair.value
+              var data = newSeq[byte](pair.key.len + 1 + value.len)
+              for i, c in pair.key: data[i] = byte(c)
+              data[pair.key.len] = byte(0)
+              for i, c in value: data[pair.key.len + 1 + i] = c
               discard replication.writeLsn(data)
           qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
           qr.columns = res.columns

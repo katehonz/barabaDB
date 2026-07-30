@@ -136,13 +136,13 @@ type
     rows*: seq[Row]
     affectedRows*: int
     message*: string
-    keyValuePairs*: seq[(string, seq[byte])]
+    keyValuePairs*: seq[tuple[key: string, value: seq[byte], deleted: bool]]
 
 proc `==`*(a, b: IndexEntry): bool =
   a.lsmKey == b.lsmKey and a.rowValue == b.rowValue
 
 proc okResult*(rows: seq[Row] = @[], cols: seq[string] = @[], affected: int = 0, msg: string = "",
-               kvPairs: seq[(string, seq[byte])] = @[]): ExecResult =
+               kvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]] = @[]): ExecResult =
   ExecResult(success: true, columns: cols, rows: rows, affectedRows: affected, message: msg,
              keyValuePairs: kvPairs)
 

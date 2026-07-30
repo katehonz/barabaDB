@@ -4,6 +4,7 @@ import std/os
 import std/tables
 import ../src/barabadb/query/[parser, executor, lexer, ast]
 import ../src/barabadb/query/exec/params
+import ../src/barabadb/query/exec/dml
 import ../src/barabadb/core/types
 import ../src/barabadb/core/config
 import ../src/barabadb/storage/lsm
@@ -416,6 +417,78 @@ suite "Raft peer address parsing":
       delEnv("BARADB_RAFT_PEERS")
       check msg.len > 0
       check bad in msg
+
+suite "Raft put/delete encoding — empty value is not a delete":
+
+  test "PK-only INSERT yields a put pair (deleted == false, empty value)":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("CREATE TABLE pkonly (id INTEGER PRIMARY KEY)"))
+    let r = executeQuery(ctx, parse("INSERT INTO pkonly (id) VALUES (1)"))
+    check r.success
+    check r.keyValuePairs.len == 1
+    check r.keyValuePairs[0].value.len == 0
+    check r.keyValuePairs[0].deleted == false
+
+  test "DELETE yields a delete pair (deleted == true)":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'alice')"))
+    let r = executeQuery(ctx, parse("DELETE FROM users WHERE id = 1"))
+    check r.success
+    check r.keyValuePairs.len == 1
+    check r.keyValuePairs[0].deleted == true
+    check r.keyValuePairs[0].value.len == 0
+
+  test "UPDATE yields a put pair (deleted == false)":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'alice')"))
+    let r = executeQuery(ctx, parse("UPDATE users SET name = 'bob' WHERE id = 1"))
+    check r.success
+    check r.keyValuePairs.len == 1
+    check r.keyValuePairs[0].deleted == false
+    check r.keyValuePairs[0].value.len > 0
+
+  test "txn COMMIT pairs carry deleted flag for buffered writes":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("CREATE TABLE pkonly (id INTEGER PRIMARY KEY)"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'alice')"))
+    discard executeQuery(ctx, parse("BEGIN"))
+    discard executeQuery(ctx, parse("INSERT INTO pkonly (id) VALUES (7)"))
+    discard executeQuery(ctx, parse("DELETE FROM users WHERE id = 1"))
+    let r = executeQuery(ctx, parse("COMMIT"))
+    check r.success
+    check r.keyValuePairs.len == 2
+    var sawPut = false
+    var sawDelete = false
+    for pair in r.keyValuePairs:
+      if pair.deleted:
+        sawDelete = true
+        check pair.value.len == 0
+      else:
+        sawPut = true
+        check pair.key == "pkonly.id=7"
+        check pair.value.len == 0  # empty value must still be a put
+    check sawPut and sawDelete
+
+  test "apply of a put with empty value keeps the PK-only row":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("CREATE TABLE pkonly (id INTEGER PRIMARY KEY)"))
+    let r = executeQuery(ctx, parse("INSERT INTO pkonly (id) VALUES (3)"))
+    check r.success
+    check r.keyValuePairs.len == 1
+    let pair = r.keyValuePairs[0]
+    # Same decode as applyCommand in src/baradadb.nim for a "put" entry.
+    let encoded = pair.key & "\x00" & cast[string](pair.value)
+    let parts = encoded.split("\x00")
+    check parts.len >= 2
+    applyReplicatedPut(ctx, parts[0], cast[seq[byte]](parts[1]))
+    let sel = executeQuery(ctx, parse("SELECT * FROM pkonly WHERE id = 3"))
+    check sel.success
+    check sel.rows.len == 1
 
 suite "Raft write classification":
 

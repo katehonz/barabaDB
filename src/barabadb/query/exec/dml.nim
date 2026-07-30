@@ -45,7 +45,7 @@ proc violatesUniqueIndex*(ctx: ExecutionContext, table: string, fields: seq[stri
   return ""
 
 proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], values: seq[seq[string]],
-                  kvPairs: var seq[(string, seq[byte])]): int =
+                  kvPairs: var seq[tuple[key: string, value: seq[byte], deleted: bool]]): int =
   if not hasPrivilege(ctx, table, "INSERT"):
     return 0
   let tblDef = if table in ctx.tables: ctx.tables[table] else: TableDef()
@@ -87,7 +87,7 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
       discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](valStr))
     else:
       ctx.db.put(fullKey, cast[seq[byte]](valStr))
-      kvPairs.add((fullKey, cast[seq[byte]](valStr)))
+      kvPairs.add((fullKey, cast[seq[byte]](valStr), false))
 
     for colName in ctx.btrees.keys.toSeq():
       if colName.startsWith(table & "."):
@@ -221,7 +221,7 @@ proc execInsert*(ctx: ExecutionContext, table: string, fields: seq[string], valu
   return count
 
 proc execDelete*(ctx: ExecutionContext, table: string, key: string,
-                  kvPairs: var seq[(string, seq[byte])]): int =
+                  kvPairs: var seq[tuple[key: string, value: seq[byte], deleted: bool]]): int =
   if not hasPrivilege(ctx, table, "DELETE"):
     return 0
   let fullKey = table & "." & key
@@ -238,7 +238,7 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string,
       discard ctx.txnManager.delete(ctx.pendingTxn, fullKey)
     else:
       ctx.db.delete(fullKey)
-      kvPairs.add((fullKey, @[]))
+      kvPairs.add((fullKey, @[], true))
     # Update BTree indexes
     for colName in ctx.btrees.keys.toSeq():
       if colName.startsWith(table & "."):
@@ -264,7 +264,7 @@ proc execDelete*(ctx: ExecutionContext, table: string, key: string,
   return 0
 
 proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Table[string, string],
-                     kvPairs: var seq[(string, seq[byte])]): int =
+                     kvPairs: var seq[tuple[key: string, value: seq[byte], deleted: bool]]): int =
   if not hasPrivilege(ctx, table, "UPDATE"):
     return 0
   let fullKey = table & "." & key
@@ -313,7 +313,7 @@ proc execUpdateRow*(ctx: ExecutionContext, table: string, key: string, sets: Tab
     discard ctx.txnManager.write(ctx.pendingTxn, fullKey, cast[seq[byte]](newVal))
   else:
     ctx.db.put(fullKey, cast[seq[byte]](newVal))
-    kvPairs.add((fullKey, cast[seq[byte]](newVal)))
+    kvPairs.add((fullKey, cast[seq[byte]](newVal), false))
   # Update FTS indexes: remove old doc, add new
   for ftsKey, ftsIdx in ctx.ftsIndexes:
     if ftsKey.startsWith(table & "."):

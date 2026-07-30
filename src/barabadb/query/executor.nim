@@ -574,7 +574,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
           row[f] = mutableValues[0][i]
     fireTriggers(ctx, stmt.insTarget, "before", "insert", row)
 
-    var kvPairs: seq[(string, seq[byte])]
+    var kvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]]
     let count = execInsert(ctx, stmt.insTarget, mutableFields, mutableValues, kvPairs)
 
     # Fire AFTER INSERT triggers
@@ -626,7 +626,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     # Scan and apply
     let rows = execScan(ctx, stmt.updTarget)
     var count = 0
-    var kvPairs: seq[(string, seq[byte])]
+    var kvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]]
     for row in rows:
       # Compute sets for this row (expressions may reference columns)
       var sets = initTable[string, string]()
@@ -701,7 +701,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     # Delete all rows matching WHERE
     let rows = execScan(ctx, stmt.delTarget)
     var count = 0
-    var kvPairs: seq[(string, seq[byte])]
+    var kvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]]
     for row in rows:
       if stmt.delWhere != nil and stmt.delWhere.whereExpr != nil:
         let whereExpr = lowerExpr(stmt.delWhere.whereExpr)
@@ -744,7 +744,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
 
     let targetRows = execScan(ctx, stmt.mergeTarget)
     var count = 0
-    var kvPairs: seq[(string, seq[byte])]
+    var kvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]]
 
     for srcRow in sourceRows:
       var matched = false
@@ -793,7 +793,7 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
           for i, f in fields:
             if i < values.len: row[f] = Value(kind: vkString, strVal: values[i])
           fireTriggers(ctx, stmt.mergeTarget, "before", "insert", row)
-          var insKvPairs: seq[(string, seq[byte])]
+          var insKvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]]
           count += execInsert(ctx, stmt.mergeTarget, fields, @[values], insKvPairs)
           for kv in insKvPairs: kvPairs.add(kv)
           fireTriggers(ctx, stmt.mergeTarget, "after", "insert", row)
@@ -982,16 +982,17 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
 
   of nkCommitTxn:
     if ctx.pendingTxn != nil and ctx.pendingTxn.state == tsActive:
-      var kvPairs: seq[(string, seq[byte])]
+      var kvPairs: seq[tuple[key: string, value: seq[byte], deleted: bool]]
       for key, version in ctx.pendingTxn.writeSet:
         if version.isDelete:
           ctx.db.delete(key)
-          # Empty value is the raft/replication "delete" convention — never
-          # ship a non-empty body for isDelete or followers will resurrect.
-          kvPairs.add((key, @[]))
+          # Empty value + deleted=true is the raft/replication "delete"
+          # convention — never ship a non-empty body for isDelete or
+          # followers will resurrect.
+          kvPairs.add((key, @[], true))
         else:
           ctx.db.put(key, version.value)
-          kvPairs.add((key, version.value))
+          kvPairs.add((key, version.value, false))
       discard ctx.txnManager.commit(ctx.pendingTxn)
       ctx.pendingTxn = nil
       return okResult(msg="Transaction committed", kvPairs=kvPairs)
