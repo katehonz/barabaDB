@@ -82,6 +82,7 @@ jobs:
           nim c -d:ssl --threads:on --path:src -r tests/raft_e2e_test.nim
           nim c -d:ssl --threads:on --path:src -r tests/raft_writes_e2e_test.nim
           nim c -d:ssl --threads:on --path:src -r tests/raft_failover_load_e2e_test.nim
+          nim c -d:ssl --threads:on --path:src -r tests/raft_tls_e2e_test.nim
 
   verify:
     runs-on: ubuntu-latest
