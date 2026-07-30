@@ -332,7 +332,12 @@ proc main() =
     info("Starting Raft node " & config.raftNodeId & " on port " & $config.raftPort)
     let raftDataDir = config.dataDir / "raft"
     createDir(raftDataDir)  # idempotent; loadState reads from it, saveState writes
-    var raftNode = newRaftNode(config.raftNodeId, config.raftPeers, config.raftPort,
+    # Raft convention: `peers` excludes the node itself (majority math and
+    # RequestVote fan-out assume it); peerAddrs keeps every entry for dialing.
+    var raftPeers: seq[string] = @[]
+    for p in config.raftPeers:
+      if p != config.raftNodeId: raftPeers.add(p)
+    var raftNode = newRaftNode(config.raftNodeId, raftPeers, config.raftPort,
                                dataDir = raftDataDir)
     raftNode.peerAddrs = config.raftPeerAddrs
     # Wire state machine to apply committed entries to the default database

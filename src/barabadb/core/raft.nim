@@ -10,6 +10,7 @@ import std/streams
 import std/strutils
 import std/endians
 import std/os
+import logging
 import ../protocol/wire
 
 type
@@ -233,6 +234,7 @@ proc becomeCandidate*(node: RaftNode) =
 proc becomeLeader*(node: RaftNode) =
   node.state = rsLeader
   node.leaderId = node.id
+  info("Raft node " & node.id & " became leader for term " & $node.currentTerm)
   for peer in node.peers:
     node.nextIndex[peer] = node.lastLogIndex + 1
     node.matchIndex[peer] = 0
