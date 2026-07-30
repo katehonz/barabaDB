@@ -378,6 +378,26 @@ proc removeIndexesForRow(ctx: ExecutionContext, table: string, fullKey: string,
   for ftsKey, ftsIdx in ctx.ftsIndexes:
     if ftsKey.startsWith(table & "."):
       ftsIdx.removeDocument(docId)
+  # In-memory graphs: drop node/edge when the backing row is removed.
+  for graphName, graph in ctx.graphs:
+    if table == graphName & "_nodes":
+      if "id" in oldRow:
+        try:
+          let nid = gengine.NodeId(parseUInt(valueToString(oldRow["id"])))
+          gengine.removeNode(graph, nid)
+        except CatchableError:
+          discard
+    elif table == graphName & "_edges":
+      let srcStr = if "source_id" in oldRow: valueToString(oldRow["source_id"]) else: ""
+      let dstStr = if "dest_id" in oldRow: valueToString(oldRow["dest_id"]) else: ""
+      let label = if "edge_label" in oldRow: valueToString(oldRow["edge_label"]) else: ""
+      if srcStr.len > 0 and dstStr.len > 0:
+        try:
+          gengine.removeEdgesBetween(graph,
+            gengine.NodeId(parseUInt(srcStr)),
+            gengine.NodeId(parseUInt(dstStr)), label)
+        except CatchableError:
+          discard
 
 proc insertIndexesForRow(ctx: ExecutionContext, table: string, fullKey: string,
                          valStr: string) =
@@ -416,9 +436,40 @@ proc insertIndexesForRow(ctx: ExecutionContext, table: string, fullKey: string,
       for col, val in newRow:
         meta[col] = valueToString(val)
       vengine.insert(vecIdx, docId, vec, meta)
+  # In-memory graphs: mirror insert/update of backing node/edge tables.
+  for graphName, graph in ctx.graphs:
+    if table == graphName & "_nodes":
+      if "id" notin newRow: continue
+      try:
+        let nid = gengine.NodeId(parseUInt(valueToString(newRow["id"])))
+        var label = if "node_label" in newRow: valueToString(newRow["node_label"]) else: ""
+        var props = initTable[string, string]()
+        for col, val in newRow:
+          if col notin ["id", "node_label", "properties"]:
+            props[col] = valueToString(val)
+        # remove+add so property updates replace the in-memory node
+        gengine.removeNode(graph, nid)
+        gengine.addNodeWithId(graph, nid, label, props)
+      except CatchableError:
+        discard
+    elif table == graphName & "_edges":
+      let srcStr = if "source_id" in newRow: valueToString(newRow["source_id"]) else: ""
+      let dstStr = if "dest_id" in newRow: valueToString(newRow["dest_id"]) else: ""
+      let label = if "edge_label" in newRow: valueToString(newRow["edge_label"]) else: ""
+      var weight = 1.0
+      if "weight" in newRow:
+        try: weight = parseFloat(valueToString(newRow["weight"]))
+        except CatchableError: discard
+      if srcStr.len > 0 and dstStr.len > 0:
+        try:
+          gengine.addEdgeWithIdIfAbsent(graph,
+            gengine.NodeId(parseUInt(srcStr)),
+            gengine.NodeId(parseUInt(dstStr)), label, weight)
+        except CatchableError:
+          discard
 
 proc applyReplicatedPut*(ctx: ExecutionContext, fullKey: string, value: seq[byte]) =
-  ## Apply a raft/replication put: LSM write + secondary B-tree/FTS/HNSW.
+  ## Apply a raft/replication put: LSM write + secondary B-tree/FTS/HNSW/graphs.
   ## Idempotent on the leader (local DML already applied the same engines).
   let dot = fullKey.find('.')
   let table = if dot > 0: fullKey[0..<dot] else: ""

@@ -111,6 +111,40 @@ proc addEdgeWithId*(g: Graph, src, dst: NodeId, label: string = "",
   g.adjacency[src].add(AdjacencyEntry(edgeId: id, neighbor: dst, weight: weight, label: label))
   g.reverseAdj[dst].add(AdjacencyEntry(edgeId: id, neighbor: src, weight: weight, label: label))
 
+proc hasEdgeBetween*(g: Graph, src, dst: NodeId, label: string = ""): bool =
+  ## True if an edge with the same endpoints and label already exists.
+  acquire(g.lock)
+  defer: release(g.lock)
+  for entry in g.adjacency.getOrDefault(src, @[]):
+    if entry.neighbor == dst and entry.label == label:
+      return true
+  return false
+
+proc addEdgeWithIdIfAbsent*(g: Graph, src, dst: NodeId, label: string = "",
+                            weight: float64 = 1.0) =
+  ## Idempotent edge insert for raft apply / leader double-apply.
+  if hasEdgeBetween(g, src, dst, label):
+    return
+  addEdgeWithId(g, src, dst, label, weight)
+
+proc removeEdgesBetween*(g: Graph, src, dst: NodeId, label: string = "") =
+  ## Drop edges matching endpoints (and label if non-empty). Used by raft apply.
+  acquire(g.lock)
+  defer: release(g.lock)
+  if src notin g.adjacency: return
+  var keep: seq[AdjacencyEntry] = @[]
+  for entry in g.adjacency[src]:
+    if entry.neighbor == dst and (label.len == 0 or entry.label == label):
+      g.edges.del(entry.edgeId)
+      var newRev: seq[AdjacencyEntry] = @[]
+      for rev in g.reverseAdj.getOrDefault(dst, @[]):
+        if rev.edgeId != entry.edgeId:
+          newRev.add(rev)
+      g.reverseAdj[dst] = newRev
+    else:
+      keep.add(entry)
+  g.adjacency[src] = keep
+
 proc getNode*(g: Graph, id: NodeId): GraphNode =
   acquire(g.lock)
   defer: release(g.lock)

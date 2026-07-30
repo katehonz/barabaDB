@@ -254,15 +254,22 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
 
       # C3b: writes go through the Raft log — only the leader may accept them.
       # Inspect every statement so "SELECT 1; INSERT ..." cannot bypass the gate.
+      # Raft state machine is wired only to the default database (v1).
       if raftNode != nil:
         var hasWrite = false
         for stmt in astNode.stmts:
           if isWrite(stmt):
             hasWrite = true
             break
-        if hasWrite and raftNode.state != rsLeader:
-          let who = if raftNode.leaderId.len > 0: raftNode.leaderId else: "none elected"
-          return (false, QueryResult(), "not leader; leader is '" & who & "'")
+        if hasWrite:
+          let dbName = if ctx.currentDatabase.len > 0: ctx.currentDatabase else: "default"
+          if dbName != "default":
+            return (false, QueryResult(),
+              "raft writes only supported on the 'default' database; current is '" &
+              dbName & "'")
+          if raftNode.state != rsLeader:
+            let who = if raftNode.leaderId.len > 0: raftNode.leaderId else: "none elected"
+            return (false, QueryResult(), "not leader; leader is '" & who & "'")
 
       let res = executor.executeQuery(ctx, astNode, params)
       if res.success:

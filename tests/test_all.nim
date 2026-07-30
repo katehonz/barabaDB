@@ -2744,6 +2744,36 @@ suite "Raft SQL Write Path":
     let (found, _) = db.get("t.id=1")
     check not found
 
+  test "applyReplicatedPut updates in-memory graphs":
+    var testDir = getTempDir() / "baradb_raft_apply_g_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
+    createDir(testDir)
+    var db = newLSMTree(testDir)
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse("CREATE GRAPH g"))
+    check "g" in ctx.graphs
+    # Follower-style apply of node rows (no execInsert path).
+    applyReplicatedPut(ctx, "g_nodes.id=1",
+      cast[seq[byte]]("node_label=person,name=alice"))
+    applyReplicatedPut(ctx, "g_nodes.id=2",
+      cast[seq[byte]]("node_label=person,name=bob"))
+    applyReplicatedPut(ctx, "g_edges.source_id=1",
+      cast[seq[byte]]("source_id=1,dest_id=2,edge_label=knows,weight=1.0"))
+    check ctx.graphs["g"].getNode(gengine.NodeId(1)).label == "person"
+    check gengine.hasEdgeBetween(ctx.graphs["g"], gengine.NodeId(1),
+      gengine.NodeId(2), "knows")
+    # Second apply must not duplicate the edge (leader double-apply / re-apply).
+    applyReplicatedPut(ctx, "g_edges.source_id=1",
+      cast[seq[byte]]("source_id=1,dest_id=2,edge_label=knows,weight=1.0"))
+    check gengine.hasEdgeBetween(ctx.graphs["g"], gengine.NodeId(1),
+      gengine.NodeId(2), "knows")
+    applyReplicatedDelete(ctx, "g_nodes.id=1")
+    # Node gone; edges incident are cleaned by removeNode.
+    try:
+      discard ctx.graphs["g"].getNode(gengine.NodeId(1))
+      check false  # should have raised
+    except CatchableError:
+      check true
+
 suite "CLI Autocomplete":
   test "Autocomplete commands":
     let res = autocomplete("he")

@@ -17,7 +17,7 @@ Leader election and log replication over TCP. Enable with:
 | `BARADB_RAFT_PEERS` | Comma-separated `id@host:port` (include self) |
 | `BARADB_RAFT_WRITE_TIMEOUT_MS` | Max wait for majority commit on SQL writes (default 5000) |
 
-When Raft is enabled, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` and transactional `COMMIT`) is accepted only on the leader: each write's KV pairs are appended to the Raft log and the client waits until the entry is majority-committed. Followers reject writes with `not leader; leader is '…'`. Followers apply committed entries via `applyCommand` into the **default** database. DDL (e.g. `CREATE TABLE`) is not replicated yet — apply schema on every node.
+When Raft is enabled, SQL DML (`INSERT`/`UPDATE`/`DELETE`/`MERGE` and transactional `COMMIT`) is accepted only on the leader of the **`default`** database: each write's KV pairs are appended to the Raft log and the client waits until the entry is majority-committed. Followers reject writes with `not leader; leader is '…'`. Writes against any other database name are rejected (`raft writes only supported on the 'default' database`). Committed entries update LSM plus secondary B-tree/FTS/HNSW indexes and in-memory graphs on every node. DDL (e.g. `CREATE TABLE`) is not replicated yet — apply schema on every node.
 
 ```nim
 import barabadb/core/raft
