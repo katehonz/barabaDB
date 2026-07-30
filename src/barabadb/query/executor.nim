@@ -878,11 +878,12 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         dataKeys.add(key)
     for key in dataKeys:
       ctx.db.delete(key)
-    # Remove persisted FTS/HNSW index schema keys for this table
+    # Remove persisted FTS/HNSW/B-tree index schema keys for this table
     var engineKeys: seq[string] = @[]
     for (key, _) in ctx.db.scanAll():
       if key.startsWith(SchemaFtsIndexPrefix & prefix) or
-         key.startsWith(SchemaVecIndexPrefix & prefix):
+         key.startsWith(SchemaVecIndexPrefix & prefix) or
+         key.startsWith(SchemaBtreeIndexPrefix & prefix):
         engineKeys.add(key)
     for key in engineKeys:
       ctx.db.delete(key)
@@ -1387,6 +1388,15 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
       if idxVal.len > 0 and not isNull(idxVal):
         let lsmKey = if "$key" in row: stmt.ciTarget & "." & valueToString(row["$key"]) else: ""
         ctx.btrees[colKey].insert(idxVal, IndexEntry(lsmKey: lsmKey, rowValue: ""))
+    # Persist reconstructed DDL so restoreEngines can rebuild the index
+    # from table data after a restart (replay re-writes the same key).
+    # Unnamed indexes: persist the nameless form (see FTS branch above).
+    # The CREATE INDEX AST does not track UNIQUE, so it is not preserved.
+    let btreeDdl = if stmt.ciName.len > 0:
+        "CREATE INDEX " & idxName & " ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ")"
+      else:
+        "CREATE INDEX ON " & stmt.ciTarget & " (" & stmt.ciColumns.join(", ") & ")"
+    ctx.db.put(SchemaBtreeIndexPrefix & colKey, cast[seq[byte]](btreeDdl))
     return okResult(msg="CREATE INDEX " & idxName & " on " & stmt.ciTarget)
 
   of nkDropIndex:
@@ -1400,8 +1410,16 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         targetKey = key
         found = true
         break
+      # A custom index name only appears in the persisted DDL — match it
+      # against the stored "CREATE INDEX <name> ON" text as well.
+      let (hasDdl, ddl) = ctx.db.get(SchemaBtreeIndexPrefix & key)
+      if hasDdl and cast[string](ddl).startsWith("CREATE INDEX " & stmt.diName & " ON "):
+        targetKey = key
+        found = true
+        break
     if found:
       ctx.btrees.del(targetKey)
+      ctx.db.delete(SchemaBtreeIndexPrefix & targetKey)
       return okResult(msg="DROP INDEX " & stmt.diName)
     # FTS/HNSW engine indexes: in-memory maps are keyed by table.col, and a
     # custom index name only appears in the persisted DDL — match it against
@@ -1633,14 +1651,15 @@ proc executeMigrationSql(ctx: ExecutionContext, sql: string): ExecResult =
   return okResult(msg="Empty migration body")
 
 proc restoreEngines*(ctx: ExecutionContext) =
-  ## Rebuild ephemeral engines (FTS/HNSW indexes, graphs) from persisted
+  ## Rebuild ephemeral engines (B-tree/FTS/HNSW indexes, graphs) from persisted
   ## schema keys after restoreSchema. Invoked via context.restoreEnginesHook
   ## at the end of newExecutionContext. Index replay re-persists the same
   ## key, so it is idempotent.
   var ddls: seq[string] = @[]
   for (key, value) in ctx.db.scanAll():
     if not key.startsWith(SchemaFtsIndexPrefix) and
-       not key.startsWith(SchemaVecIndexPrefix): continue
+       not key.startsWith(SchemaVecIndexPrefix) and
+       not key.startsWith(SchemaBtreeIndexPrefix): continue
     let ddl = cast[string](value)
     if ddl.len == 0: continue
     ddls.add(ddl)

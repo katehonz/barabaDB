@@ -4,6 +4,7 @@ import std/os
 import std/strutils
 import std/tables
 import barabadb/storage/lsm
+import barabadb/storage/btree
 import barabadb/query/executor
 import barabadb/query/parser
 import barabadb/fts/engine
@@ -360,6 +361,83 @@ suite "Schema persistence":
       var ctx2 = newExecutionContext(db2)
       check "docs.content" notin ctx2.ftsIndexes    # no ghost rebuild
       check "vecs.embedding" notin ctx2.vectorIndexes
+      db2.close()
+    removeDir(dir)
+
+  test "B-tree index survives reopen":
+    let dir = "/tmp/baradb_schema_persist_btree"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)").success
+      check execSql(ctx, "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)").success
+      check execSql(ctx, "INSERT INTO users (id, name, age) VALUES (2, 'Bob', 25)").success
+      check execSql(ctx, "INSERT INTO users (id, name, age) VALUES (3, 'Carol', 40)").success
+      check execSql(ctx, "CREATE INDEX users_age ON users (age)").success
+      check "users.age" in ctx.btrees
+      db.close()
+    # Reopen fresh context (simulates process restart)
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      check "users.age" in ctx2.btrees
+      let r = execSql(ctx2, "SELECT id FROM users WHERE age = 25")
+      check r.success
+      check r.rows.len == 1
+      # index keeps updating after reopen
+      check execSql(ctx2, "INSERT INTO users (id, name, age) VALUES (4, 'Dan', 55)").success
+      if "users.age" in ctx2.btrees:
+        check ctx2.btrees["users.age"].get("55").len >= 1
+      db2.close()
+    removeDir(dir)
+
+  test "Unnamed B-tree index survives reopen":
+    let dir = "/tmp/baradb_schema_persist_btree_noname"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)").success
+      check execSql(ctx, "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)").success
+      # No index name — idxName defaults to colKey (users.age) at execution
+      check execSql(ctx, "CREATE INDEX ON users (age)").success
+      check "users.age" in ctx.btrees
+      db.close()
+    # Reopen fresh context (simulates process restart)
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      # Persisted DDL must be replayable — the dotted fallback name is not.
+      check "users.age" in ctx2.btrees
+      let r = execSql(ctx2, "SELECT id FROM users WHERE age = 30")
+      check r.success
+      check r.rows.len == 1
+      db2.close()
+    removeDir(dir)
+
+  test "DROP INDEX removes B-tree index and its schema key":
+    let dir = "/tmp/baradb_schema_persist_dropbtree"
+    removeDir(dir)
+    block:
+      var db = newLSMTree(dir)
+      var ctx = newExecutionContext(db)
+      check execSql(ctx, "CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, age INTEGER)").success
+      check execSql(ctx, "INSERT INTO users (id, name, age) VALUES (1, 'Alice', 30)").success
+      check execSql(ctx, "CREATE INDEX users_age ON users (age)").success
+      check "users.age" in ctx.btrees
+      let (foundBefore, _) = db.get(SchemaBtreeIndexPrefix & "users.age")
+      check foundBefore
+      let d = execSql(ctx, "DROP INDEX users_age")
+      check d.success
+      check "users.age" notin ctx.btrees
+      let (found, _) = db.get(SchemaBtreeIndexPrefix & "users.age")
+      check not found
+      db.close()
+    block:
+      var db2 = newLSMTree(dir)
+      var ctx2 = newExecutionContext(db2)
+      check "users.age" notin ctx2.btrees  # no ghost rebuild
       db2.close()
     removeDir(dir)
 
