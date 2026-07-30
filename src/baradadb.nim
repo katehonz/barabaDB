@@ -413,6 +413,19 @@ proc main() =
           echo "[raft] Snapshot restore failed: ", e.msg
           result = false
 
+    # Leader InstallSnapshot send: archive the default DB's data directory
+    # into the path raft picks (dataDir/raft/snap_out_<snapId>.tar.gz). Like
+    # restoreSnapshot this runs on the raft event loop and blocks on disk I/O
+    # (tar+gzip); snapshot sends are rare, so we accept the stall.
+    raftNode.buildSnapshot = proc(destPath: string): bool {.gcsafe.} =
+      echo "[raft] Building snapshot archive ", destPath
+      {.cast(gcsafe).}:
+        try:
+          result = backupDataDir(defaultDbDir, destPath)
+        except CatchableError as e:
+          echo "[raft] Snapshot build failed: ", e.msg
+          result = false
+
     # Wire RAFT ↔ DistTxn
     wireRaftDistTxn(raftNode, tcpServer)
 

@@ -86,6 +86,16 @@ type
                            baseTerm: uint64): bool {.gcsafe.}
     snapIncomingId*: uint64
     snapIncomingFile*: string
+    ## Leader InstallSnapshot send. buildSnapshot archives the current data
+    ## dir into destPath (wired in baradadb.nim via backupDataDir).
+    ## snapRejectStreak counts consecutive floor-level AppendEntries rejects
+    ## per peer; at 2 the peer is queued in snapPending and the network layer
+    ## (processMessage) kicks off sendSnapshot. snapSending is the
+    ## single-flight guard: at most one snapshot transfer per peer.
+    buildSnapshot*: proc(destPath: string): bool {.gcsafe.}
+    snapRejectStreak*: Table[string, int]
+    snapPending*: HashSet[string]
+    snapSending*: HashSet[string]
 
   RaftMessageKind* = enum
     rmkRequestVote
@@ -220,6 +230,9 @@ proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0,
     snapChunkBytes: 262144,
     snapIncomingId: 0,
     snapIncomingFile: "",
+    snapRejectStreak: initTable[string, int](),
+    snapPending: initHashSet[string](),
+    snapSending: initHashSet[string](),
   )
   result.loadState()
 
@@ -333,6 +346,9 @@ proc becomeFollower*(node: RaftNode, term: uint64) =
   node.votesReceived.clear()
   node.nextIndex.clear()
   node.matchIndex.clear()
+  # Leader-only snapshot-send state is meaningless once we step down
+  node.snapRejectStreak.clear()
+  node.snapPending.clear()
   node.saveState()
 
 proc becomeCandidate*(node: RaftNode) =
@@ -354,6 +370,8 @@ proc becomeLeader*(node: RaftNode) =
   for peer in node.peers:
     node.nextIndex[peer] = node.lastLogIndex + 1
     node.matchIndex[peer] = 0
+  node.snapRejectStreak.clear()
+  node.snapPending.clear()
 
 proc handleRequestVote*(node: RaftNode, msg: RaftMessage): RaftMessage =
   var reply = RaftMessage(
@@ -600,6 +618,8 @@ proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
   if reply.success:
     node.matchIndex[peerId] = reply.matchIdx
     node.nextIndex[peerId] = reply.matchIdx + 1
+    node.snapRejectStreak.del(peerId)
+    node.snapPending.excl(peerId)
 
     # Update commit index using true majority calculation
     let majority = (node.peers.len + 1 + 1) div 2  # majority of cluster (peers + leader)
@@ -629,8 +649,41 @@ proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
     let floor = node.lastSnapshotIndex + 1
     if node.nextIndex.getOrDefault(peerId, 1) > floor:
       dec node.nextIndex[peerId]
+      # Not a floor-level reject, so it breaks any floor-reject streak.
+      node.snapRejectStreak.del(peerId)
     else:
       node.nextIndex[peerId] = floor
+      # Stuck at the compaction floor: the entries the follower needs have
+      # been compacted away, so AppendEntries can never catch it up. Count
+      # consecutive floor rejects; at 2, queue an InstallSnapshot transfer
+      # (the network layer picks this up after handleAppendReply returns).
+      node.snapRejectStreak[peerId] =
+        node.snapRejectStreak.getOrDefault(peerId, 0) + 1
+      if node.snapRejectStreak[peerId] >= 2:
+        node.snapPending.incl(peerId)
+
+proc handleInstallSnapshotReply*(node: RaftNode, peerId: string,
+                                 reply: RaftMessage) =
+  ## Leader side: follower's answer to a completed InstallSnapshot transfer.
+  ## success=true adopts the snapshot base (reply.matchIdx) as the peer's
+  ## match point; success=false leaves all state alone — the normal
+  ## AppendEntries reject path re-triggers another snapshot if the peer is
+  ## still stuck at the floor.
+  if reply.term > node.currentTerm:
+    node.becomeFollower(reply.term)
+    return
+
+  if reply.term < node.currentTerm:
+    return
+
+  if node.state != rsLeader:
+    return
+
+  if reply.success:
+    node.matchIndex[peerId] = reply.matchIdx
+    node.nextIndex[peerId] = reply.matchIdx + 1
+    node.snapRejectStreak.del(peerId)
+    node.snapPending.excl(peerId)
 
 proc state*(node: RaftNode): RaftState = node.state
 proc isLeader*(node: RaftNode): bool = node.state == rsLeader
@@ -915,6 +968,69 @@ proc broadcast*(net: RaftNetwork, msgs: seq[RaftMessage]) {.async.} =
     if i < msgs.len:
       await net.send(peer, msgs[i])
 
+proc sendSnapshot*(net: RaftNetwork, peerId: string) {.async.} =
+  ## Leader side of InstallSnapshot: build an archive of the current data dir
+  ## via the buildSnapshot callback and stream it to a lagging peer in
+  ## snapChunkBytes chunks. Triggered (via asyncCheck from processMessage)
+  ## when handleAppendReply queues the peer in snapPending after consecutive
+  ## floor-level rejects. Single-flight per peer via node.snapSending.
+  ##
+  ## Runs on the raft event loop; buildSnapshot performs blocking disk I/O
+  ## (tar+gzip). Snapshot sends are rare, so we accept the stall rather than
+  ## adding a worker round-trip (same trade-off as restoreSnapshot).
+  let node = net.node
+  if peerId in node.snapSending:
+    return
+  if node.state != rsLeader or node.buildSnapshot == nil or
+      node.dataDir.len == 0:
+    return
+  let snapId = node.lastSnapshotIndex
+  if snapId == 0:
+    # snapId 0 can never be accepted (a follower's initial snapIncomingId is
+    # 0), and sends only trigger after compaction anyway — guard regardless.
+    warn("sendSnapshot: lastSnapshotIndex is 0; skipping snapshot send to " & peerId)
+    return
+  node.snapSending.incl(peerId)
+  defer: node.snapSending.excl(peerId)
+
+  let baseIndex = node.lastSnapshotIndex
+  let baseTerm = node.lastSnapshotTerm
+  let destPath = node.dataDir / ("snap_out_" & $snapId & ".tar.gz")
+  defer:
+    if fileExists(destPath):
+      removeFile(destPath)
+
+  if not node.buildSnapshot(destPath):
+    warn("sendSnapshot: buildSnapshot failed; aborting snapshot send to " & peerId)
+    return
+
+  var f: File
+  if not open(f, destPath, fmRead):
+    warn("sendSnapshot: cannot open built archive " & destPath)
+    return
+  defer: f.close()
+
+  let total = uint64(getFileSize(destPath))
+  var offset = 0'u64
+  while true:
+    var chunk = newSeq[byte](node.snapChunkBytes)
+    let n = f.readBytes(chunk, 0, chunk.len)
+    let done = offset + uint64(n) >= total
+    await net.send(peerId, RaftMessage(
+      kind: rmkInstallSnapshot,
+      term: node.currentTerm,
+      senderId: node.id,
+      prevLogIndex: baseIndex,   # snapshot base index/term (T7 wire layout)
+      prevLogTerm: baseTerm,
+      snapId: snapId,
+      snapOffset: offset,
+      snapData: chunk[0 ..< n],
+      snapDone: done,
+    ))
+    if done:
+      break
+    offset += uint64(n)
+
 proc processMessage*(net: RaftNetwork, msg: RaftMessage) {.async.} =
   case msg.kind
   of rmkRequestVote:
@@ -932,6 +1048,10 @@ proc processMessage*(net: RaftNetwork, msg: RaftMessage) {.async.} =
     await net.send(msg.senderId, reply)
   of rmkAppendEntriesReply:
     net.node.handleAppendReply(msg.senderId, msg)
+    # Floor-reject streak reached the threshold: this peer needs a snapshot.
+    if msg.senderId in net.node.snapPending:
+      net.node.snapPending.excl(msg.senderId)
+      asyncCheck net.sendSnapshot(msg.senderId)
   of rmkInstallSnapshot:
     # Same election-timer rule as AppendEntries: only a plausible current
     # leader resets it.
@@ -940,8 +1060,7 @@ proc processMessage*(net: RaftNetwork, msg: RaftMessage) {.async.} =
     let reply = net.node.handleInstallSnapshot(msg)
     await net.send(msg.senderId, reply)
   of rmkInstallSnapshotReply:
-    # Leader side of snapshot transfer lands in a follow-up task.
-    discard
+    net.node.handleInstallSnapshotReply(msg.senderId, msg)
 
 proc recvExact*(client: AsyncSocket, size: int): Future[string] {.async.} =
   ## Reads exactly `size` bytes from `client`. A short return means the peer

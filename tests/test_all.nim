@@ -1,6 +1,7 @@
 ## BaraDB — Test Suite
 import std/unittest
 import std/tables
+import std/sets
 import std/strutils
 import std/os
 import std/asyncdispatch
@@ -2838,6 +2839,231 @@ suite "Raft InstallSnapshot Receive":
       snapData: @[byte 67], snapDone: false))
     check not bad.success
     check node.snapIncomingId == 0
+
+suite "Raft InstallSnapshot Send":
+  test "two consecutive floor rejects queue a snapshot send":
+    var node = newRaftNode("leader", @["peer-1"])
+    node.currentTerm = 5
+    node.state = rsLeader
+    node.lastSnapshotIndex = 100
+    node.lastSnapshotTerm = 4
+    node.nextIndex["peer-1"] = 101
+    node.matchIndex["peer-1"] = 0
+
+    let reject = RaftMessage(kind: rmkAppendEntriesReply, term: 5,
+                             senderId: "peer-1", success: false)
+    node.handleAppendReply("peer-1", reject)
+    check node.snapRejectStreak["peer-1"] == 1
+    check "peer-1" notin node.snapPending
+    check node.nextIndex["peer-1"] == 101  # pinned at the compaction floor
+
+    node.handleAppendReply("peer-1", reject)
+    check node.snapRejectStreak["peer-1"] == 2
+    check "peer-1" in node.snapPending
+    check node.nextIndex["peer-1"] == 101
+
+  test "non-floor reject decrements nextIndex without touching the streak":
+    var node = newRaftNode("leader", @["peer-1"])
+    node.currentTerm = 5
+    node.state = rsLeader
+    node.lastSnapshotIndex = 100
+    node.lastSnapshotTerm = 4
+    node.nextIndex["peer-1"] = 105
+
+    node.handleAppendReply("peer-1", RaftMessage(
+      kind: rmkAppendEntriesReply, term: 5, senderId: "peer-1", success: false))
+    check node.nextIndex["peer-1"] == 104
+    check "peer-1" notin node.snapRejectStreak
+    check "peer-1" notin node.snapPending
+
+  test "successful AppendEntries reply resets the streak and cancels a pending snapshot":
+    var node = newRaftNode("leader", @["peer-1"])
+    node.currentTerm = 5
+    node.state = rsLeader
+    node.lastSnapshotIndex = 100
+    node.lastSnapshotTerm = 4
+    node.nextIndex["peer-1"] = 101
+    node.matchIndex["peer-1"] = 0
+    node.snapRejectStreak["peer-1"] = 1
+    node.snapPending.incl("peer-1")
+
+    node.handleAppendReply("peer-1", RaftMessage(
+      kind: rmkAppendEntriesReply, term: 5, senderId: "peer-1",
+      success: true, matchIdx: 101))
+    check "peer-1" notin node.snapRejectStreak
+    check "peer-1" notin node.snapPending
+    check node.matchIndex["peer-1"] == 101
+    check node.nextIndex["peer-1"] == 102
+
+  test "InstallSnapshotReply success advances match/next index and clears streak":
+    var node = newRaftNode("leader", @["peer-1"])
+    node.currentTerm = 5
+    node.state = rsLeader
+    node.lastSnapshotIndex = 100
+    node.lastSnapshotTerm = 4
+    node.nextIndex["peer-1"] = 101
+    node.matchIndex["peer-1"] = 0
+    node.snapRejectStreak["peer-1"] = 2
+    node.snapPending.incl("peer-1")
+
+    node.handleInstallSnapshotReply("peer-1", RaftMessage(
+      kind: rmkInstallSnapshotReply, term: 5, senderId: "peer-1",
+      success: true, matchIdx: 100))
+    check node.matchIndex["peer-1"] == 100
+    check node.nextIndex["peer-1"] == 101
+    check "peer-1" notin node.snapRejectStreak
+    check "peer-1" notin node.snapPending
+
+  test "InstallSnapshotReply failure leaves leader state untouched":
+    var node = newRaftNode("leader", @["peer-1"])
+    node.currentTerm = 5
+    node.state = rsLeader
+    node.lastSnapshotIndex = 100
+    node.lastSnapshotTerm = 4
+    node.nextIndex["peer-1"] = 101
+    node.matchIndex["peer-1"] = 0
+    node.snapRejectStreak["peer-1"] = 2
+
+    node.handleInstallSnapshotReply("peer-1", RaftMessage(
+      kind: rmkInstallSnapshotReply, term: 5, senderId: "peer-1",
+      success: false, matchIdx: 0))
+    check node.matchIndex["peer-1"] == 0
+    check node.nextIndex["peer-1"] == 101
+    check node.snapRejectStreak["peer-1"] == 2
+
+  test "InstallSnapshotReply term handling matches AppendEntriesReply":
+    var node = newRaftNode("leader", @["peer-1"])
+    node.currentTerm = 5
+    node.state = rsLeader
+    node.lastSnapshotIndex = 100
+    node.nextIndex["peer-1"] = 101
+    node.matchIndex["peer-1"] = 0
+
+    # Stale term: ignored entirely
+    node.handleInstallSnapshotReply("peer-1", RaftMessage(
+      kind: rmkInstallSnapshotReply, term: 4, senderId: "peer-1",
+      success: true, matchIdx: 100))
+    check node.matchIndex["peer-1"] == 0
+    check node.state == rsLeader
+
+    # Higher term: step down
+    node.handleInstallSnapshotReply("peer-1", RaftMessage(
+      kind: rmkInstallSnapshotReply, term: 7, senderId: "peer-1",
+      success: true, matchIdx: 100))
+    check node.state == rsFollower
+    check node.currentTerm == 7
+
+  test "floor rejects trigger sendSnapshot end-to-end via processMessage":
+    proc scenario() =
+      let tmp = getTempDir() / "baradb_snaptx_e2e_" & $getCurrentProcessId()
+      removeDir(tmp)
+      createDir(tmp)
+      defer: removeDir(tmp)
+
+      var payload = ""
+      for i in 0 ..< 200:
+        payload.add(char(32 + (i mod 90)))
+
+      var leader = newRaftNode("leader", @["peer-1"], raftPort = 29331,
+                               dataDir = tmp / "raft-l")
+      createDir(tmp / "raft-l")  # newRaftNode only reads; sendSnapshot writes here
+      leader.currentTerm = 5
+      leader.state = rsLeader
+      leader.lastSnapshotIndex = 100
+      leader.lastSnapshotTerm = 4
+      leader.nextIndex["peer-1"] = 101
+      leader.matchIndex["peer-1"] = 0
+      leader.snapChunkBytes = 64  # 200 bytes -> 4 chunks
+      leader.peerAddrs["peer-1"] = ("127.0.0.1", 29332)
+      var buildCalls = 0
+      leader.buildSnapshot = proc(destPath: string): bool {.gcsafe.} =
+        inc buildCalls
+        check "snap_out_100" in destPath
+        writeFile(destPath, payload)
+        true
+
+      var follower = newRaftNode("peer-1", @["leader"], raftPort = 29332,
+                                 dataDir = tmp / "raft-f")
+      follower.currentTerm = 1
+      var gotBaseIndex = 0'u64
+      var gotBaseTerm = 0'u64
+      follower.restoreSnapshot = proc(p: string, bi: uint64,
+                                      bt: uint64): bool {.gcsafe.} =
+        gotBaseIndex = bi
+        gotBaseTerm = bt
+        result = readFile(p) == payload
+
+      let netL = newRaftNetwork(leader)
+      let netF = newRaftNetwork(follower)
+      asyncCheck netF.run()
+      waitFor sleepAsync(50)
+
+      # Two floor-level rejects through the real message path; the second one
+      # must trigger an async snapshot send (leader itself never listens).
+      let reject = RaftMessage(kind: rmkAppendEntriesReply, term: 5,
+                               senderId: "peer-1", success: false)
+      waitFor netL.processMessage(reject)
+      check "peer-1" notin leader.snapPending
+      waitFor netL.processMessage(reject)
+
+      var waited = 0
+      while follower.lastSnapshotIndex != 100 and waited < 3000:
+        waitFor sleepAsync(50)
+        waited += 50
+
+      netF.stop()
+      waitFor sleepAsync(50)
+
+      check buildCalls == 1
+      check follower.lastSnapshotIndex == 100
+      check follower.lastSnapshotTerm == 4
+      check gotBaseIndex == 100
+      check gotBaseTerm == 4
+      # Temp archive cleaned up after the transfer
+      check not fileExists(tmp / "raft-l" / "snap_out_100.tar.gz")
+    scenario()
+
+  test "sendSnapshot single-flight guard skips a concurrent send":
+    let tmp = getTempDir() / "baradb_snaptx_guard_" & $getCurrentProcessId()
+    removeDir(tmp)
+    createDir(tmp)
+    defer: removeDir(tmp)
+
+    var node = newRaftNode("leader", @["peer-1"], dataDir = tmp / "raft")
+    node.currentTerm = 5
+    node.state = rsLeader
+    node.lastSnapshotIndex = 100
+    node.lastSnapshotTerm = 4
+    var buildCalls = 0
+    node.buildSnapshot = proc(destPath: string): bool {.gcsafe.} =
+      inc buildCalls
+      writeFile(destPath, "x")
+      true
+
+    let net = newRaftNetwork(node)
+    node.snapSending.incl("peer-1")  # a send is already in flight
+    waitFor net.sendSnapshot("peer-1")
+    check buildCalls == 0
+
+  test "sendSnapshot skips when there is no compacted snapshot":
+    let tmp = getTempDir() / "baradb_snaptx_zero_" & $getCurrentProcessId()
+    removeDir(tmp)
+    createDir(tmp)
+    defer: removeDir(tmp)
+
+    var node = newRaftNode("leader", @["peer-1"], dataDir = tmp / "raft")
+    node.currentTerm = 5
+    node.state = rsLeader
+    # lastSnapshotIndex == 0: snapId 0 can never be received by a follower
+    var buildCalls = 0
+    node.buildSnapshot = proc(destPath: string): bool {.gcsafe.} =
+      inc buildCalls
+      true
+
+    let net = newRaftNetwork(node)
+    waitFor net.sendSnapshot("peer-1")
+    check buildCalls == 0
+    check "peer-1" notin node.snapSending
 
 suite "Raft TLS Transport":
   test "2-node election over TLS":
