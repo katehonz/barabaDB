@@ -8,6 +8,7 @@ import std/asyncnet
 import std/monotimes
 import std/base64
 import std/json
+import std/streams
 
 import barabadb/core/types
 import barabadb/core/mvcc
@@ -2606,6 +2607,101 @@ suite "Raft Network Transport":
     if gotReply:
       check replyMsg.kind == rmkRequestVoteReply
       check replyMsg.success
+
+suite "Raft InstallSnapshot Protocol":
+  test "InstallSnapshot fields survive serialize/deserialize round-trip":
+    let msg = RaftMessage(
+      kind: rmkInstallSnapshot,
+      term: 9,
+      senderId: "leader-1",
+      prevLogIndex: 42,   # snapshot base index
+      prevLogTerm: 7,     # snapshot base term
+      snapId: 3,
+      snapOffset: 4096,
+      snapData: @[byte 1, 2, 3, 250, 0, 17],
+      snapDone: true)
+    let decoded = deserializeRaftMessage(serialize(msg))
+    check decoded.kind == rmkInstallSnapshot
+    check decoded.term == 9
+    check decoded.senderId == "leader-1"
+    check decoded.prevLogIndex == 42
+    check decoded.prevLogTerm == 7
+    check decoded.snapId == 3
+    check decoded.snapOffset == 4096
+    check decoded.snapData == @[byte 1, 2, 3, 250, 0, 17]
+    check decoded.snapDone
+
+  test "InstallSnapshotReply fields survive serialize/deserialize round-trip":
+    let msg = RaftMessage(
+      kind: rmkInstallSnapshotReply,
+      term: 9,
+      senderId: "follower-2",
+      success: true,
+      matchIdx: 42,
+      snapId: 3,
+      snapOffset: 8192,
+      snapData: @[],
+      snapDone: false)
+    let decoded = deserializeRaftMessage(serialize(msg))
+    check decoded.kind == rmkInstallSnapshotReply
+    check decoded.term == 9
+    check decoded.senderId == "follower-2"
+    check decoded.success
+    check decoded.matchIdx == 42
+    check decoded.snapId == 3
+    check decoded.snapOffset == 8192
+    check decoded.snapData.len == 0
+    check not decoded.snapDone
+
+  test "old wire layout (no snapshot fields) deserializes with zero defaults":
+    # Manually serialize a message in the pre-InstallSnapshot layout:
+    # magic, version, kind, term, senderId, lastLogIndex, lastLogTerm,
+    # prevLogIndex, prevLogTerm, entries, leaderCommit, success, matchIdx.
+    let s = newStringStream()
+    s.write("RAFT")
+    s.write(1'u32)  # RaftProtoVersion
+    s.write(uint32(ord(rmkAppendEntries)))
+    s.write(5'u64)  # term
+    let sender = "old-leader"
+    s.write(uint32(sender.len))
+    s.writeData(sender[0].unsafeAddr, sender.len)
+    s.write(11'u64)  # lastLogIndex
+    s.write(4'u64)   # lastLogTerm
+    s.write(10'u64)  # prevLogIndex
+    s.write(4'u64)   # prevLogTerm
+    s.write(0'u32)   # entries count
+    s.write(10'u64)  # leaderCommit
+    s.write(char(1)) # success
+    s.write(10'u64)  # matchIdx
+    let strData = s.data
+    var buf = newSeq[byte](strData.len)
+    for i in 0 ..< strData.len:
+      buf[i] = byte(strData[i])
+    s.close()
+
+    let decoded = deserializeRaftMessage(buf)
+    check decoded.kind == rmkAppendEntries
+    check decoded.term == 5
+    check decoded.senderId == "old-leader"
+    check decoded.matchIdx == 10
+    check decoded.snapId == 0
+    check decoded.snapOffset == 0
+    check decoded.snapData.len == 0
+    check not decoded.snapDone
+
+  test "old message kinds still round-trip unchanged":
+    let msg = RaftMessage(kind: rmkRequestVote, term: 2, senderId: "cand",
+                          lastLogIndex: 5, lastLogTerm: 1)
+    let decoded = deserializeRaftMessage(serialize(msg))
+    check decoded.kind == rmkRequestVote
+    check decoded.term == 2
+    check decoded.senderId == "cand"
+    check decoded.lastLogIndex == 5
+    check decoded.lastLogTerm == 1
+    check decoded.snapId == 0
+    check decoded.snapOffset == 0
+    check decoded.snapData.len == 0
+    check not decoded.snapDone
 
 suite "Raft TLS Transport":
   test "2-node election over TLS":

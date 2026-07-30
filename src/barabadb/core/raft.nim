@@ -83,6 +83,8 @@ type
     rmkRequestVoteReply
     rmkAppendEntries
     rmkAppendEntriesReply
+    rmkInstallSnapshot
+    rmkInstallSnapshotReply
 
   RaftMessage* = object
     kind*: RaftMessageKind
@@ -99,6 +101,12 @@ type
     # Reply
     success*: bool
     matchIdx*: uint64
+    # InstallSnapshot (prevLogIndex/prevLogTerm reuse: snapshot base index/term;
+    # reply uses success/matchIdx as usual)
+    snapId*: uint64      # snapshot generation, matches leader's base at build time
+    snapOffset*: uint64  # byte offset of this chunk within the archive
+    snapData*: seq[byte] # chunk payload (<= snapChunkBytes)
+    snapDone*: bool      # last chunk
 
   RaftCluster* = ref object
     nodes*: Table[string, RaftNode]
@@ -694,6 +702,14 @@ proc serialize*(msg: RaftMessage): seq[byte] =
   stream.write(msg.leaderCommit)
   stream.write(char(if msg.success: 1 else: 0))
   stream.write(msg.matchIdx)
+  # InstallSnapshot trailing fields (appended for wire backward compatibility;
+  # pre-v1.3 peers stop reading at matchIdx and ignore these bytes)
+  stream.write(msg.snapId)
+  stream.write(msg.snapOffset)
+  stream.write(uint32(msg.snapData.len))
+  if msg.snapData.len > 0:
+    stream.writeData(addr msg.snapData[0], msg.snapData.len)
+  stream.write(char(if msg.snapDone: 1 else: 0))
   let strData = stream.data
   result = newSeq[byte](strData.len)
   for i in 0 ..< strData.len:
@@ -722,6 +738,19 @@ proc deserializeRaftMessage*(data: seq[byte]): RaftMessage =
   result.leaderCommit = stream.readUint64()
   result.success = stream.readChar() != '\0'
   result.matchIdx = stream.readUint64()
+  # Optional trailing InstallSnapshot fields (absent in pre-v1.3 buffers)
+  if not stream.atEnd:
+    result.snapId = stream.readUint64()
+  if not stream.atEnd:
+    result.snapOffset = stream.readUint64()
+  if not stream.atEnd:
+    let dataLen = int(stream.readUint32())
+    result.snapData = newSeq[byte](dataLen)
+    if dataLen > 0:
+      if stream.readData(addr result.snapData[0], dataLen) != dataLen:
+        raise newException(IOError, "Incomplete snapshot data read from stream")
+  if not stream.atEnd:
+    result.snapDone = stream.readChar() != '\0'
   stream.close()
 
 # ---------------------------------------------------------------------------
@@ -810,6 +839,10 @@ proc processMessage*(net: RaftNetwork, msg: RaftMessage) {.async.} =
     await net.send(msg.senderId, reply)
   of rmkAppendEntriesReply:
     net.node.handleAppendReply(msg.senderId, msg)
+  of rmkInstallSnapshot, rmkInstallSnapshotReply:
+    # Wire protocol only (v1.3); snapshot transfer behavior lands in a
+    # follow-up task. Ignore until then.
+    discard
 
 proc recvExact*(client: AsyncSocket, size: int): Future[string] {.async.} =
   ## Reads exactly `size` bytes from `client`. A short return means the peer
