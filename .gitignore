@@ -12,6 +12,8 @@ tests/test_minimal
 tests/tla_faithfulness
 tests/fuzz_test
 tests/prop_test
+tests/bugfix_test
+tests/nimforum_smoke_test
 benchmarks/bench_all
 benchmarks/compare
 clients/nim/tests/test_client
