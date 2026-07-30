@@ -60,3 +60,8 @@ Branch: all work merged to `main` only (feature branch removed).
 - `docs/en/monitoring.md` — health/metrics (raft section)
 - `CHANGELOG.md` — `[1.2.0] Unreleased` Raft section
 - README raft status line
+
+## Production
+
+- GA plan: `docs/superpowers/plans/2026-07-30-production-ga.md`
+- GA design: `docs/superpowers/specs/2026-07-30-production-ga-design.md`
