@@ -410,7 +410,21 @@ proc main() =
           # extraction failure it rolls back automatically. Reopen whatever is
           # on disk either way so the node is not left with a closed DB.
           let restored = restoreDataDir(archivePath, defaultDbDir)
-          result = registry.reopenDatabase("default") and restored
+          let reopened = registry.reopenDatabase("default")
+          if reopened:
+            # Serve the (re)opened data. Client connections clone tcpServer.ctx
+            # on accept (cloneForConnection), and reopenDatabase installs a NEW
+            # ctx object in the registry slot — without repointing, queries
+            # keep reading the closed pre-restore LSM (empty results, no
+            # error). The websocket change hook was installed on the previous
+            # ctx object; carry it over.
+            let oldCtx = tcpServer.ctx
+            let newCtx = cast[ExecutionContext](cast[pointer](defaultDbInfo.ctx))
+            newCtx.onChange = oldCtx.onChange
+            tcpServer.db = defaultDbInfo.db
+            tcpServer.ctx = newCtx
+            tcpServer.txnManager = newCtx.txnManager
+          result = reopened and restored
         except CatchableError as e:
           echo "[raft] Snapshot restore failed: ", e.msg
           result = false

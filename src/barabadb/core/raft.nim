@@ -1131,8 +1131,21 @@ proc receiveLoop(net: RaftNetwork, client: AsyncSocket) {.async.} =
 proc heartbeatLoop(net: RaftNetwork) {.async.} =
   ## Fan out heartbeats in parallel so a slow/dead peer cannot delay
   ## AppendEntries to the rest of the cluster.
+  var wasLeader = false
   while net.running:
     if net.node.state == rsLeader:
+      if not wasLeader:
+        # Fresh term, fresh connections. A peer that restarted while we were
+        # partitioned leaves a half-dead cached socket whose writes can keep
+        # "succeeding" into the void (the TCP error surfaces late or never,
+        # so the error-triggered redial in send() may never fire) — the
+        # restarted peer then never sees AppendEntries, keeps candidating,
+        # and the cluster livelocks. Drop all cached peer connections on
+        # leadership acquisition so the heartbeat fan-out redials.
+        for peerId, sock in net.peerSockets:
+          try: sock.close() except CatchableError: discard
+        net.peerSockets.clear()
+      wasLeader = true
       var futs: seq[Future[void]] = @[]
       for peer in net.node.peers:
         let msg = net.node.appendEntries(peer)
@@ -1142,6 +1155,8 @@ proc heartbeatLoop(net: RaftNetwork) {.async.} =
           await f
         except CatchableError:
           discard
+    else:
+      wasLeader = false
     await sleepAsync(net.node.heartbeatTimeout)
 
 proc timerLoop*(net: RaftNetwork) {.async.}

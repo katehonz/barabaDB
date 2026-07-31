@@ -18,6 +18,7 @@ tests/raft_e2e_test
 tests/raft_writes_e2e_test
 tests/raft_failover_load_e2e_test
 tests/raft_tls_e2e_test
+tests/raft_coldnode_e2e_test
 benchmarks/bench_all
 benchmarks/compare
 clients/nim/tests/test_client

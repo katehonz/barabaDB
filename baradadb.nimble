@@ -31,6 +31,7 @@ task test, "Run all tests":
             "test_schema_persist", "test_storage_hardening", "tla_faithfulness",
             "nimforum_smoke_test", "raft_e2e_test", "raft_writes_e2e_test",
             "raft_failover_load_e2e_test", "raft_tls_e2e_test",
+            "raft_coldnode_e2e_test",
             "fuzz_test", "prop_test",
             "test_wire_insert_stress", "stress_test"]:
     exec "nim c -r tests/" & t & ".nim"
