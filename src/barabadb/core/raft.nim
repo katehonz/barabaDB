@@ -679,7 +679,13 @@ proc handleInstallSnapshotReply*(node: RaftNode, peerId: string,
   if node.state != rsLeader:
     return
 
-  if reply.success:
+  if reply.success and reply.matchIdx >= node.lastSnapshotIndex:
+    # The follower has actually adopted the snapshot base. Intermediate chunk
+    # replies (the T8 follower acks every non-done chunk with success=true and
+    # matchIdx = its OLD lastSnapshotIndex, below ours) fall through here and
+    # must be ignored: applying them would regress matchIndex/nextIndex and
+    # clear the reject streak mid-transfer, causing state flapping until the
+    # final reply lands.
     node.matchIndex[peerId] = reply.matchIdx
     node.nextIndex[peerId] = reply.matchIdx + 1
     node.snapRejectStreak.del(peerId)

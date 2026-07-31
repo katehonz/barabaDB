@@ -2931,6 +2931,36 @@ suite "Raft InstallSnapshot Send":
     check node.nextIndex["peer-1"] == 101
     check node.snapRejectStreak["peer-1"] == 2
 
+  test "intermediate chunk replies are ignored; final reply advances state":
+    var node = newRaftNode("leader", @["peer-1"])
+    node.currentTerm = 5
+    node.state = rsLeader
+    node.lastSnapshotIndex = 100
+    node.lastSnapshotTerm = 4
+    node.nextIndex["peer-1"] = 101
+    node.matchIndex["peer-1"] = 0
+    node.snapRejectStreak["peer-1"] = 2
+    node.snapPending.incl("peer-1")
+
+    # Intermediate chunk ack: follower replies success=true with its OLD
+    # lastSnapshotIndex (40 < our 100). Leader state must not move.
+    node.handleInstallSnapshotReply("peer-1", RaftMessage(
+      kind: rmkInstallSnapshotReply, term: 5, senderId: "peer-1",
+      success: true, matchIdx: 40))
+    check node.matchIndex["peer-1"] == 0
+    check node.nextIndex["peer-1"] == 101
+    check node.snapRejectStreak["peer-1"] == 2
+    check "peer-1" in node.snapPending
+
+    # Final reply: follower adopted the snapshot base (matchIdx == 100).
+    node.handleInstallSnapshotReply("peer-1", RaftMessage(
+      kind: rmkInstallSnapshotReply, term: 5, senderId: "peer-1",
+      success: true, matchIdx: 100))
+    check node.matchIndex["peer-1"] == 100
+    check node.nextIndex["peer-1"] == 101
+    check "peer-1" notin node.snapRejectStreak
+    check "peer-1" notin node.snapPending
+
   test "InstallSnapshotReply term handling matches AppendEntriesReply":
     var node = newRaftNode("leader", @["peer-1"])
     node.currentTerm = 5
