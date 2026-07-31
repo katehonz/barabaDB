@@ -1,8 +1,37 @@
-# Raft Cluster Status — C3a / C3b / post-C3b
+# Raft Cluster Status — C3a / C3b / post-C3b / v1.3.0
 
 Date: 2026-07-30  
-Status: **Shipped on `main`** (tip includes metrics).  
+Status: **v1.3.0 — Supported** for the single-`default`-DB scope (see the v1.3.0 section below).  
 Branch: all work merged to `main` only (feature branch removed).
+
+## v1.3.0 — raft-supported (2026-07-30)
+
+Raft moves from Experimental to **Supported** for a 3-node cluster on the
+`default` database. Landed on top of the C3a/C3b base:
+
+- **Failover under load** — `tests/raft_failover_load_e2e_test.nim`: leader
+  killed under sustained writes; every acked write survives (client contract:
+  in-flight writes fail fast, retry).
+- **Mandatory CI gate** — dedicated `raft-e2e` job runs all five raft e2e
+  suites; missing binary is a hard FAIL under CI.
+- **Raft TLS** — `BARADB_RAFT_TLS_*` config, fail-closed startup, optional
+  mutual auth, TLS on follower→leader forwarding;
+  `tests/raft_tls_e2e_test.nim` (plaintext node excluded).
+- **InstallSnapshot** — backward-compatible wire protocol, leader chunk send
+  (`BARADB_RAFT_SNAP_CHUNK_KB`, default 256), follower restore via
+  backup/restore, compaction unpinned from stale peers
+  (`BARADB_RAFT_PEER_STALE_MS`, default 30000);
+  `tests/raft_coldnode_e2e_test.nim` (returning + wiped node converge).
+- **Fixes** — put/delete encoding (`deleted` flag), rejoin livelock (cached
+  peer sockets dropped on leadership), post-restore ctx repoint.
+
+Resolved non-goals from the list below: raft-port TLS, InstallSnapshot with
+full SM payload. Still open: multi-database raft, `CREATE`/`DROP DATABASE`
+replication, membership changes, linearizable follower reads, rolling
+upgrades (restart all nodes together).
+
+Plan: `docs/superpowers/plans/2026-07-30-v1.3.0-raft-supported.md` ·
+Design: `docs/superpowers/specs/2026-07-30-raft-supported-design.md`
 
 ## Phase map
 

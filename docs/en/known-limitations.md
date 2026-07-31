@@ -1,6 +1,6 @@
-# Known Limitations — v1.2.0 Production GA
+# Known Limitations — v1.3.0
 
-This page defines **what BaraDB promises** in the v1.2.0 production cut.
+This page defines **what BaraDB promises** in the v1.3.0 production cut.
 
 | Tier | Meaning |
 |------|---------|
@@ -10,20 +10,22 @@ This page defines **what BaraDB promises** in the v1.2.0 production cut.
 
 ## Support matrix
 
-| Area | GA (v1.2.0) | Experimental / later |
-|------|-------------|----------------------|
+| Area | v1.3.0 | Notes |
+|------|--------|-------|
 | Single-node SQL + LSM storage | **Supported** | — |
 | Schema persistence (tables, indexes) | **Supported** | — |
 | FTS / HNSW / graphs across restart | **Supported** | — |
 | Auth + JWT (when configured) | **Supported** | — |
 | Backup / restore (offline, all-databases) | **Supported** | — |
 | Multi-database (non-Raft) | **Supported** | — |
-| Raft 3-node election + SQL/DDL | **Experimental** | InstallSnapshot SM payload, membership |
+| Raft 3-node (single `default` DB) | **Supported** | failover under load, raft TLS, InstallSnapshot recovery — e2e-proven |
+| Leader write forwarding | **Supported** | needs `BARADB_RAFT_CLIENT_PEERS` |
 | Raft multi-database | **Not supported** | only `default` |
-| Leader write forwarding | **Experimental** | needs `BARADB_RAFT_CLIENT_PEERS` |
+| `CREATE`/`DROP DATABASE` replication | **Not supported** | run per node |
+| Raft membership changes (join/leave) | **Not supported** | fixed `BARADB_RAFT_PEERS` set |
 | Follower linearizable reads | **Not supported** | best-effort after apply |
+| Rolling upgrades | **Not supported** | restart all nodes together — mixed v1.2/v1.3 binaries must not run in one cluster |
 | ORC multi-threaded shared LSM | **Not supported** | default is ARC (`nim.cfg`) |
-| Zero-downtime rolling upgrade | **Not supported** | stop → backup → upgrade |
 | Postgres wire protocol | **Not supported** | Bara wire + HTTP |
 
 ## Single-node GA (what you can rely on)
@@ -33,13 +35,19 @@ This page defines **what BaraDB promises** in the v1.2.0 production cut.
 - HTTP `/health` and `/metrics` for process liveness
 - Offline backup of `data/databases` and restore onto an empty data root
 
-## Raft (experimental ops)
+## Raft (supported, single-default-DB scope)
 
-Documented in [distributed.md](distributed.md). Suitable for learning and careful staging; **not** the v1.2.0 HA product tier.
+Documented in [distributed.md](distributed.md). Supported scope:
 
-- SQL DML/DDL on **`default` only**
-- Safe log prefix compact (not full InstallSnapshot)
-- Failover proven in process e2e tests
+- 3-node cluster, SQL DML/DDL on **`default` only**
+- Failover under write load: every acknowledged write survives a leader kill; in-flight writes fail fast — clients must retry
+- TLS on the raft port and on follower→leader forwarding (`BARADB_RAFT_TLS_*`)
+- Cold-node recovery via InstallSnapshot (`BARADB_RAFT_SNAP_CHUNK_KB`, `BARADB_RAFT_PEER_STALE_MS`)
+
+## Newly documented limitations
+
+- **Legacy non-raft REP replication infers delete from empty value** — the non-raft replication path still treats an empty value as a delete, so inserts into a PK-only table are misapplied over that path (the row vanishes). Use raft replication instead.
+- **Snapshot-restore ctx staleness** — after an InstallSnapshot restore, HTTP endpoints using the startup-captured ctx may serve stale data until the node is restarted; the `/query` path is fresh per-request. Pre-existing client connections likewise see pre-restore state — reconnect after a restore.
 
 ## Operational requirements
 

@@ -23,9 +23,12 @@ nim c -d:ssl --threads:on --path:src -r tests/test_schema_persist.nim
 ./scripts/backup-restore-drill.sh
 DRILL_PORT=19482 ./scripts/backup-restore-drill.sh
 
-# Optional cluster e2e (experimental tier)
+# Cluster e2e (raft supported tier — all five suites)
 ./tests/raft_e2e_test
 ./tests/raft_writes_e2e_test
+./tests/raft_failover_load_e2e_test
+./tests/raft_tls_e2e_test
+./tests/raft_coldnode_e2e_test
 ```
 
 ## Production compose
