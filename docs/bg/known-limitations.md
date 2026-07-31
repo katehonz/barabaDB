@@ -35,6 +35,9 @@ Crash recovery с WAL, schema/index persist, `/health` + `/metrics`, offline bac
 
 - **Legacy REP replication (без raft)** — пътят още извежда delete от празна стойност; insert в PK-only таблица се прилага грешно по него (редът изчезва). Използвай raft.
 - **Snapshot-restore ctx** — след InstallSnapshot restore HTTP endpoints със startup-captured ctx може да сервират стари данни до рестарт (`/query` е свеж per-request); съществуващите клиентски връзки виждат pre-restore състояние — reconnect след restore.
+- **FK-cascade дивергенция под raft** — ефектите на `ON DELETE/UPDATE CASCADE` (и `SET NULL`) не се реплицират през raft: followers прилагат само KV промяната на родителския ред, така че каскадираните дъщерни редове остават на followers. Избягвай FK actions върху raft-реплицирани таблици или приеми периодичен snapshot resync.
+- **Непотвърдени записи в snapshots** — leader прилага записите локално преди raft majority commit; snapshot, направен в този прозорец, може да включи записи, които никога не се commit-ват (фантомни редове след restore + смяна на leadership). Тесен прозорец; поправката е планирана за следващ release.
+- **Блокиране на event loop при snapshot build/restore** — snapshot build/restore изпълнява блокиращ tar/gzip на event loop на възела; големи data dirs могат да забавят heartbeats и да предизвикат election по средата на трансфер.
 
 ## Виж също
 

@@ -1,4 +1,4 @@
-# Release checklist — v1.2.0 Production GA
+# Release checklist — v1.3.0 raft-supported
 
 Use before tagging and publishing artifacts.
 
@@ -6,8 +6,8 @@ Use before tagging and publishing artifacts.
 
 - [ ] Working tree clean on `main`
 - [ ] [Known limitations](known-limitations.md) accurate
-- [ ] `CHANGELOG.md` has dated `## [1.2.0]` (not Unreleased for shipped items)
-- [ ] `baradadb.nimble` version `1.2.0`
+- [ ] `CHANGELOG.md` has dated `## [1.3.0]` (not Unreleased for shipped items)
+- [ ] `baradadb.nimble` version `1.3.0`
 
 ## Tests
 
@@ -44,17 +44,17 @@ docker compose -f docker-compose.prod.yml config >/dev/null
 
 ```bash
 nimble build_release   # or: nim c -d:release -o:build/baradadb src/baradadb.nim
-docker build -t baradb:1.2.0 -t baradb:latest .
+docker build -t baradb:1.3.0 -t baradb:latest .
 ```
 
 ## Tag
 
 ```bash
-git tag -a v1.2.0 -m "BaraDB v1.2.0 Production GA (single-node)"
+git tag -a v1.3.0 -m "BaraDB v1.3.0 raft-supported"
 git push origin main --tags
 ```
 
 ## Post-release
 
 - [ ] Smoke: start prod compose, `/health` → ok, auth required for `/query`
-- [ ] Announce: single-node GA; Raft experimental (link known-limitations)
+- [ ] Announce: raft-supported release (3-node, `default` DB); link known-limitations

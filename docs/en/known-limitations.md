@@ -48,6 +48,9 @@ Documented in [distributed.md](distributed.md). Supported scope:
 
 - **Legacy non-raft REP replication infers delete from empty value** — the non-raft replication path still treats an empty value as a delete, so inserts into a PK-only table are misapplied over that path (the row vanishes). Use raft replication instead.
 - **Snapshot-restore ctx staleness** — after an InstallSnapshot restore, HTTP endpoints using the startup-captured ctx may serve stale data until the node is restarted; the `/query` path is fresh per-request. Pre-existing client connections likewise see pre-restore state — reconnect after a restore.
+- **FK-cascade divergence under raft** — `ON DELETE/UPDATE CASCADE` (and `SET NULL`) effects are not raft-replicated: followers only apply the parent row's KV change, so cascaded child rows persist on followers. Avoid FK actions on raft-replicated tables, or accept periodic snapshot resync.
+- **Uncommitted writes in snapshots** — the leader applies writes locally before raft majority commit; a snapshot taken in that window can include writes that never commit (phantom rows after restore + leadership change). Narrow window; fix tracked for a later release.
+- **Event-loop stall during snapshot build/restore** — snapshot build/restore performs blocking tar/gzip on the node's event loop; large data dirs can stall heartbeats and trigger an election mid-transfer.
 
 ## Operational requirements
 

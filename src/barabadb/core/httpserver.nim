@@ -31,7 +31,7 @@ type
     config: BaraConfig
     running: bool
     db*: LSMTree
-    ctx: ExecutionContext
+    ctx*: ExecutionContext  # read/write only under the storage gate
     registry*: DatabaseRegistry
     metrics*: Metrics
     secretKey*: string

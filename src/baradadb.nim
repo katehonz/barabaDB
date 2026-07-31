@@ -404,30 +404,40 @@ proc main() =
       # the rest of the server); the registry ctxFactory type is not marked
       # gcsafe, which would otherwise reject the call.
       {.cast(gcsafe).}:
-        try:
-          defaultDbInfo.db.close()
-          # restoreDataDir moves the old dir aside and extracts the archive; on
-          # extraction failure it rolls back automatically. Reopen whatever is
-          # on disk either way so the node is not left with a closed DB.
-          let restored = restoreDataDir(archivePath, defaultDbDir)
-          let reopened = registry.reopenDatabase("default")
-          if reopened:
-            # Serve the (re)opened data. Client connections clone tcpServer.ctx
-            # on accept (cloneForConnection), and reopenDatabase installs a NEW
-            # ctx object in the registry slot — without repointing, queries
-            # keep reading the closed pre-restore LSM (empty results, no
-            # error). The websocket change hook was installed on the previous
-            # ctx object; carry it over.
-            let oldCtx = tcpServer.ctx
-            let newCtx = cast[ExecutionContext](cast[pointer](defaultDbInfo.ctx))
-            newCtx.onChange = oldCtx.onChange
-            tcpServer.db = defaultDbInfo.db
-            tcpServer.ctx = newCtx
-            tcpServer.txnManager = newCtx.txnManager
-          result = reopened and restored
-        except CatchableError as e:
-          echo "[raft] Snapshot restore failed: ", e.msg
-          result = false
+        # Hold the storage gate for the whole close/extract/reopen/repoint
+        # sequence: HTTP workers run queries under the same gate, so this
+        # cannot close the LSM out from under an in-flight /query.
+        withStorageGate:
+          try:
+            defaultDbInfo.db.close()
+            # restoreDataDir moves the old dir aside and extracts the archive; on
+            # extraction failure it rolls back automatically. Reopen whatever is
+            # on disk either way so the node is not left with a closed DB.
+            let restored = restoreDataDir(archivePath, defaultDbDir)
+            let reopened = registry.reopenDatabase("default")
+            if reopened:
+              # Serve the (re)opened data. Client connections clone tcpServer.ctx
+              # on accept (cloneForConnection), and reopenDatabase installs a NEW
+              # ctx object in the registry slot — without repointing, queries
+              # keep reading the closed pre-restore LSM (empty results, no
+              # error). The websocket change hook was installed on the previous
+              # ctx object; carry it over.
+              let oldCtx = tcpServer.ctx
+              let newCtx = cast[ExecutionContext](cast[pointer](defaultDbInfo.ctx))
+              newCtx.onChange = oldCtx.onChange
+              tcpServer.db = defaultDbInfo.db
+              tcpServer.ctx = newCtx
+              tcpServer.txnManager = newCtx.txnManager
+              # The HTTP thread reads server.db/ctx only inside
+              # withStorageGate (getRequestDatabaseContext in the /query and
+              # /tables handlers), so repointing them here — while this thread
+              # holds the gate — is race-free against request handlers.
+              httpServer.db = defaultDbInfo.db
+              httpServer.ctx = newCtx
+            result = reopened and restored
+          except CatchableError as e:
+            echo "[raft] Snapshot restore failed: ", e.msg
+            result = false
 
     # Leader InstallSnapshot send: archive the default DB's data directory
     # into the path raft picks (dataDir/raft/snap_out_<snapId>.tar.gz). Like
@@ -436,11 +446,15 @@ proc main() =
     raftNode.buildSnapshot = proc(destPath: string): bool {.gcsafe.} =
       echo "[raft] Building snapshot archive ", destPath
       {.cast(gcsafe).}:
-        try:
-          result = backupDataDir(defaultDbDir, destPath)
-        except CatchableError as e:
-          echo "[raft] Snapshot build failed: ", e.msg
-          result = false
+        # Hold the storage gate while tarring the data dir so a concurrent
+        # memtable flush (HTTP /query path) cannot write an SSTable
+        # mid-archive.
+        withStorageGate:
+          try:
+            result = backupDataDir(defaultDbDir, destPath)
+          except CatchableError as e:
+            echo "[raft] Snapshot build failed: ", e.msg
+            result = false
 
     # Wire RAFT ↔ DistTxn
     wireRaftDistTxn(raftNode, tcpServer)
