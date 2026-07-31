@@ -368,6 +368,8 @@ proc main() =
       raftNode.logMaxEntries = config.raftLogMaxEntries
     if config.raftSnapChunkKb > 0:
       raftNode.snapChunkBytes = config.raftSnapChunkKb * 1024
+    if config.raftPeerStaleMs > 0:
+      raftNode.raftPeerStaleMs = config.raftPeerStaleMs
     tcpServer.raftNode = raftNode  # C3b: executeQuery rejects writes on followers
     httpServer.raftNode = raftNode  # /metrics + /health raft gauges
     # Wire state machine: committed entries update LSM + secondary indexes

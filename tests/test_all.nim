@@ -3338,6 +3338,53 @@ suite "Raft SQL Write Path":
     check n.lastSnapshotIndex == 0
     check n.log.len == 15
 
+  test "leader compactLog unpins from a stale peer (never replied, stale window exceeded)":
+    var n = newRaftNode("n1", @["n2"], raftPort = 29123)
+    n.logMaxEntries = 5
+    n.raftPeerStaleMs = 1000
+    n.becomeLeader()
+    n.matchIndex["n2"] = 0  # peer never caught up
+    # Last successful reply is long past the stale window.
+    n.matchIndexSeenMs["n2"] = getMonoTime().ticks() div 1_000_000 - 60_000
+    for i in 1 .. 15:
+      discard n.appendLog("put", cast[seq[byte]]("x"))
+      n.commitIndex = uint64(i)
+      n.lastApplied = uint64(i)
+    n.compactLog()
+    # Stale peer excluded from minMatch — compaction runs through lastApplied.
+    check n.lastSnapshotIndex == 15
+    check n.log.len == 0
+
+  test "leader compactLog still pins at a recently-responsive peer matchIndex":
+    var n = newRaftNode("n1", @["n2"], raftPort = 29124)
+    n.logMaxEntries = 5
+    n.raftPeerStaleMs = 1000
+    n.becomeLeader()
+    n.matchIndex["n2"] = 3
+    n.matchIndexSeenMs["n2"] = getMonoTime().ticks() div 1_000_000  # just replied
+    for i in 1 .. 15:
+      discard n.appendLog("put", cast[seq[byte]]("x"))
+      n.commitIndex = uint64(i)
+      n.lastApplied = uint64(i)
+    n.compactLog()
+    check n.lastSnapshotIndex == 3
+    check n.log.len == 12
+
+  test "leader compactLog respects grace window for an unreplied peer":
+    var n = newRaftNode("n1", @["n2"], raftPort = 29125)
+    n.logMaxEntries = 5
+    n.raftPeerStaleMs = 30000
+    n.becomeLeader()  # matchIndexSeenMs initialized to now — within grace
+    n.matchIndex["n2"] = 0  # peer has not replied yet
+    for i in 1 .. 15:
+      discard n.appendLog("put", cast[seq[byte]]("x"))
+      n.commitIndex = uint64(i)
+      n.lastApplied = uint64(i)
+    n.compactLog()
+    # Grace window still active — peer pins compaction at matchIndex 0.
+    check n.lastSnapshotIndex == 0
+    check n.log.len == 15
+
   test "appendDdlToRaft fails when node is not leader":
     var n = newRaftNode("n1", @["n2"], raftPort = 29113)
     let (ok, err) = waitFor appendDdlToRaft(n,

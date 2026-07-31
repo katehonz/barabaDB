@@ -45,6 +45,7 @@ type
     raftWriteTimeoutMs*: int
     raftLogMaxEntries*: int
     raftSnapChunkKb*: int
+    raftPeerStaleMs*: int
     raftTlsEnabled*: bool
     raftTlsCertFile*: string
     raftTlsKeyFile*: string
@@ -93,6 +94,7 @@ proc defaultConfig*(): BaraConfig =
     raftWriteTimeoutMs: 5_000,
     raftLogMaxEntries: 256,
     raftSnapChunkKb: 256,
+    raftPeerStaleMs: 30000,
     raftTlsEnabled: false,
     raftTlsCertFile: "",
     raftTlsKeyFile: "",
@@ -226,6 +228,7 @@ proc loadConfigFromEnv*(cfg: var BaraConfig) =
   cfg.raftWriteTimeoutMs = parseEnvInt(getEnv("BARADB_RAFT_WRITE_TIMEOUT_MS", ""), cfg.raftWriteTimeoutMs)
   cfg.raftLogMaxEntries = parseEnvInt(getEnv("BARADB_RAFT_LOG_MAX_ENTRIES", ""), cfg.raftLogMaxEntries)
   cfg.raftSnapChunkKb = parseEnvInt(getEnv("BARADB_RAFT_SNAP_CHUNK_KB", ""), cfg.raftSnapChunkKb)
+  cfg.raftPeerStaleMs = parseEnvInt(getEnv("BARADB_RAFT_PEER_STALE_MS", ""), cfg.raftPeerStaleMs)
   cfg.raftTlsEnabled = parseEnvBool(getEnv("BARADB_RAFT_TLS_ENABLED", ""), cfg.raftTlsEnabled)
   cfg.raftTlsCertFile = getEnv("BARADB_RAFT_TLS_CERT_FILE", cfg.raftTlsCertFile)
   cfg.raftTlsKeyFile = getEnv("BARADB_RAFT_TLS_KEY_FILE", cfg.raftTlsKeyFile)

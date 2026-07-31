@@ -67,6 +67,15 @@ type
     # Leader state
     nextIndex*: Table[string, uint64]
     matchIndex*: Table[string, uint64]
+    ## Monotonic ms of the last successful AppendEntries reply per peer,
+    ## initialized to "now" in becomeLeader (grace window) and bumped in
+    ## handleAppendReply. Leader compaction excludes peers silent longer than
+    ## raftPeerStaleMs from its minMatch — a stale peer no longer pins the log
+    ## forever; it is caught up via InstallSnapshot on return (T9).
+    matchIndexSeenMs*: Table[string, int64]
+    ## Stale window in ms (BARADB_RAFT_PEER_STALE_MS, default 30000;
+    ## 0 = default).
+    raftPeerStaleMs*: int
     # Cluster
     peers*: seq[string]
     leaderId*: string
@@ -219,6 +228,8 @@ proc newRaftNode*(id: string, peers: seq[string], raftPort: int = 0,
     metrics: RaftMetrics(),
     nextIndex: initTable[string, uint64](),
     matchIndex: initTable[string, uint64](),
+    matchIndexSeenMs: initTable[string, int64](),
+    raftPeerStaleMs: 30000,
     peers: peers,
     leaderId: "",
     electionTimeout: 150 + rand(150),
@@ -277,15 +288,22 @@ proc termAtIndex(node: RaftNode, index: uint64): uint64 =
 
 proc compactLog*(node: RaftNode) =
   ## Drop a fully-replicated / applied log prefix so the in-memory log stays
-  ## bounded. Leader: never discard past any peer's matchIndex (catch-up via
-  ## AppendEntries remains possible). Follower: discard through lastApplied.
+  ## bounded. Leader: never discard past any responsive peer's matchIndex
+  ## (catch-up via AppendEntries remains possible); peers silent longer than
+  ## raftPeerStaleMs are excluded and catch up via InstallSnapshot instead.
+  ## Follower: discard through lastApplied.
   let maxEntries = if node.logMaxEntries > 0: node.logMaxEntries else: 256
   if node.log.len <= maxEntries:
     return
   var through = node.lastApplied
   if node.state == rsLeader and node.peers.len > 0:
+    let staleMs = if node.raftPeerStaleMs > 0: node.raftPeerStaleMs else: 30000
+    let nowMs = getMonoTime().ticks() div 1_000_000
     var minMatch = through
     for peer in node.peers:
+      let seenMs = node.matchIndexSeenMs.getOrDefault(peer, 0)
+      if seenMs <= 0 or nowMs - seenMs > staleMs.int64:
+        continue  # stale peer — unpinned, snapshotted on return (T9)
       let m = node.matchIndex.getOrDefault(peer, 0'u64)
       if m < minMatch: minMatch = m
     through = minMatch
@@ -346,6 +364,7 @@ proc becomeFollower*(node: RaftNode, term: uint64) =
   node.votesReceived.clear()
   node.nextIndex.clear()
   node.matchIndex.clear()
+  node.matchIndexSeenMs.clear()
   # Leader-only snapshot-send state is meaningless once we step down
   node.snapRejectStreak.clear()
   node.snapPending.clear()
@@ -367,9 +386,14 @@ proc becomeLeader*(node: RaftNode) =
   if node.metrics != nil:
     inc node.metrics.electionsTotal
   info("Raft node " & node.id & " became leader for term " & $node.currentTerm)
+  let nowMs = getMonoTime().ticks() div 1_000_000
+  node.matchIndexSeenMs.clear()
   for peer in node.peers:
     node.nextIndex[peer] = node.lastLogIndex + 1
     node.matchIndex[peer] = 0
+    # Grace window: an unreplied peer still pins compaction until it has been
+    # silent for raftPeerStaleMs since this leadership began.
+    node.matchIndexSeenMs[peer] = nowMs
   node.snapRejectStreak.clear()
   node.snapPending.clear()
 
@@ -618,6 +642,7 @@ proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
   if reply.success:
     node.matchIndex[peerId] = reply.matchIdx
     node.nextIndex[peerId] = reply.matchIdx + 1
+    node.matchIndexSeenMs[peerId] = getMonoTime().ticks() div 1_000_000
     node.snapRejectStreak.del(peerId)
     node.snapPending.excl(peerId)
 
