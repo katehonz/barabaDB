@@ -2,6 +2,31 @@
 
 All notable changes to BaraDB are documented in this file.
 
+## [1.3.0] — 2026-07-30
+
+### Raft cluster — Supported (single `default` DB scope)
+
+Raft 3-node moves from **Experimental** to **Supported** for the covered scope; single-node remains Production GA. Spec/plan: `docs/superpowers/specs/2026-07-30-raft-supported-design.md`, `docs/superpowers/plans/2026-07-30-v1.3.0-raft-supported.md`.
+
+- **Failover under load proven** — `tests/raft_failover_load_e2e_test.nim`: sustained INSERT load, leader killed at ≥ 50 acked writes; every **acknowledged** write survives on both survivors. Client contract: in-flight writes during failover fail fast with an error — clients must retry ([distributed.md](docs/en/distributed.md))
+- **Mandatory CI gate** — dedicated `raft-e2e` GitHub Actions job runs all five raft e2e suites; a missing server binary is a hard FAIL under CI (no silent skip)
+- **Raft-port TLS** — `BARADB_RAFT_TLS_ENABLED` + `BARADB_RAFT_TLS_CERT_FILE` / `BARADB_RAFT_TLS_KEY_FILE` / `BARADB_RAFT_TLS_CA_FILE` / `BARADB_RAFT_TLS_VERIFY_PEER`; fail-closed startup when cert/key is missing; optional mutual auth; follower→leader SQL forwarding is TLS-wrapped when the client port is. E2E `tests/raft_tls_e2e_test.nim` (full-TLS cluster works; plaintext node excluded)
+- **InstallSnapshot cold-node recovery** — backward-compatible wire protocol (`RaftProtoVersion` stays 1); the leader streams a `tar.gz` snapshot of the default DB in chunks of `BARADB_RAFT_SNAP_CHUNK_KB` KiB (default 256) to peers whose lag is unrecoverable; the follower restores via the backup/restore path and resumes from the snapshot base. Leader compaction unpins from peers stale beyond `BARADB_RAFT_PEER_STALE_MS` (default 30000). E2E `tests/raft_coldnode_e2e_test.nim` (returning node and wiped node converge automatically)
+
+### Fixes
+
+- **Raft put/delete encoding** — `ExecResult.keyValuePairs` carries an explicit `deleted` flag; an INSERT into a PK-only table (empty value) is no longer encoded as a `delete` and erased on apply; regression tests in `tests/bugfix_test.nim`
+- **Rejoin livelock** — on leadership acquisition the leader drops cached peer sockets; half-dead sockets to a restarted peer previously never errored, so no redial ever happened and the cluster livelocked without heartbeats
+- **Post-restore ctx repoint** — after an InstallSnapshot restore, the TCP serving ctx/db is repointed at the reopened database (queries previously read the closed pre-restore LSM and served 0 rows). Remaining limitation for startup-captured HTTP ctx: see [known-limitations](docs/en/known-limitations.md)
+- **Intermediate InstallSnapshot chunk replies ignored** — the leader acts only on the final chunk reply
+
+### Release
+
+- `baradadb.nimble` → `1.3.0`; `/health` and startup version strings updated
+- Docs: [distributed](docs/en/distributed.md) (failover contract, raft TLS setup, snapshot tunables), [known-limitations](docs/en/known-limitations.md) (raft supported scope + two newly documented limitations), [release-checklist](docs/en/release-checklist.md)
+
+---
+
 ## [1.2.0] — 2026-07-30
 
 ### Production GA (single-node)

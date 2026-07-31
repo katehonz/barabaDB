@@ -1576,7 +1576,7 @@ features are still being refined:
 | LSM-Tree SSTable reads | ✅ Implemented | Full disk I/O with compaction, WAL, and bloom filters. |
 | HNSW vector search | ✅ Implemented | Hierarchical graph navigation with SIMD-optimized distance metrics. |
 | TCP server execution | ✅ Implemented | Full binary wire protocol parsing and BaraQL query execution. |
-| Raft consensus | ⚡ Experimental cluster | TCP election + SQL/DDL via log; single-node is **Production GA**. See `docs/en/known-limitations.md`. |
+| Raft consensus | ✅ Supported (3-node, `default` DB) | TCP election + SQL/DDL via log; failover under load, raft TLS, InstallSnapshot recovery e2e-proven. See `docs/en/known-limitations.md`. |
 | Graph / FTS / Columnar | ✅ Implemented | In-memory engines with serialization; FTS/vector/graph indexes persist across restarts. |
 | Query codegen | ✅ Implemented | IR plans compile to storage engine operations with optimization passes. |
 
@@ -1585,10 +1585,10 @@ reflects 100% completion across all major phases.
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for full release history. Package version is **v1.2.0**.
+See [CHANGELOG.md](CHANGELOG.md) for full release history. Package version is **v1.3.0**.
 
+- **Raft multi-node supported (v1.3.0):** failover under load, mandatory CI gate, raft TLS, InstallSnapshot cold-node recovery — [distributed.md](docs/en/distributed.md), [known-limitations](docs/en/known-limitations.md)
 - **Production GA (single-node):** auth-on prod compose, backup/restore drill, runbook — [known-limitations](docs/en/known-limitations.md), [deployment](docs/en/deployment.md)
-- **Raft multi-node:** experimental — [distributed.md](docs/en/distributed.md)
 
 ## License
 
