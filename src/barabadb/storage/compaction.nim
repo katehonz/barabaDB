@@ -125,13 +125,16 @@ proc compact*(cs: CompactionStrategy, level: int): CompactionResult =
     return cmp(b.timestamp, a.timestamp)  # newest first
   )
 
-  # Deduplicate: keep only the newest version of each key
+  # Deduplicate: keep only the newest version of each key.
+  # Use a haveLast flag — sentinel lastKey="" would skip the empty-string key.
   var merged: seq[Entry] = @[]
   var lastKey = ""
+  var haveLast = false
   for entry in allEntries:
-    if entry.key != lastKey:
+    if not haveLast or entry.key != lastKey:
       merged.add(entry)
       lastKey = entry.key
+      haveLast = true
 
   # Keep tombstones to prevent deleted keys from resurrecting in lower levels
   var final: seq[Entry] = @[]

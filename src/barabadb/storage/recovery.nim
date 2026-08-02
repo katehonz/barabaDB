@@ -68,6 +68,7 @@ proc scanWAL*(rec: CrashRecovery): seq[RecoveredEntry] =
   var txnId: uint64 = 0
   var entryCount = 0
 
+  const MaxWalRecordField = 64 * 1024 * 1024  # 64 MB
   while not stream.atEnd():
     var kind: uint8 = 0
     var timestamp: uint64 = 0
@@ -77,12 +78,15 @@ proc scanWAL*(rec: CrashRecovery): seq[RecoveredEntry] =
     if stream.readData(addr kind, 1) != 1: break
     if stream.readData(addr timestamp, 8) != 8: break
     if stream.readData(addr keyLen, 4) != 4: break
+    if keyLen.int > MaxWalRecordField: break
+    if kind < uint8(wekPut) or kind > uint8(wekCommit): break
 
     var key = newString(keyLen.int)
     if keyLen > 0:
       if stream.readData(addr key[0], keyLen.int) != keyLen.int: break
 
     if stream.readData(addr valLen, 4) != 4: break
+    if valLen.int > MaxWalRecordField: break
     var value = newSeq[byte](valLen.int)
     if valLen > 0:
       if stream.readData(addr value[0], valLen.int) != valLen.int: break

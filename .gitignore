@@ -71,5 +71,6 @@ src/barabadb/storage/lsm
 src/barabadb/storage/wal
 src/barabadb/storage/btree
 src/barabadb/storage/gate
+src/barabadb/protocol/scram
 clients/nim/tests/test_pool
 clients/nim/tests/test_wire

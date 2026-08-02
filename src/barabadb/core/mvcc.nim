@@ -178,12 +178,16 @@ proc write*(tm: TxnManager, txn: Transaction, key: string, value: seq[byte]): bo
     return false
 
   # Timeout-based deadlock detection: abort stale transactions
+  # Collect then delete — never mutate activeTxns while iterating it.
   let now = getMonoTime().ticks()
+  var staleIds: seq[TxnId] = @[]
   for otherId, otherTxn in tm.activeTxns:
     if otherId != txn.id and otherTxn.state == tsActive:
       if now - otherTxn.startTime > tm.txnTimeoutMs * 1_000_000:
         otherTxn.state = tsAborted
-        tm.activeTxns.del(otherId)
+        staleIds.add(otherId)
+  for id in staleIds:
+    tm.activeTxns.del(id)
 
   # Check for write-write conflict against other active transactions' write sets
   for otherId, otherTxn in tm.activeTxns:

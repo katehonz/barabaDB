@@ -163,7 +163,9 @@
 
 **Батч 1 — поправени (5):** MIGRATE auth bypass (CRITICAL), raft commit strict-majority за even-N (CRITICAL), pre-auth wire-length DoS (HIGH), `**`/`++` lowering към equality (HIGH), `!=` не е отрицание на `=` (HIGH).
 
-**Остават (~23):** вж. `BUG_AUDIT_2026-08.md` — TLS peer verify, semi-sync partial-ack, COUNT(DISTINCT), UNION/INTERSECT/EXCEPT crash, MERGE THEN DELETE, WAL recovery crash, B-tree separator convention, MVCC delete-during-iteration, disttxn SO_ERROR, checkpoint lock leak, flushUnsafe data-loss, compaction empty-key, wal rewriteLive window, OFFSET-без-LIMIT, window агрегати, WebSocket (3), SCRAM (2), mmap overflow.
+**Батч 2 — поправени (12):** semi-sync partial-ack (H3), COUNT/SUM/AVG(DISTINCT) (H6), UNION/INTERSECT/EXCEPT (H7), MERGE THEN DELETE (H8), WAL torn-record recovery (H9), MVCC write iteration (M1), checkpoint lock leak (M3), flushUnsafe order (M4), compaction empty-key (M5), rewriteLive atomic replace (M6), mmap overflow (L3), stray `protocol/scram` ELF.
+
+**Остават (~12):** вж. `BUG_AUDIT_2026-08.md` — TLS peer verify (H2), B-tree separator (H10, needs careful repro), disttxn SO_ERROR (M2), compaction catalog order (M7), OFFSET-без-LIMIT (M8), window агрегати (M9), WebSocket (M10–M12), SCRAM (L1–L2), NULL equality (L4).
 
 ---
 
@@ -179,7 +181,7 @@
 | **Този план** — Сесии 10, 11, 12 | ✅ Завършен |
 | Raft C3a/C3b + DDL/forward/compact/metrics (2026-07-30) | ✅ Завършен на `main` — `docs/superpowers/specs/2026-07-30-raft-cluster-status.md` |
 | **Production GA v1.2.0** (single-node) | ✅ `docs/superpowers/plans/2026-07-30-production-ga.md` |
-| **Сесия 13** — Stabilization & Deep Audit (2026-08) | 🔄 В процес — батч 1 завършен (5 поправки); `BUG_AUDIT_2026-08.md` |
+| **Сесия 13** — Stabilization & Deep Audit (2026-08) | 🔄 В процес — батч 1+2 (17 поправки); остават ~12; `BUG_AUDIT_2026-08.md` |
 
 ---
 

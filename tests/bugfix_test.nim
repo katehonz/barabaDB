@@ -625,3 +625,99 @@ suite "Query operator correctness — audit batch 1":
     let neq = executeQuery(ctx, parse("SELECT * FROM users WHERE id != 1.0"))
     check eq.rows.len == 1   # 1 = 1.0 -> true
     check neq.rows.len == 0  # 1 != 1.0 -> false (old bug returned the row)
+
+
+suite "Query correctness — audit batch 2":
+
+  test "COUNT(DISTINCT) deduplicates values":
+    ## Regression: funcDistinct was parsed but never copied to aggDistinct /
+    ## never consulted during aggregation.
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'alice')"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (2, 'bob')"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (3, 'alice')"))
+    let r = executeQuery(ctx, parse("SELECT COUNT(DISTINCT name) AS c FROM users"))
+    check r.success
+    check r.rows.len == 1
+    check valueToString(r.rows[0]["c"]) == "2"
+
+  test "SUM(DISTINCT) sums unique values only":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'a')"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (2, 'b')"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (5, 'c')"))
+    # ids 1, 2, 5 — insert another row with id-like values via a number col
+    discard executeQuery(ctx, parse("CREATE TABLE nums (id INTEGER PRIMARY KEY, n INTEGER)"))
+    discard executeQuery(ctx, parse("INSERT INTO nums (id, n) VALUES (1, 10)"))
+    discard executeQuery(ctx, parse("INSERT INTO nums (id, n) VALUES (2, 10)"))
+    discard executeQuery(ctx, parse("INSERT INTO nums (id, n) VALUES (3, 20)"))
+    let r = executeQuery(ctx, parse("SELECT SUM(DISTINCT n) AS s FROM nums"))
+    check r.success
+    check r.rows.len == 1
+    check parseFloat(valueToString(r.rows[0]["s"])) == 30.0
+
+  test "UNION deduplicates without KeyError":
+    ## Regression: set-op dedup used row["$value"] which projected rows lack.
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'alice')"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (2, 'bob')"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (3, 'alice')"))
+    let r = executeQuery(ctx, parse(
+      "SELECT name FROM users WHERE id = 1 UNION SELECT name FROM users WHERE id = 3"))
+    check r.success
+    check r.rows.len == 1
+    check valueToString(r.rows[0]["name"]) == "alice"
+
+  test "INTERSECT returns common rows":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'alice')"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (2, 'bob')"))
+    let r = executeQuery(ctx, parse(
+      "SELECT name FROM users WHERE id <= 2 INTERSECT SELECT name FROM users WHERE id = 1"))
+    check r.success
+    check r.rows.len == 1
+    check valueToString(r.rows[0]["name"]) == "alice"
+
+  test "EXCEPT removes right-side rows":
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'alice')"))
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (2, 'bob')"))
+    let r = executeQuery(ctx, parse(
+      "SELECT name FROM users EXCEPT SELECT name FROM users WHERE id = 1"))
+    check r.success
+    check r.rows.len == 1
+    check valueToString(r.rows[0]["name"]) == "bob"
+
+  test "MERGE WHEN MATCHED THEN DELETE removes the row":
+    ## Regression: mergeMatchedDelete was parsed but never executed.
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("CREATE TABLE inv (id INTEGER PRIMARY KEY, qty INTEGER)"))
+    discard executeQuery(ctx, parse("INSERT INTO inv (id, qty) VALUES (1, 10)"))
+    discard executeQuery(ctx, parse("INSERT INTO inv (id, qty) VALUES (2, 20)"))
+    discard executeQuery(ctx, parse("CREATE TABLE deltas (id INTEGER PRIMARY KEY, qty INTEGER)"))
+    discard executeQuery(ctx, parse("INSERT INTO deltas (id, qty) VALUES (1, 0)"))
+    let r = executeQuery(ctx, parse("""
+      MERGE INTO inv AS t
+      USING deltas AS s
+      ON t.id = s.id
+      WHEN MATCHED THEN DELETE
+    """))
+    check r.success
+    check r.affectedRows >= 1
+    let left = executeQuery(ctx, parse("SELECT id FROM inv ORDER BY id"))
+    check left.success
+    check left.rows.len == 1
+    check valueToString(left.rows[0]["id"]) == "2"
+
+  test "semi-sync writeLsn returns 0 when replicas do not ack":
+    var rm = newReplicationManager(rmSemiSync, syncCount = 1)
+    rm.addReplica(newReplica("r1", "10.0.0.1", 9472))
+    rm.connectReplica("r1")
+    let lsn = rm.writeLsn(@[1'u8, 2, 3])
+    check lsn == 0

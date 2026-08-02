@@ -122,6 +122,7 @@ proc lowerExpr*(node: Node): IRExpr =
       else: discard
       result.aggArgs = @[]
       for arg in node.funcArgs: result.aggArgs.add(lowerExpr(arg))
+      result.aggDistinct = node.funcDistinct
       if node.funcFilter != nil:
         result.aggFilter = lowerExpr(node.funcFilter)
     else:

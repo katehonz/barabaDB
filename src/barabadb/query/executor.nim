@@ -448,6 +448,26 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
     if cols.len == 0:
       cols = rightRes.columns
 
+    # Fingerprint a projected row for set-op dedup. Prefer declared columns;
+    # fall back to non-system keys so UNION/INTERSECT/EXCEPT work without `$value`.
+    proc setOpRowKey(row: Row, colNames: seq[string]): string =
+      var parts: seq[string] = @[]
+      if colNames.len > 0:
+        for c in colNames:
+          if c in row:
+            parts.add(valueToString(row[c]))
+          else:
+            parts.add("")
+      else:
+        var keys: seq[string] = @[]
+        for k, _ in row:
+          if not k.startsWith("$"):
+            keys.add(k)
+        keys.sort()
+        for k in keys:
+          parts.add(k & "=" & valueToString(row[k]))
+      return parts.join("\x1f")
+
     var rows: seq[Row] = @[]
     case stmt.setOpKind
     of sdkUnion:
@@ -460,28 +480,30 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         # UNION: deduplicate
         var seen: Table[string, bool]
         for row in leftRes.rows:
-          seen[valueToString(row["$value"])] = true
+          seen[setOpRowKey(row, cols)] = true
         for row in rightRes.rows:
-          if not seen.getOrDefault(valueToString(row["$value"]), false):
-            seen[valueToString(row["$value"])] = true
+          let k = setOpRowKey(row, cols)
+          if not seen.getOrDefault(k, false):
+            seen[k] = true
             rows.add(row)
 
     of sdkIntersect:
       var leftSet: Table[string, bool]
       for row in leftRes.rows:
-        leftSet[valueToString(row["$value"])] = true
+        leftSet[setOpRowKey(row, cols)] = true
       for row in rightRes.rows:
-        if leftSet.getOrDefault(valueToString(row["$value"]), false):
+        let k = setOpRowKey(row, cols)
+        if leftSet.getOrDefault(k, false):
           rows.add(row)
           if not stmt.setOpAll:
-            leftSet.del(valueToString(row["$value"]))  # remove to prevent duplicates for INTERSECT (not ALL)
+            leftSet.del(k)  # remove to prevent duplicates for INTERSECT (not ALL)
 
     of sdkExcept:
       var rightSet: Table[string, bool]
       for row in rightRes.rows:
-        rightSet[valueToString(row["$value"])] = true
+        rightSet[setOpRowKey(row, cols)] = true
       for row in leftRes.rows:
-        if not rightSet.getOrDefault(valueToString(row["$value"]), false):
+        if not rightSet.getOrDefault(setOpRowKey(row, cols), false):
           rows.add(row)
 
     return okResult(rows, cols)
@@ -759,21 +781,34 @@ proc executeQueryImpl(ctx: ExecutionContext, astNode: Node, params: seq[WireValu
         let onExpr = lowerExpr(stmt.mergeOn)
         if valueToString(evalExpr(onExpr, rowWithTarget, ctx)) == "true":
           matched = true
-          if stmt.mergeMatchedUpdate.len > 0 and "$key" in tgtRow:
-            var updateSets = initTable[string, string]()
-            for s in stmt.mergeMatchedUpdate:
-              if s.kind == nkBinOp and s.binOp == bkAssign:
-                if s.binLeft.kind == nkIdent:
-                  let valExpr = lowerExpr(s.binRight)
-                  updateSets[s.binLeft.identName] = valueToString(evalExpr(valExpr, rowWithTarget, ctx))
-            var newRow = tgtRow
-            for col, val in updateSets:
-              newRow[col] = Value(kind: vkString, strVal: val)
-            fireTriggers(ctx, stmt.mergeTarget, "before", "update", tgtRow)
-            count += execUpdateRow(ctx, stmt.mergeTarget, valueToString(tgtRow["$key"]), updateSets, kvPairs)
-            fireTriggers(ctx, stmt.mergeTarget, "after", "update", newRow)
-            if ctx.onChange != nil:
-              ctx.onChange(ChangeEvent(table: stmt.mergeTarget, kind: ckUpdate, key: valueToString(tgtRow["$key"]), data: ""))
+          # Optional AND <condition> after WHEN MATCHED
+          var applyMatched = true
+          if stmt.mergeMatchedCondition != nil:
+            let condExpr = lowerExpr(stmt.mergeMatchedCondition)
+            applyMatched = valueToString(evalExpr(condExpr, rowWithTarget, ctx)) == "true"
+          if applyMatched and "$key" in tgtRow:
+            if stmt.mergeMatchedDelete:
+              fireTriggers(ctx, stmt.mergeTarget, "before", "delete", tgtRow)
+              count += execDelete(ctx, stmt.mergeTarget, valueToString(tgtRow["$key"]), kvPairs)
+              fireTriggers(ctx, stmt.mergeTarget, "after", "delete", tgtRow)
+              if ctx.onChange != nil:
+                ctx.onChange(ChangeEvent(table: stmt.mergeTarget, kind: ckDelete,
+                  key: valueToString(tgtRow["$key"]), data: ""))
+            elif stmt.mergeMatchedUpdate.len > 0:
+              var updateSets = initTable[string, string]()
+              for s in stmt.mergeMatchedUpdate:
+                if s.kind == nkBinOp and s.binOp == bkAssign:
+                  if s.binLeft.kind == nkIdent:
+                    let valExpr = lowerExpr(s.binRight)
+                    updateSets[s.binLeft.identName] = valueToString(evalExpr(valExpr, rowWithTarget, ctx))
+              var newRow = tgtRow
+              for col, val in updateSets:
+                newRow[col] = Value(kind: vkString, strVal: val)
+              fireTriggers(ctx, stmt.mergeTarget, "before", "update", tgtRow)
+              count += execUpdateRow(ctx, stmt.mergeTarget, valueToString(tgtRow["$key"]), updateSets, kvPairs)
+              fireTriggers(ctx, stmt.mergeTarget, "after", "update", newRow)
+              if ctx.onChange != nil:
+                ctx.onChange(ChangeEvent(table: stmt.mergeTarget, kind: ckUpdate, key: valueToString(tgtRow["$key"]), data: ""))
           break
 
       if not matched and stmt.mergeNotMatchedInsert.len > 0:

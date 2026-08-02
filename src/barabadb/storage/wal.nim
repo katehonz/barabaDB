@@ -326,8 +326,9 @@ proc rewriteLive*(wal: var WriteAheadLog,
 
   if wal.stream != nil:
     wal.stream.close()
-  if fileExists(wal.path):
-    removeFile(wal.path)
+    wal.stream = nil
+  # Atomic replace: moveFile overwrites the destination on POSIX rename(2).
+  # Do not removeFile first — a crash between unlink and rename would lose the WAL.
   moveFile(tmpPath, wal.path)
   wal.stream = newFileStream(wal.path, fmAppend)
   if wal.stream == nil:
@@ -363,6 +364,7 @@ proc readEntries*(walPath: string, untilTimestamp: uint64 = 0): seq[WalEntry] =
     if s.readData(addr magic, 4) != 4: return
     if s.readData(addr version, 4) != 4: return
     if magic != WALMagic: return
+    const MaxWalRecordField = 64 * 1024 * 1024  # 64 MB
     while not s.atEnd:
       var kind: uint8
       if s.readData(addr kind, 1) != 1: break
@@ -372,11 +374,14 @@ proc readEntries*(walPath: string, untilTimestamp: uint64 = 0): seq[WalEntry] =
         break
       var keyLen: uint32
       if s.readData(addr keyLen, 4) != 4: break
+      if keyLen.int > MaxWalRecordField: break
+      if kind < uint8(wekPut) or kind > uint8(wekCommit): break
       var key = newSeq[byte](keyLen)
       if keyLen > 0:
         if s.readData(addr key[0], int(keyLen)) != int(keyLen): break
       var valLen: uint32
       if s.readData(addr valLen, 4) != 4: break
+      if valLen.int > MaxWalRecordField: break
       var value = newSeq[byte](valLen)
       if valLen > 0:
         if s.readData(addr value[0], int(valLen)) != int(valLen): break

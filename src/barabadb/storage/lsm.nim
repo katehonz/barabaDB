@@ -696,6 +696,10 @@ proc newLSMTree*(
         var version: uint32 = 0
         if stream.readData(addr magic, 4) == 4 and magic == WALMagic:
           if stream.readData(addr version, 4) == 4:
+            # Cap per-record sizes to avoid multi-GiB alloc on torn/corrupt WAL.
+            # Kind must be a known WalEntryKind value (1..4) — out-of-range casts
+            # raise CaseStmtError (Defect) and crash the process.
+            const MaxWalRecordField = 64 * 1024 * 1024  # 64 MB
             while not stream.atEnd():
               var kind: uint8 = 0
               var timestamp: uint64 = 0
@@ -704,10 +708,20 @@ proc newLSMTree*(
               if stream.readData(addr kind, 1) != 1: break
               if stream.readData(addr timestamp, 8) != 8: break
               if stream.readData(addr keyLen, 4) != 4: break
+              if keyLen.int > MaxWalRecordField:
+                echo "[WARN] WAL recovery: torn/corrupt record (keyLen=", keyLen, ") — stopping replay"
+                break
+              # Validate kind before allocating or branching (avoids CaseStmtError Defect)
+              if kind < uint8(wekPut) or kind > uint8(wekCommit):
+                echo "[WARN] WAL recovery: invalid entry kind ", kind, " — stopping replay"
+                break
               var key = newString(keyLen.int)
               if keyLen > 0:
                 if stream.readData(addr key[0], keyLen.int) != keyLen.int: break
               if stream.readData(addr valLen, 4) != 4: break
+              if valLen.int > MaxWalRecordField:
+                echo "[WARN] WAL recovery: torn/corrupt record (valLen=", valLen, ") — stopping replay"
+                break
               var value = newSeq[byte](valLen.int)
               if valLen > 0:
                 if stream.readData(addr value[0], valLen.int) != valLen.int: break
@@ -866,25 +880,35 @@ proc flushUnsafe(db: LSMTree) =
   if db.immutableMem.len == 0 and db.memTable.len == 0:
     return
 
-  # Flush immutable memtable if present, otherwise flush current memtable
-  var toFlush = db.immutableMem
-  if toFlush.len == 0:
-    toFlush = db.memTable
-    db.memTable = newMemTable(db.memMaxSize)
+  # Flush immutable memtable if present, otherwise flush current memtable.
+  # Do NOT clear the source memtable until the SSTable is written — an IOError
+  # mid-write must leave the data still visible to live reads (WAL still has it).
+  var flushingImmutable = false
+  var toFlush: MemTable
+  if db.immutableMem.len > 0:
+    toFlush = db.immutableMem
+    flushingImmutable = true
   else:
-    db.immutableMem = newMemTable(0)
+    toFlush = db.memTable
 
   if toFlush.len == 0:
     return
 
   let path = db.dir / "sstables" / ($db.nextSSTableId & ".sst")
+  let sstId = db.nextSSTableId
   inc db.nextSSTableId
 
   # Sort once at flush time (O(n log n)) — put/get stay O(1)
   var sst = writeSSTable(toFlush.sortedEntries(), path, level = 0)
-  sst.id = db.nextSSTableId - 1
+  sst.id = sstId
   db.sstables.add(sst)
   # SSTables are kept in insertion order (newest last) so getUnsafe can search newest-first
+
+  # Only now drop the in-memory copy — SSTable is durable on disk
+  if flushingImmutable:
+    db.immutableMem = newMemTable(0)
+  else:
+    db.memTable = newMemTable(db.memMaxSize)
 
   # Update MANIFEST atomically
   inc db.manifestSequence
@@ -930,27 +954,29 @@ proc checkpoint*(db: LSMTree) =
   ## rotate WAL, and write MANIFEST. This provides a clean boundary
   ## for online backup without stopping the server.
   acquireWrite(db.lock)
+  try:
+    # Flush any pending immutable memtable first
+    if db.immutableMem.len > 0:
+      flushUnsafe(db)
 
-  # Flush any pending immutable memtable first
-  if db.immutableMem.len > 0:
-    flushUnsafe(db)
+    # Freeze current memtable so writes can continue on a new one
+    if db.memTable.len > 0:
+      db.immutableMem = db.memTable
+      db.memTable = newMemTable(db.memMaxSize)
 
-  # Freeze current memtable so writes can continue on a new one
-  if db.memTable.len > 0:
-    db.immutableMem = db.memTable
-    db.memTable = newMemTable(db.memMaxSize)
+    # Flush the frozen memtable
+    if db.immutableMem.len > 0:
+      flushUnsafe(db)
 
-  # Flush the frozen memtable
-  if db.immutableMem.len > 0:
-    flushUnsafe(db)
-
-  # Rotate WAL for a clean backup boundary
-  acquire(db.walLock)
-  db.wal.maybeRotate()
-  db.wal.sync()
-  release(db.walLock)
-
-  releaseWrite(db.lock)
+    # Rotate WAL for a clean backup boundary
+    acquire(db.walLock)
+    try:
+      db.wal.maybeRotate()
+      db.wal.sync()
+    finally:
+      release(db.walLock)
+  finally:
+    releaseWrite(db.lock)
 
 proc close*(db: LSMTree) =
   acquireWrite(db.lock)

@@ -1659,14 +1659,28 @@ suite "Replication":
     rm.connectReplica("r2")
     rm.connectReplica("r3")
 
+    # Unreachable replicas cannot ack — semi-sync must fail closed (return 0)
     let lsn = rm.writeLsn(@[1'u8])
-    check not rm.isFullyAcked(lsn)  # needs 2 acks
+    check lsn == 0
 
-    rm.ackLsn("r1", lsn)
-    check not rm.isFullyAcked(lsn)  # still needs 1 more
+    # No connected replicas → nothing to wait for; write succeeds
+    var rm2 = newReplicationManager(rmSemiSync, syncCount = 2)
+    rm2.addReplica(newReplica("r1", "10.0.0.1", 9472))
+    # not connected
+    let lsn2 = rm2.writeLsn(@[1'u8])
+    check lsn2 > 0
+    check rm2.isFullyAcked(lsn2)
 
-    rm.ackLsn("r2", lsn)
-    check rm.isFullyAcked(lsn)  # 2 acks received
+    # ackLsn bookkeeping still clears pendingAcks at the required quorum
+    var rm3 = newReplicationManager(rmSemiSync, syncCount = 2)
+    rm3.pendingAcks[1'u64] = initHashSet[string]()
+    rm3.pendingAcks[1'u64].incl("r1")
+    rm3.pendingAcks[1'u64].incl("r2")
+    check not rm3.isFullyAcked(1)
+    rm3.ackLsn("r1", 1)
+    check not rm3.isFullyAcked(1)
+    rm3.ackLsn("r2", 1)
+    check rm3.isFullyAcked(1)
 
   test "Replica status":
     var rm = newReplicationManager(rmAsync)

@@ -14,13 +14,28 @@ All notable changes to BaraDB are documented in this file.
 - **Raft commit quorum (CRITICAL)** — commit now requires a strict majority (`N div 2 + 1`), matching the election check; the previous `(N+1) div 2` formula committed at a minority for even-sized clusters (`core/raft.nim`)
 - **`**` / `++` operators (HIGH)** — power and concat are no longer lowered to equality: `2 ** 3` → 8, `'a' ++ 'b'` → `'ab'` (`query/exec/lower.nim`)
 - **`!=` semantics (HIGH)** — `!=` is now the exact complement of `=` for numerically-equal values (`5 != 5.0` is false) (`query/exec/eval.nim`)
+- **Semi-sync partial ack (HIGH)** — `writeLsn` in `rmSemiSync` returns `0` when connected replicas fail to meet `syncReplicaCount`; zero connected peers still succeed local-only (like sync) (`core/replication.nim`)
+- **`COUNT/SUM/AVG(DISTINCT …)` (HIGH)** — `funcDistinct` is copied to `aggDistinct` and applied via `HashSet` dedup in aggregate paths (`query/exec/lower.nim`, `plan_exec.nim`)
+- **`UNION` / `INTERSECT` / `EXCEPT` (HIGH)** — set-op dedup fingerprints projected columns instead of missing `row["$value"]` (KeyError crash) (`query/executor.nim`)
+- **`MERGE … WHEN MATCHED THEN DELETE` (HIGH)** — executor honors `mergeMatchedDelete` and optional `mergeMatchedCondition` (`query/executor.nim`)
+- **WAL recovery torn records (HIGH)** — recovery bounds key/value to 64 MB and rejects out-of-range entry kinds before enum cast (avoids multi-GiB alloc / `CaseStmtError` Defect) (`storage/lsm.nim`, `wal.nim`, `recovery.nim`)
+- **MVCC `write` timeout cleanup** — stale active transactions are collected then deleted (no mutation during `activeTxns` iteration) (`core/mvcc.nim`)
+- **`checkpoint` lock leak** — write lock and `walLock` released in `try/finally` (`storage/lsm.nim`)
+- **`flushUnsafe` data-loss window** — memtable is cleared only after a successful SSTable write (`storage/lsm.nim`)
+- **Compaction empty-string key** — dedup uses a `haveLast` flag so key `""` is not skipped (`storage/compaction.nim`)
+- **`rewriteLive` crash window** — atomic `moveFile` replace only (no `removeFile` before rename) (`storage/wal.nim`)
+- **mmap OOB on overflow** — length checks use `offset > size - length` instead of wrapping `offset + size` (`storage/mmap.nim`)
 - **REP replication put/delete encoding** — the legacy REP payload carries an explicit op tag so PK-only inserts (empty value) replicate as puts instead of vanishing as deletes (`core/replication.nim`, `core/server.nim`)
 - **REP receiver secondary indexes** — the legacy REP receiver applies via `applyReplicatedPut/Delete` under the storage gate, keeping B-tree/FTS/HNSW/graph indexes consistent on the replica (`core/server.nim`)
 - **Snapshot send stall (partial)** — the leader's snapshot send runs gzip off the event loop on a worker thread (`gzipFileAsync`), so heartbeats keep firing during compression; tar (send) and the restore path still run on the loop (`core/backup.nim`, `core/raft.nim`)
 
+### Removed
+
+- Stray compiled ELF `src/barabadb/protocol/scram` from the source tree (added to `.gitignore`)
+
 ### Added
 
-- Deep audit report `BUG_AUDIT_2026-08.md` (~28 findings; 5 fixed in this batch, 23 tracked)
+- Deep audit report `BUG_AUDIT_2026-08.md` (~28 findings; 17 fixed across batches 1–2, ~12 tracked)
 
 ---
 

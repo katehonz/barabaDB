@@ -213,10 +213,18 @@ proc writeLsn*(rm: ReplicationManager, data: seq[byte]): uint64 =
         rm.pendingAcks[lsn].excl(id)
       if rm.pendingAcks[lsn].len == 0:
         rm.pendingAcks.del(lsn)
+    # Semi-sync requires at least syncReplicaCount acks when replicas are
+    # connected. With zero connected peers (nothing to ship) the write is
+    # local-only — same as sync mode with an empty replica set.
+    if rm.syncReplicaCount > 0 and replicasToShip.len > 0 and
+       ackCount < rm.syncReplicaCount:
+      # Drop the LSN from pendingAcks — write is not durable
+      rm.pendingAcks.del(lsn)
+      release(rm.lock)
+      echo "[ERROR] Semi-sync replication failed: only ", ackCount, "/",
+           rm.syncReplicaCount, " replicas acked for LSN ", lsn
+      return 0
     release(rm.lock)
-    if replicasToShip.len > 0 and ackCount == 0 and rm.syncReplicaCount > 0:
-      when defined(debug):
-        echo "Replication semi-sync: no replicas acked for LSN ", lsn
     return lsn
 
 proc ackLsn*(rm: ReplicationManager, replicaId: string, lsn: uint64) =

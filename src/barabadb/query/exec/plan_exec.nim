@@ -5,6 +5,7 @@
 ## executor split). Pure code motion — no behavior changes.
 import std/strutils
 import std/tables
+import std/sets
 import std/sequtils
 import std/algorithm
 import ../ir
@@ -18,6 +19,19 @@ import helpers
 import eval
 import scan
 import window
+
+# ----------------------------------------------------------------------
+# Aggregate DISTINCT helpers
+# ----------------------------------------------------------------------
+
+proc shouldKeepDistinct(seen: var HashSet[string], s: string, doDistinct: bool): bool =
+  ## Returns true if `s` should be counted/included (first occurrence when distinct).
+  if not doDistinct:
+    return true
+  if s in seen:
+    return false
+  seen.incl(s)
+  return true
 
 # ----------------------------------------------------------------------
 # IR Plan Execution (with actual filter/sort/projection)
@@ -113,49 +127,71 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
                 newRow[alias] = $filteredRows.len
               else:
                 var count = 0
+                var seen: HashSet[string]
                 for row in filteredRows:
                   let v = evalExpr(expr.aggArgs[0], row, ctx)
-                  if v.kind != vkNull: count += 1
+                  if v.kind != vkNull:
+                    let s = valueToString(v)
+                    if shouldKeepDistinct(seen, s, expr.aggDistinct):
+                      count += 1
                 newRow[alias] = $count
             of irSum:
               var sum = 0.0
+              var seen: HashSet[string]
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                try: sum += parseFloat(valueToString(v)) except CatchableError: discard
+                let s = valueToString(v)
+                if shouldKeepDistinct(seen, s, expr.aggDistinct):
+                  try: sum += parseFloat(s) except CatchableError: discard
               newRow[alias] = $sum
             of irAvg:
               var sum = 0.0
               var count = 0
+              var seen: HashSet[string]
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
-                try: sum += parseFloat(valueToString(v)); count += 1 except CatchableError: discard
+                let s = valueToString(v)
+                if shouldKeepDistinct(seen, s, expr.aggDistinct):
+                  try: sum += parseFloat(s); count += 1 except CatchableError: discard
               newRow[alias] = if count > 0: $(sum / float(count)) else: "0"
             of irMin:
               var minVal = ""
+              var seen: HashSet[string]
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
                 if v.kind == vkNull: continue
-                if minVal == "" or cmpMin(valueToString(v), minVal): minVal = valueToString(v)
+                let s = valueToString(v)
+                if shouldKeepDistinct(seen, s, expr.aggDistinct):
+                  if minVal == "" or cmpMin(s, minVal): minVal = s
               newRow[alias] = minVal
             of irMax:
               var maxVal = ""
+              var seen: HashSet[string]
               for row in filteredRows:
                 let v = evalExpr(expr.aggArgs[0], row, ctx)
                 if v.kind == vkNull: continue
-                if maxVal == "" or cmpMax(valueToString(v), maxVal): maxVal = valueToString(v)
+                let s = valueToString(v)
+                if shouldKeepDistinct(seen, s, expr.aggDistinct):
+                  if maxVal == "" or cmpMax(s, maxVal): maxVal = s
               newRow[alias] = maxVal
             of irArrayAgg:
               var arr: seq[string]
+              var seen: HashSet[string]
               for row in filteredRows:
                 if expr.aggArgs.len > 0:
-                  arr.add(valueToString(evalExpr(expr.aggArgs[0], row, ctx)))
+                  let s = valueToString(evalExpr(expr.aggArgs[0], row, ctx))
+                  if shouldKeepDistinct(seen, s, expr.aggDistinct):
+                    arr.add(s)
               newRow[alias] = "[" & arr.join(", ") & "]"
             of irStringAgg:
               var parts: seq[string]
+              var seen: HashSet[string]
               let delim = if expr.aggArgs.len > 1: evalExpr(expr.aggArgs[1], initTable[string, Value](), ctx) else: Value(kind: vkString, strVal: ",")
               for row in filteredRows:
                 if expr.aggArgs.len > 0:
-                  parts.add(valueToString(evalExpr(expr.aggArgs[0], row, ctx)))
+                  let s = valueToString(evalExpr(expr.aggArgs[0], row, ctx))
+                  if shouldKeepDistinct(seen, s, expr.aggDistinct):
+                    parts.add(s)
               newRow[alias] = parts.join(valueToString(delim))
           else:
             let val = evalExpr(expr, if sourceRows.len > 0: sourceRows[0] else: initTable[string, Value](), ctx)
@@ -292,49 +328,71 @@ proc executePlan*(ctx: ExecutionContext, plan: IRPlan): seq[Row] =
               aggRow[aggKey] = $filteredRows.len
             else:
               var count = 0
+              var seen: HashSet[string]
               for row in filteredRows:
                 let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-                if v.kind != vkNull: count += 1
+                if v.kind != vkNull:
+                  let s = valueToString(v)
+                  if shouldKeepDistinct(seen, s, aggExpr.aggDistinct):
+                    count += 1
               aggRow[aggKey] = $count
           of irSum:
             var sum = 0.0
+            var seen: HashSet[string]
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              try: sum += parseFloat(valueToString(v)) except CatchableError: discard
+              let s = valueToString(v)
+              if shouldKeepDistinct(seen, s, aggExpr.aggDistinct):
+                try: sum += parseFloat(s) except CatchableError: discard
             aggRow[aggKey] = $sum
           of irAvg:
             var sum = 0.0
             var count = 0
+            var seen: HashSet[string]
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
-              try: sum += parseFloat(valueToString(v)); count += 1 except CatchableError: discard
+              let s = valueToString(v)
+              if shouldKeepDistinct(seen, s, aggExpr.aggDistinct):
+                try: sum += parseFloat(s); count += 1 except CatchableError: discard
             aggRow[aggKey] = if count > 0: $(sum / float(count)) else: "0"
           of irMin:
             var minVal = ""
+            var seen: HashSet[string]
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
               if v.kind == vkNull: continue
-              if minVal == "" or cmpMin(valueToString(v), minVal): minVal = valueToString(v)
+              let s = valueToString(v)
+              if shouldKeepDistinct(seen, s, aggExpr.aggDistinct):
+                if minVal == "" or cmpMin(s, minVal): minVal = s
             aggRow[aggKey] = minVal
           of irMax:
             var maxVal = ""
+            var seen: HashSet[string]
             for row in filteredRows:
               let v = evalExpr(aggExpr.aggArgs[0], row, ctx)
               if v.kind == vkNull: continue
-              if maxVal == "" or cmpMax(valueToString(v), maxVal): maxVal = valueToString(v)
+              let s = valueToString(v)
+              if shouldKeepDistinct(seen, s, aggExpr.aggDistinct):
+                if maxVal == "" or cmpMax(s, maxVal): maxVal = s
             aggRow[aggKey] = maxVal
           of irArrayAgg:
             var arr: seq[string]
+            var seen: HashSet[string]
             for row in filteredRows:
               if aggExpr.aggArgs.len > 0:
-                arr.add(valueToString(evalExpr(aggExpr.aggArgs[0], row, ctx)))
+                let s = valueToString(evalExpr(aggExpr.aggArgs[0], row, ctx))
+                if shouldKeepDistinct(seen, s, aggExpr.aggDistinct):
+                  arr.add(s)
             aggRow[aggKey] = "[" & arr.join(", ") & "]"
           of irStringAgg:
             var parts: seq[string]
+            var seen: HashSet[string]
             let delim = if aggExpr.aggArgs.len > 1: evalExpr(aggExpr.aggArgs[1], initTable[string, Value](), ctx) else: Value(kind: vkString, strVal: ",")
             for row in filteredRows:
               if aggExpr.aggArgs.len > 0:
-                parts.add(valueToString(evalExpr(aggExpr.aggArgs[0], row, ctx)))
+                let s = valueToString(evalExpr(aggExpr.aggArgs[0], row, ctx))
+                if shouldKeepDistinct(seen, s, aggExpr.aggDistinct):
+                  parts.add(s)
             aggRow[aggKey] = parts.join(valueToString(delim))
         # Apply HAVING filter
         if plan.groupHaving != nil:
