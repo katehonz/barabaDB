@@ -96,6 +96,41 @@ proc connectWithTimeout(sock: Socket, host: string, port: Port, timeoutMs: int):
     sock.getFd.setBlocking(true)
     return err == 0
 
+type
+  RepOp* = enum
+    ropPut
+    ropDelete
+    ropInvalid
+
+proc encodeRepPayload*(deleted: bool, key: string, value: seq[byte]): seq[byte] =
+  ## Tagged legacy-REP payload. A leading op tag makes put/delete explicit so
+  ## an empty put value (PK-only rows store an empty LSM value) is never
+  ## mistaken for a delete on the receiver:
+  ##   put    -> 'P' & key & "\x00" & value   (value may be empty)
+  ##   delete -> 'D' & key
+  ## Mirrors the raft convention (explicit "put"/"delete" commands).
+  if deleted:
+    cast[seq[byte]]("D" & key)
+  else:
+    cast[seq[byte]]("P" & key & "\x00" & cast[string](value))
+
+proc decodeRepPayload*(data: seq[byte]): tuple[op: RepOp, key: string, value: seq[byte]] =
+  ## Inverse of encodeRepPayload. Returns ropInvalid for empty or untagged
+  ## payloads rather than guessing the operation from the value length.
+  if data.len == 0:
+    return (ropInvalid, "", @[])
+  case char(data[0])
+  of 'P':
+    let body = data[1 ..< data.len]
+    let nullPos = find(body, byte(0))
+    if nullPos < 0:
+      return (ropInvalid, "", @[])
+    return (ropPut, cast[string](body[0 ..< nullPos]), body[nullPos + 1 ..< body.len])
+  of 'D':
+    return (ropDelete, cast[string](data[1 ..< data.len]), @[])
+  else:
+    return (ropInvalid, "", @[])
+
 proc shipToReplica(replica: Replica, lsn: uint64, data: seq[byte]): bool =
   ## Send replication data to a replica via TCP.
   ## Protocol: "REP <lsn> <dataLen>\n<data>"

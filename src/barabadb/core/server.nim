@@ -22,6 +22,7 @@ import ../query/parser
 import ../query/ast
 import ../query/executor
 import ../query/exec/params
+import ../query/exec/dml
 import ../storage/lsm
 import ../storage/gate
 import ../core/mvcc
@@ -165,6 +166,11 @@ proc parseHeader(data: string): (bool, MessageHeader) =
     return (false, MessageHeader())
   let kind = cast[MsgKind](rawKind)
   let length = readUint32BE(data, 4)
+  # Reject oversized messages before any buffer allocation: recvExactWithTimeout
+  # pre-allocates `length` bytes before the auth check, so an unbounded uint32
+  # (up to ~4 GiB) is a pre-auth memory-exhaustion DoS. Cap at the wire max.
+  if length > uint32(MaxWireStringLen):
+    return (false, MessageHeader())
   let requestId = readUint32BE(data, 8)
   return (true, MessageHeader(kind: kind, length: length, requestId: requestId))
 
@@ -413,14 +419,12 @@ proc executeQuery(db: LSMTree, ctx: ExecutionContext, query: string, params: seq
           # the raft path below handles the statement).
           if raftNode == nil and replication != nil and res.keyValuePairs.len > 0:
             for pair in res.keyValuePairs:
-              # Legacy REP wire format: key \x00 value, empty value = delete
-              # on the receiver. Deletes ship an empty value as before.
-              let value = if pair.deleted: @[] else: pair.value
-              var data = newSeq[byte](pair.key.len + 1 + value.len)
-              for i, c in pair.key: data[i] = byte(c)
-              data[pair.key.len] = byte(0)
-              for i, c in value: data[pair.key.len + 1 + i] = c
-              discard replication.writeLsn(data)
+              # Legacy REP wire format: explicit 'P'/'D' op tag (see
+              # encodeRepPayload). The tag — not an empty value — distinguishes
+              # a put from a delete, so PK-only rows (empty value) replicate as
+              # puts instead of vanishing as deletes.
+              discard replication.writeLsn(
+                encodeRepPayload(pair.deleted, pair.key, pair.value))
           qr = QueryResult(affectedRows: res.affectedRows, rowCount: res.rows.len)
           qr.columns = res.columns
 
@@ -655,14 +659,25 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
               if chunk.len == 0: break
               data.add(chunk)
             if data.len > 0:
-              let nullPos = data.find('\0')
-              if nullPos >= 0:
-                let key = data[0..<nullPos]
-                let value = data[nullPos+1..^1]
-                if value.len > 0:
-                  server.db.put(key, stringToBytes(value))
-                else:
-                  server.db.delete(key)
+              # Op tag — not value length — decides put vs delete, so a PK-only
+              # put (empty value) is applied as a put and the row survives.
+              let decoded = decodeRepPayload(cast[seq[byte]](data))
+              case decoded.op
+              of ropPut, ropDelete:
+                # Apply through applyReplicatedPut/Delete (not raw db.put/delete)
+                # so secondary B-tree/FTS/HNSW/graph indexes stay consistent on
+                # the replica — the same path raft uses. server.ctx is the
+                # canonical default ctx whose index structures the per-connection
+                # query clones share. Under the storage gate: those structures
+                # are shared with hunos HTTP workers and are only safe to mutate
+                # under it.
+                withStorageGate:
+                  if decoded.op == ropPut:
+                    applyReplicatedPut(server.ctx, decoded.key, decoded.value)
+                  else:
+                    applyReplicatedDelete(server.ctx, decoded.key)
+              of ropInvalid:
+                discard
           await client.send("ACK " & $lsn & "\n")
         else:
           await client.send("ERR\n")
@@ -670,6 +685,9 @@ proc handleClient(server: Server, client: AsyncSocket, clientId: int) {.async.} 
 
       # Detect shard migration data (starts with "MIGRATE ")
       if headerData.len >= 8 and headerData[0..7] == "MIGRATE ":
+        if not authenticated:
+          await client.send("ERR auth required\n")
+          continue
         var rest = headerData[8..^1]
         while '\n' notin rest:
           let more = await client.recvWithTimeout(1024, idleTimeout)

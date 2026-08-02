@@ -7,6 +7,7 @@ import ../src/barabadb/query/exec/params
 import ../src/barabadb/query/exec/dml
 import ../src/barabadb/core/types
 import ../src/barabadb/core/config
+import ../src/barabadb/core/replication
 import ../src/barabadb/storage/lsm
 
 const testDir = "/tmp/baradb_bugfix_test"
@@ -552,3 +553,75 @@ suite "Raft TLS config":
     check cfg.raftTlsKeyFile == "/tmp/raft.key"
     check cfg.raftTlsCaFile == "/tmp/raft-ca.crt"
     check cfg.raftTlsVerifyPeer == true
+
+
+suite "Legacy REP payload encoding — empty value is not a delete":
+
+  test "PK-only put (empty value) round-trips as a put, not a delete":
+    ## Regression: the legacy REP receiver used to infer a delete from an empty
+    ## value, so PK-only rows (empty LSM value) vanished on the replica.
+    let decoded = decodeRepPayload(encodeRepPayload(false, "pkonly.id=3", @[]))
+    check decoded.op == ropPut
+    check decoded.key == "pkonly.id=3"
+    check decoded.value.len == 0
+
+  test "delete round-trips as a delete":
+    let decoded = decodeRepPayload(encodeRepPayload(true, "users.id=1", @[]))
+    check decoded.op == ropDelete
+    check decoded.key == "users.id=1"
+    check decoded.value.len == 0
+
+  test "put with a non-empty value preserves the value bytes":
+    let decoded = decodeRepPayload(
+      encodeRepPayload(false, "users.id=1", cast[seq[byte]]("bob")))
+    check decoded.op == ropPut
+    check decoded.key == "users.id=1"
+    check cast[string](decoded.value) == "bob"
+
+  test "value containing a null byte survives the round-trip":
+    ## Decode splits on the FIRST null (the key/value separator) only.
+    let value = @[byte('a'), byte(0), byte('b')]
+    let decoded = decodeRepPayload(encodeRepPayload(false, "k", value))
+    check decoded.op == ropPut
+    check decoded.key == "k"
+    check decoded.value == value
+
+  test "empty or untagged payloads decode as invalid, not delete":
+    check decodeRepPayload(@[]).op == ropInvalid
+    check decodeRepPayload(cast[seq[byte]]("Xfoo")).op == ropInvalid
+
+
+suite "Query operator correctness — audit batch 1":
+
+  test "power operator ** evaluates, not lowered to equality":
+    ## Regression: bkPow used to fall through to `else: irOp = irEq`, so
+    ## `2 ** 3` evaluated as `2 = 3` (false) instead of 8.
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'a')"))
+    let r = executeQuery(ctx, parse("SELECT 2 ** 3 AS x FROM users"))
+    check r.success
+    check r.rows.len == 1
+    check parseFloat(valueToString(r.rows[0]["x"])) == 8.0
+
+  test "concat operator ++ concatenates strings":
+    ## Regression: bkConcat also fell through to irEq, so `'a' ++ 'b'`
+    ## evaluated as `'a' = 'b'` (false) instead of "ab".
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'a')"))
+    let r = executeQuery(ctx, parse("SELECT 'a' ++ 'b' AS x FROM users"))
+    check r.success
+    check r.rows.len == 1
+    check valueToString(r.rows[0]["x"]) == "ab"
+
+  test "!= is the complement of = for numerically equal values":
+    ## Regression: irNeq short-circuited on string inequality, so `1 != 1.0`
+    ## was true while `1 = 1.0` was also true (not complements).
+    var ctx = setupCtx()
+    defer: teardown(ctx)
+    discard executeQuery(ctx, parse("INSERT INTO users (id, name) VALUES (1, 'alice')"))
+    let eq = executeQuery(ctx, parse("SELECT * FROM users WHERE id = 1.0"))
+    let neq = executeQuery(ctx, parse("SELECT * FROM users WHERE id != 1.0"))
+    check eq.rows.len == 1   # 1 = 1.0 -> true
+    check neq.rows.len == 0  # 1 != 1.0 -> false (old bug returned the row)

@@ -145,6 +145,28 @@
 
 ---
 
+## Сесия 13: Stabilization & Deep Audit (август 2026)
+
+> **Цел**: Подобряване на надеждността и коректността върху вече завършеното ядро — целеви поправки + системен паралелен одит по слоеве (Storage / Query / Core / Protocol).
+
+### Целеви поправки (завършени)
+
+| # | Поправка | Файлове | Статус |
+|---|----------|---------|--------|
+| 1 | **REP delete-from-empty** — legacy REP payload носи явен put/delete таг (`encodeRepPayload`/`decodeRepPayload`); PK-only редове вече не изчезват при репликация | `core/replication.nim`, `core/server.nim` | ✅ + тестове |
+| 2 | **Snapshot stall (частична mitigation)** — gzip при leader snapshot send се изнася извън event loop-а през worker thread (`gzipFileAsync`); heartbeats текат по време на компресия | `core/backup.nim`, `core/raft.nim`, `baradadb.nim` | ✅ + e2e |
+| 3 | **REP receiver индекси** — receiver-ът минава през `applyReplicatedPut/Delete` под storage gate; вторичните индекси (B-tree/FTS/HNSW/graph) се поддържат на репликата | `core/server.nim` | ✅ + тест |
+
+### Deep Audit (2026-08)
+
+4 паралелни одит-агента по слоеве; ~28 нови находки (без дублиране на 80-те вече оправени в `BUGS.md`/`BUG_AUDIT.md`). Пълен отчет: [`BUG_AUDIT_2026-08.md`](BUG_AUDIT_2026-08.md).
+
+**Батч 1 — поправени (5):** MIGRATE auth bypass (CRITICAL), raft commit strict-majority за even-N (CRITICAL), pre-auth wire-length DoS (HIGH), `**`/`++` lowering към equality (HIGH), `!=` не е отрицание на `=` (HIGH).
+
+**Остават (~23):** вж. `BUG_AUDIT_2026-08.md` — TLS peer verify, semi-sync partial-ack, COUNT(DISTINCT), UNION/INTERSECT/EXCEPT crash, MERGE THEN DELETE, WAL recovery crash, B-tree separator convention, MVCC delete-during-iteration, disttxn SO_ERROR, checkpoint lock leak, flushUnsafe data-loss, compaction empty-key, wal rewriteLive window, OFFSET-без-LIMIT, window агрегати, WebSocket (3), SCRAM (2), mmap overflow.
+
+---
+
 ## Какво остава от старите планове
 
 | Стар план | Статус |
@@ -157,6 +179,7 @@
 | **Този план** — Сесии 10, 11, 12 | ✅ Завършен |
 | Raft C3a/C3b + DDL/forward/compact/metrics (2026-07-30) | ✅ Завършен на `main` — `docs/superpowers/specs/2026-07-30-raft-cluster-status.md` |
 | **Production GA v1.2.0** (single-node) | ✅ `docs/superpowers/plans/2026-07-30-production-ga.md` |
+| **Сесия 13** — Stabilization & Deep Audit (2026-08) | 🔄 В процес — батч 1 завършен (5 поправки); `BUG_AUDIT_2026-08.md` |
 
 ---
 
@@ -170,4 +193,4 @@
 
 ---
 
-*План версия: 2026-05-17*
+*План версия: 2026-08-02*

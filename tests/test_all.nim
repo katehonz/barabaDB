@@ -2895,6 +2895,29 @@ suite "Raft InstallSnapshot Send":
     check node.matchIndex["peer-1"] == 101
     check node.nextIndex["peer-1"] == 102
 
+  test "commit requires strict majority for even-sized clusters":
+    ## Regression: the commit quorum used (N+1) div 2, which for a 4-node
+    ## cluster commits at 2/4 (a minority). Strict majority is N div 2 + 1.
+    var node = newRaftNode("leader", @["p1", "p2", "p3"])
+    node.currentTerm = 5
+    node.state = rsLeader
+    let e = node.appendLog("put", cast[seq[byte]]("k\x00v"))
+    check e.index == 1
+    check e.term == 5
+    node.nextIndex["p1"] = 2
+    node.nextIndex["p2"] = 2
+    node.nextIndex["p3"] = 2
+    # Leader + 1 peer (count=2) is NOT a majority of 4.
+    node.handleAppendReply("p1", RaftMessage(
+      kind: rmkAppendEntriesReply, term: 5, senderId: "p1",
+      success: true, matchIdx: 1))
+    check node.commitIndex == 0
+    # Leader + 2 peers (count=3) IS a strict majority of 4 -> commits.
+    node.handleAppendReply("p2", RaftMessage(
+      kind: rmkAppendEntriesReply, term: 5, senderId: "p2",
+      success: true, matchIdx: 1))
+    check node.commitIndex == 1
+
   test "InstallSnapshotReply success advances match/next index and clears streak":
     var node = newRaftNode("leader", @["peer-1"])
     node.currentTerm = 5
@@ -3021,7 +3044,14 @@ suite "Raft InstallSnapshot Send":
                                       bt: uint64): bool {.gcsafe.} =
         gotBaseIndex = bi
         gotBaseTerm = bt
-        result = readFile(p) == payload
+        # sendSnapshot now gzips the tar off the event loop, so the assembled
+        # archive is gzip-compressed; decompress before comparing the bytes.
+        let raw = p & ".raw"
+        defer:
+          if fileExists(raw): removeFile(raw)
+        if not gunzipFile(p, raw):
+          return false
+        result = readFile(raw) == payload
 
       let netL = newRaftNetwork(leader)
       let netF = newRaftNetwork(follower)
@@ -3049,8 +3079,10 @@ suite "Raft InstallSnapshot Send":
       check follower.lastSnapshotTerm == 4
       check gotBaseIndex == 100
       check gotBaseTerm == 4
-      # Temp archive cleaned up after the transfer
+      # Temp archives (uncompressed tar + compressed .tar.gz) cleaned up after
+      # the transfer
       check not fileExists(tmp / "raft-l" / "snap_out_100.tar.gz")
+      check not fileExists(tmp / "raft-l" / "snap_out_100.tar")
     scenario()
 
   test "sendSnapshot single-flight guard skips a concurrent send":
@@ -3440,6 +3472,43 @@ suite "Raft SQL Write Path":
     check ctx.btrees["t.name"].get("alice").len == 0
     let (found, _) = db.get("t.id=1")
     check not found
+
+  test "REP receiver chain (encode -> decode -> apply) maintains indexes":
+    ## Mirrors server.nim's legacy REP handler: decodeRepPayload decides the op,
+    ## then applyReplicatedPut/Delete keep secondary indexes consistent. Guards
+    ## the wiring the receiver relies on — an indexed put must populate the
+    ## B-tree and a PK-only put (empty value) must apply as a put, not vanish.
+    var testDir = getTempDir() / "baradb_rep_recv_idx_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks
+    createDir(testDir)
+    defer: removeDir(testDir)
+    var db = newLSMTree(testDir)
+    var ctx = qexec.newExecutionContext(db)
+    discard qexec.executeQuery(ctx, parse(
+      "CREATE TABLE t (id INT PRIMARY KEY, name STRING)"))
+    discard qexec.executeQuery(ctx, parse(
+      "CREATE INDEX idx_name ON t (name)"))
+    # Leader ships an indexed put; the receiver decodes and applies it.
+    let put = decodeRepPayload(
+      encodeRepPayload(false, "t.id=1", cast[seq[byte]]("name=alice")))
+    check put.op == ropPut
+    if put.op == ropPut:
+      applyReplicatedPut(ctx, put.key, put.value)
+    check ctx.btrees["t.name"].get("alice").len >= 1
+    # A PK-only put (empty value) must apply as a put, not a delete.
+    let pk = decodeRepPayload(encodeRepPayload(false, "t.id=2", @[]))
+    check pk.op == ropPut
+    if pk.op == ropPut:
+      applyReplicatedPut(ctx, pk.key, pk.value)
+    let (foundPk, _) = db.get("t.id=2")
+    check foundPk
+    # Leader ships a delete; the receiver drops the row and the index entry.
+    let del = decodeRepPayload(encodeRepPayload(true, "t.id=1", @[]))
+    check del.op == ropDelete
+    if del.op == ropDelete:
+      applyReplicatedDelete(ctx, del.key)
+    check ctx.btrees["t.name"].get("alice").len == 0
+    let (foundDel, _) = db.get("t.id=1")
+    check not foundDel
 
   test "applyReplicatedPut updates in-memory graphs":
     var testDir = getTempDir() / "baradb_raft_apply_g_" & $getCurrentProcessId() & "_" & $getMonoTime().ticks

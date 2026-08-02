@@ -13,6 +13,7 @@ import std/os
 import logging
 import ../protocol/wire
 import ../protocol/ssl
+import backup
 
 type
   RaftState* = enum
@@ -95,8 +96,10 @@ type
                            baseTerm: uint64): bool {.gcsafe.}
     snapIncomingId*: uint64
     snapIncomingFile*: string
-    ## Leader InstallSnapshot send. buildSnapshot archives the current data
-    ## dir into destPath (wired in baradadb.nim via backupDataDir).
+    ## Leader InstallSnapshot send. buildSnapshot writes an UNCOMPRESSED tar
+    ## of the data dir to destPath (wired in baradadb.nim via tarDataDir, under
+    ## the storage gate); sendSnapshot then compresses it off the event loop
+    ## (gzipFileAsync) and streams the resulting .tar.gz to the follower.
     ## snapRejectStreak counts consecutive floor-level AppendEntries rejects
     ## per peer; at 2 the peer is queued in snapPending and the network layer
     ## (processMessage) kicks off sendSnapshot. snapSending is the
@@ -646,8 +649,11 @@ proc handleAppendReply*(node: RaftNode, peerId: string, reply: RaftMessage) =
     node.snapRejectStreak.del(peerId)
     node.snapPending.excl(peerId)
 
-    # Update commit index using true majority calculation
-    let majority = (node.peers.len + 1 + 1) div 2  # majority of cluster (peers + leader)
+    # Update commit index using strict majority — the same form as the election
+    # check in handleVoteReply. Cluster size N = peers.len + 1; a strict
+    # majority is N div 2 + 1. The previous (N + 1) div 2 under-counted for
+    # even-sized clusters (e.g. N=4 committed at 2/4, a minority).
+    let majority = (node.peers.len + 1) div 2 + 1  # strict majority of cluster
     var newCommitIdx = node.commitIndex
 
     # Walk logical indices high→low via findLogEntryByIndex (log may be compacted).
@@ -1006,9 +1012,10 @@ proc sendSnapshot*(net: RaftNetwork, peerId: string) {.async.} =
   ## when handleAppendReply queues the peer in snapPending after consecutive
   ## floor-level rejects. Single-flight per peer via node.snapSending.
   ##
-  ## Runs on the raft event loop; buildSnapshot performs blocking disk I/O
-  ## (tar+gzip). Snapshot sends are rare, so we accept the stall rather than
-  ## adding a worker round-trip (same trade-off as restoreSnapshot).
+  ## Runs on the raft event loop. buildSnapshot performs the tar on the loop
+  ## under the storage gate (consistent capture); the CPU-heavy gzip then runs
+  ## on a worker thread via gzipFileAsync, awaited here, so heartbeats and the
+  ## election timer keep firing during compression instead of stalling.
   let node = net.node
   if peerId in node.snapSending:
     return
@@ -1026,13 +1033,23 @@ proc sendSnapshot*(net: RaftNetwork, peerId: string) {.async.} =
 
   let baseIndex = node.lastSnapshotIndex
   let baseTerm = node.lastSnapshotTerm
-  let destPath = node.dataDir / ("snap_out_" & $snapId & ".tar.gz")
+  # buildSnapshot writes an uncompressed tar (under the storage gate, on this
+  # loop); gzipFileAsync then compresses it on a worker thread off the loop.
+  # The follower still receives a normal .tar.gz byte stream.
+  let tarPath = node.dataDir / ("snap_out_" & $snapId & ".tar")
+  let destPath = tarPath & ".gz"
   defer:
+    if fileExists(tarPath):
+      removeFile(tarPath)
     if fileExists(destPath):
       removeFile(destPath)
 
-  if not node.buildSnapshot(destPath):
+  if not node.buildSnapshot(tarPath):
     warn("sendSnapshot: buildSnapshot failed; aborting snapshot send to " & peerId)
+    return
+
+  if not await gzipFileAsync(tarPath, destPath):
+    warn("sendSnapshot: snapshot compression failed; aborting send to " & peerId)
     return
 
   var f: File

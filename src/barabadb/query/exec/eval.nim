@@ -436,11 +436,12 @@ proc evalExprOld*(expr: IRExpr, row: Table[string, string], ctx: ExecutionContex
       except CatchableError: discard
       return "false"
     of irNeq:
-      if left != right: return "true"
-      # Try numeric comparison
+      # Numeric-first so `!=` is the exact complement of `=` (irEq): string
+      # inequality alone would make `5 != 5.0` true while `5 = 5.0` is true.
       try:
         return if parseFloat(left) != parseFloat(right): "true" else: "false"
-      except CatchableError: return "false"
+      except CatchableError:
+        return if left != right: "true" else: "false"
     of irLt:
       try:
         return if parseFloat(left) < parseFloat(right): "true" else: "false"

@@ -2,6 +2,28 @@
 
 All notable changes to BaraDB are documented in this file.
 
+## [Unreleased]
+
+### Security
+
+- **MIGRATE auth bypass (CRITICAL)** — the internal `MIGRATE` text-protocol handler now requires authentication (matching the `REP`/`DISTTXN` handlers); previously an unauthenticated client could inject arbitrary key/value rows (`core/server.nim`)
+- **Pre-auth wire-length DoS (HIGH)** — `parseHeader` rejects messages larger than the 64 MB wire cap before allocating the receive buffer (`core/server.nim`)
+
+### Fixed
+
+- **Raft commit quorum (CRITICAL)** — commit now requires a strict majority (`N div 2 + 1`), matching the election check; the previous `(N+1) div 2` formula committed at a minority for even-sized clusters (`core/raft.nim`)
+- **`**` / `++` operators (HIGH)** — power and concat are no longer lowered to equality: `2 ** 3` → 8, `'a' ++ 'b'` → `'ab'` (`query/exec/lower.nim`)
+- **`!=` semantics (HIGH)** — `!=` is now the exact complement of `=` for numerically-equal values (`5 != 5.0` is false) (`query/exec/eval.nim`)
+- **REP replication put/delete encoding** — the legacy REP payload carries an explicit op tag so PK-only inserts (empty value) replicate as puts instead of vanishing as deletes (`core/replication.nim`, `core/server.nim`)
+- **REP receiver secondary indexes** — the legacy REP receiver applies via `applyReplicatedPut/Delete` under the storage gate, keeping B-tree/FTS/HNSW/graph indexes consistent on the replica (`core/server.nim`)
+- **Snapshot send stall (partial)** — the leader's snapshot send runs gzip off the event loop on a worker thread (`gzipFileAsync`), so heartbeats keep firing during compression; tar (send) and the restore path still run on the loop (`core/backup.nim`, `core/raft.nim`)
+
+### Added
+
+- Deep audit report `BUG_AUDIT_2026-08.md` (~28 findings; 5 fixed in this batch, 23 tracked)
+
+---
+
 ## [1.3.0] — 2026-07-30
 
 ### Raft cluster — Supported (single `default` DB scope)

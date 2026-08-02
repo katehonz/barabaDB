@@ -26,6 +26,8 @@ import std/strutils
 import std/times
 import std/algorithm
 import std/json
+import std/asyncdispatch
+import std/threadpool
 import barabadb/storage/lsm
 
 type
@@ -259,6 +261,80 @@ proc backupDataDir*(dataDir: string, output: string, excludes: seq[string] = @[]
   echo "  Size:     ", formatBytes(size)
   echo "  Source:   ", dataDir
   return true
+
+proc tarDataDir*(dataDir: string, output: string, excludes: seq[string] = @[]): bool =
+  ## Create an UNCOMPRESSED tar of `dataDir` at `output` (no gzip). The raft
+  ## snapshot sender runs this under the storage gate for a consistent file
+  ## capture, then compresses off the event loop via gzipFileAsync.
+  if not dirExists(dataDir):
+    echo "ERROR: Data directory not found: ", dataDir
+    return false
+
+  let parent = parentDir(dataDir)
+  let name = lastPathPart(dataDir)
+  var excludeArgs = ""
+  for pattern in excludes:
+    excludeArgs.add(" --exclude=" & quoteShell(pattern))
+
+  let cmd = "tar -cf " & quoteShell(output) & excludeArgs &
+            " -C " & quoteShell(parent) & " " & quoteShell(name)
+  let (outputStr, exitCode) = execCmdEx(cmd)
+  if exitCode != 0:
+    echo "ERROR: tar command failed with exit code ", exitCode
+    if outputStr.len > 0:
+      echo outputStr
+    return false
+  return true
+
+proc gzipFile*(input: string, output: string,
+               compression: int = DEFAULT_COMPRESSION): bool =
+  ## gzip a single file `input` -> `output`. Pure CPU over an already-captured
+  ## file: no shared storage state, so it is safe to run on a worker thread
+  ## outside the storage gate and off the raft event loop.
+  if not fileExists(input):
+    echo "ERROR: File not found: ", input
+    return false
+
+  let cmd = "gzip -" & $compression & " -c " & quoteShell(input) &
+            " > " & quoteShell(output)
+  let (outputStr, exitCode) = execCmdEx("bash -c " & quoteShell(cmd))
+  if exitCode != 0:
+    echo "ERROR: gzip command failed with exit code ", exitCode
+    if outputStr.len > 0:
+      echo outputStr
+    return false
+  return true
+
+proc gunzipFile*(input: string, output: string): bool =
+  ## Decompress a gzip file `input` -> `output`. Inverse of gzipFile.
+  if not fileExists(input):
+    echo "ERROR: File not found: ", input
+    return false
+
+  let cmd = "gzip -dc " & quoteShell(input) & " > " & quoteShell(output)
+  let (outputStr, exitCode) = execCmdEx("bash -c " & quoteShell(cmd))
+  if exitCode != 0:
+    echo "ERROR: gunzip command failed with exit code ", exitCode
+    if outputStr.len > 0:
+      echo outputStr
+    return false
+  return true
+
+proc gzipFileWorker(input: string, output: string, compression: int): bool {.gcsafe.} =
+  ## Thread entry point: touches only its own (copied) string args + execCmdEx,
+  ## so it is safe to run off the main/event-loop thread under ARC/ORC.
+  gzipFile(input, output, compression)
+
+proc gzipFileAsync*(input: string, output: string,
+                    compression: int = DEFAULT_COMPRESSION): Future[bool] {.async.} =
+  ## Run gzipFile on a threadpool worker and await completion WITHOUT blocking
+  ## the calling async event loop — heartbeats/election timers keep firing
+  ## during the CPU-heavy compression. Polls the FlowVar via sleepAsync so the
+  ## dispatcher stays responsive instead of stalling on a blocking join.
+  var fv = spawn gzipFileWorker(input, output, compression)
+  while not fv.isReady:
+    await sleepAsync(20)
+  result = ^fv
 
 proc restoreDataDir*(input: string, dataDir: string, verbose: bool = false, dryRun: bool = false): bool =
   ## Restore from a tar.gz backup.

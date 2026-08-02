@@ -439,19 +439,20 @@ proc main() =
             echo "[raft] Snapshot restore failed: ", e.msg
             result = false
 
-    # Leader InstallSnapshot send: archive the default DB's data directory
-    # into the path raft picks (dataDir/raft/snap_out_<snapId>.tar.gz). Like
-    # restoreSnapshot this runs on the raft event loop and blocks on disk I/O
-    # (tar+gzip); snapshot sends are rare, so we accept the stall.
+    # Leader InstallSnapshot send: tar the default DB's data directory into the
+    # path raft picks (dataDir/raft/snap_out_<snapId>.tar). The tar runs here on
+    # the raft event loop under the storage gate; sendSnapshot then gzips it on
+    # a worker thread off the loop (gzipFileAsync) so heartbeats keep flowing.
     raftNode.buildSnapshot = proc(destPath: string): bool {.gcsafe.} =
-      echo "[raft] Building snapshot archive ", destPath
+      echo "[raft] Building snapshot tar ", destPath
       {.cast(gcsafe).}:
         # Hold the storage gate while tarring the data dir so a concurrent
         # memtable flush (HTTP /query path) cannot write an SSTable
-        # mid-archive.
+        # mid-archive. Compression happens later, off the gate (see
+        # sendSnapshot), so it neither stalls the loop nor blocks applies.
         withStorageGate:
           try:
-            result = backupDataDir(defaultDbDir, destPath)
+            result = tarDataDir(defaultDbDir, destPath)
           except CatchableError as e:
             echo "[raft] Snapshot build failed: ", e.msg
             result = false
